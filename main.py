@@ -17,6 +17,8 @@ import gc
 import sys
 import matplotlib
 matplotlib.use('Agg')  # 使用非交互式后端
+from torch_geometric.data import HeteroData
+from torch_geometric.transforms import ToUndirected
 
 # 忽略警告
 warnings.filterwarnings('ignore')
@@ -33,6 +35,12 @@ if torch.cuda.is_available():
 
 # 导入随机种子设置函数
 from utils import set_seed
+
+from src.data_processing import PowerGridDataProcessor
+from src.gat import create_hetero_graph_encoder
+from src.rl.agent import DQNAgent, ActorCriticAgent
+from src.rl.env import PowerGridEnv
+from src.rl.replay_buffer import ReplayBuffer
 
 def main(training_mode='quick'):
     """
@@ -66,8 +74,9 @@ def main(training_mode='quick'):
         print("1️⃣ 数据处理阶段")
         print("="*50)
         
-        from data_processing import initialize_data_processor
-        processor, data = initialize_data_processor()
+        processor = PowerGridDataProcessor()
+        data = processor.graph_from_mpc(mpc)
+        data = ToUndirected()(data)
         
         # 清理内存
         gc.collect()
@@ -79,8 +88,21 @@ def main(training_mode='quick'):
         print("2️⃣ 神经网络编码器")
         print("="*50)
         
-        from models import initialize_gat_encoder
-        encoder, embeddings = initialize_gat_encoder(data, device)
+        encoder = create_hetero_graph_encoder(
+            data,
+            hidden_channels=64,
+            gnn_layers=3,
+            heads=4,
+            output_dim=128
+        ).to(device)
+        
+        # 为了演示，我们可以进行一次前向传播
+        with torch.no_grad():
+            embeddings = encoder.encode_nodes(data.to(device))
+
+        print(f"✅ GAT Encoder initialized successfully.")
+        for node_type, emb in embeddings.items():
+            print(f"   - {node_type} embedding shape: {emb.shape}")
         
         # 清理内存
         gc.collect()
