@@ -118,12 +118,12 @@ def test_data_processing():
 
 
 def test_gat_encoder(hetero_data):
-    """Test GAT encoder"""
-    print("🧠 Testing GAT Encoder...")
-    
+    """Test GAT encoder with enhanced embeddings"""
+    print("🧠 Testing GAT Encoder with Enhanced Embeddings...")
+
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     hetero_data = hetero_data.to(device)
-    
+
     # Create encoder
     encoder = create_hetero_graph_encoder(
         hetero_data,
@@ -132,39 +132,42 @@ def test_gat_encoder(hetero_data):
         heads=4,
         output_dim=64
     ).to(device)
-    
-    # Test encoding
+
+    # Test encoding with attention weights
     with torch.no_grad():
-        node_embeddings = encoder.encode_nodes(hetero_data)
-        
+        node_embeddings, attention_weights = encoder.encode_nodes_with_attention(hetero_data)
+
     # Validate embeddings
     assert isinstance(node_embeddings, dict), "Node embeddings should be a dictionary"
-    
+    assert isinstance(attention_weights, dict), "Attention weights should be a dictionary"
+
     total_nodes = 0
     for node_type, embeddings in node_embeddings.items():
         assert embeddings.shape[1] == 64, f"Wrong embedding dimension for {node_type}"
         total_nodes += embeddings.shape[0]
-        
+
     print(f"✅ GAT encoder successful!")
     print(f"   Total nodes encoded: {total_nodes}")
-    print(f"   Embedding dimension: {64}")
-    
-    return node_embeddings
+    print(f"   Original embedding dimension: {64}")
+    print(f"   Attention weights extracted: {len(attention_weights)} edge types")
+
+    return node_embeddings, attention_weights
 
 
-def test_rl_environment(hetero_data, node_embeddings):
-    """Test RL environment"""
-    print("🌍 Testing RL Environment...")
-    
+def test_rl_environment(hetero_data, node_embeddings, attention_weights):
+    """Test RL environment with enhanced embeddings"""
+    print("🌍 Testing RL Environment with Enhanced Embeddings...")
+
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    
-    # Create environment
+
+    # Create environment with enhanced embeddings
     env = PowerGridPartitioningEnv(
         hetero_data=hetero_data,
         node_embeddings=node_embeddings,
         num_partitions=3,
         max_steps=50,
-        device=device
+        device=device,
+        attention_weights=attention_weights
     )
     
     # Test reset
@@ -196,14 +199,14 @@ def test_rl_environment(hetero_data, node_embeddings):
 
 
 def test_ppo_agent(env, node_embeddings):
-    """Test PPO agent"""
-    print("🤖 Testing PPO Agent...")
-    
+    """Test PPO agent with enhanced embeddings"""
+    print("🤖 Testing PPO Agent with Enhanced Embeddings...")
+
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    
-    # Get embedding dimensions
-    sample_embedding = list(node_embeddings.values())[0]
-    node_embedding_dim = sample_embedding.shape[1]
+
+    # Get enhanced embedding dimensions from the environment
+    # The state manager stores concatenated embeddings, so we get the dimension from there
+    node_embedding_dim = env.state_manager.embedding_dim
     region_embedding_dim = node_embedding_dim * 2  # Mean + max pooling
     
     # Create agent
@@ -322,11 +325,11 @@ def run_integration_tests():
         # Test data processing
         hetero_data = test_data_processing()
         
-        # Test GAT encoder
-        node_embeddings = test_gat_encoder(hetero_data)
-        
-        # Test RL environment
-        env = test_rl_environment(hetero_data, node_embeddings)
+        # Test GAT encoder with enhanced embeddings
+        node_embeddings, attention_weights = test_gat_encoder(hetero_data)
+
+        # Test RL environment with enhanced embeddings
+        env = test_rl_environment(hetero_data, node_embeddings, attention_weights)
         
         # Test PPO agent
         agent = test_ppo_agent(env, node_embeddings)

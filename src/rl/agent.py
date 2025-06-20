@@ -74,11 +74,12 @@ class ActorNetwork(nn.Module):
         )
         
         # Global state encoder for context
+        # Output dimension should match region_embedding_dim for concatenation
         self.global_encoder = nn.Sequential(
             nn.Linear(region_embedding_dim, hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim, hidden_dim // 2)
+            nn.Linear(hidden_dim, region_embedding_dim)
         )
         
     def forward(self, 

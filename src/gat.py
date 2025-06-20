@@ -350,6 +350,16 @@ class HeteroGraphEncoder(nn.Module):
         便捷方法：仅提取节点嵌入
         """
         return self.forward(data, return_attention_weights=False, return_graph_embedding=False)
+
+    def encode_nodes_with_attention(self, data: HeteroData) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
+        """
+        便捷方法：提取节点嵌入和注意力权重
+
+        返回:
+            node_embeddings: 节点嵌入字典
+            attention_weights: 注意力权重字典
+        """
+        return self.forward(data, return_attention_weights=True, return_graph_embedding=False)
     
     def encode_graph(self, data: HeteroData) -> torch.Tensor:
         """
@@ -358,29 +368,137 @@ class HeteroGraphEncoder(nn.Module):
         _, graph_embedding = self.forward(data, return_attention_weights=False, return_graph_embedding=True)
         return graph_embedding
     
-    def get_attention_weights(self) -> List[torch.Tensor]:
+    def get_attention_weights(self) -> Dict[str, torch.Tensor]:
         """
-        获取注意力权重用于可视化分析
-        
+        获取注意力权重用于增强嵌入生成
+
+        返回:
+            attention_weights: 按边类型组织的注意力权重字典
+                格式: {edge_type_key: attention_tensor}
+                其中 edge_type_key = f"{src_type}__{relation}__{dst_type}"
+        """
+        attention_weights = {}
+
+        print("🔍 开始收集注意力权重...")
+
+        def collect_attention_weights_with_names(module, prefix=""):
+            """递归收集注意力权重并记录对应的边类型"""
+            # 检查当前模块是否是PhysicsGATv2Conv
+            if isinstance(module, PhysicsGATv2Conv):
+                if hasattr(module, '_alpha') and module._alpha is not None:
+                    print(f"  📍 发现PhysicsGATv2Conv模块: {prefix}")
+                    print(f"     注意力权重形状: {module._alpha.shape}")
+
+                    # 从模块名称推断边类型
+                    edge_type_key = self._extract_edge_type_from_module_name(prefix)
+                    if edge_type_key:
+                        attention_weights[edge_type_key] = module._alpha
+                        print(f"     ✅ 映射到边类型: {edge_type_key}")
+                    else:
+                        print(f"     ⚠️ 无法映射边类型，模块名: {prefix}")
+                        # 使用模块名作为备用键
+                        fallback_key = f"module_{prefix.replace('.', '_')}"
+                        attention_weights[fallback_key] = module._alpha
+                        print(f"     🔄 使用备用键: {fallback_key}")
+                else:
+                    print(f"  📍 发现PhysicsGATv2Conv模块但无注意力权重: {prefix}")
+
+            # 递归检查子模块
+            for name, child in module.named_children():
+                new_prefix = f"{prefix}.{name}" if prefix else name
+                collect_attention_weights_with_names(child, new_prefix)
+
+        # 从hetero_encoder开始递归搜索
+        if hasattr(self, 'hetero_encoder'):
+            collect_attention_weights_with_names(self.hetero_encoder)
+
+        print(f"🎯 收集到 {len(attention_weights)} 个注意力权重:")
+        for key, tensor in attention_weights.items():
+            print(f"   - {key}: {tensor.shape}")
+
+        return attention_weights
+
+    def _extract_edge_type_from_module_name(self, module_name: str) -> Optional[str]:
+        """
+        从模块名称中提取边类型信息
+
+        to_hetero转换后的模块名称格式通常为:
+        convs.{layer_idx}.{edge_type_encoded}
+
+        参数:
+            module_name: 模块的完整名称路径
+
+        返回:
+            edge_type_key: 格式化的边类型键，如 "bus_pv__connects_line__bus_slack"
+        """
+        print(f"    🔍 尝试从模块名提取边类型: {module_name}")
+
+        # 解析模块名称以提取边类型信息
+        # to_hetero会将边类型编码到模块名中
+
+        # 方法1: 尝试从已知的边类型中匹配
+        for edge_type in self.edge_types:
+            src_type, relation, dst_type = edge_type
+            edge_type_key = f"{src_type}__{relation}__{dst_type}"
+
+            # 检查模块名称是否包含边类型信息
+            if (src_type in module_name and dst_type in module_name and
+                relation in module_name):
+                print(f"    ✅ 匹配到边类型: {edge_type_key}")
+                return edge_type_key
+
+        # 方法2: 尝试解析to_hetero的编码格式
+        # to_hetero通常使用数字索引来编码边类型
+        import re
+
+        # 查找类似 "convs.0.1" 的模式，其中最后的数字可能是边类型索引
+        pattern = r'convs\.(\d+)\.(\d+)'
+        match = re.search(pattern, module_name)
+
+        if match:
+            layer_idx = int(match.group(1))
+            edge_type_idx = int(match.group(2))
+
+            # 尝试根据索引映射到边类型
+            if edge_type_idx < len(self.edge_types):
+                edge_type = self.edge_types[edge_type_idx]
+                src_type, relation, dst_type = edge_type
+                edge_type_key = f"{src_type}__{relation}__{dst_type}"
+                print(f"    ✅ 通过索引匹配到边类型: {edge_type_key} (索引: {edge_type_idx})")
+                return edge_type_key
+
+        # 方法3: 如果无法匹配，返回通用键
+        if "conv" in module_name:
+            fallback_key = f"unknown_edge_type_{module_name.replace('.', '_')}"
+            print(f"    ⚠️ 使用备用键: {fallback_key}")
+            return fallback_key
+
+        print(f"    ❌ 无法提取边类型")
+        return None
+
+    def get_attention_weights_legacy(self) -> List[torch.Tensor]:
+        """
+        获取注意力权重用于可视化分析（旧版本接口）
+
         注意：to_hetero转换后，模型结构会发生变化，需要递归搜索所有模块
         """
         attention_weights = []
-        
+
         def collect_attention_weights(module):
             """递归收集注意力权重"""
             # 检查当前模块是否是PhysicsGATv2Conv
             if isinstance(module, PhysicsGATv2Conv):
                 if hasattr(module, '_alpha') and module._alpha is not None:
                     attention_weights.append(module._alpha)
-            
+
             # 递归检查子模块
             for child in module.children():
                 collect_attention_weights(child)
-        
+
         # 从hetero_encoder开始递归搜索
         if hasattr(self, 'hetero_encoder'):
             collect_attention_weights(self.hetero_encoder)
-        
+
         return attention_weights
 
     def get_embedding_dim(self) -> int:

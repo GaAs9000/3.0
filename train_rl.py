@@ -222,8 +222,8 @@ def main():
         
         print(f"✅ Data loaded: {hetero_data}")
         
-        # 2. Create GAT encoder and get embeddings
-        print("\n🧠 Creating GAT encoder and computing embeddings...")
+        # 2. Create GAT encoder and get enhanced embeddings
+        print("\n🧠 Creating GAT encoder and computing enhanced embeddings...")
         encoder = create_hetero_graph_encoder(
             hetero_data,
             hidden_channels=config['gat']['hidden_channels'],
@@ -231,31 +231,37 @@ def main():
             heads=config['gat']['heads'],
             output_dim=config['gat']['output_dim']
         ).to(device)
-        
+
         with torch.no_grad():
-            node_embeddings = encoder.encode_nodes(hetero_data)
-            
+            # Step 2: Generate Enhanced Static Node Feature Embedding (H')
+            node_embeddings, attention_weights = encoder.encode_nodes_with_attention(hetero_data)
+
         total_nodes = sum(emb.shape[0] for emb in node_embeddings.values())
-        print(f"✅ Embeddings computed for {total_nodes} nodes")
+        print(f"✅ Original embeddings computed for {total_nodes} nodes")
+        print(f"✅ Attention weights extracted for {len(attention_weights)} edge types")
         
-        # 3. Create RL environment
-        print("\n🌍 Creating RL environment...")
+        # 3. Create RL environment with enhanced embeddings
+        print("\n🌍 Creating RL environment with enhanced embeddings...")
         env = PowerGridPartitioningEnv(
             hetero_data=hetero_data,
             node_embeddings=node_embeddings,
             num_partitions=config['environment']['num_partitions'],
             reward_weights=config['environment']['reward_weights'],
             max_steps=config['environment']['max_steps'],
-            device=device
+            device=device,
+            attention_weights=attention_weights
         )
         
         print(f"✅ Environment created: {env.total_nodes} nodes, {env.num_partitions} partitions")
         
-        # 4. Create PPO agent
-        print("\n🤖 Creating PPO agent...")
-        sample_embedding = list(node_embeddings.values())[0]
-        node_embedding_dim = sample_embedding.shape[1]
+        # 4. Create PPO agent with enhanced embedding dimensions
+        print("\n🤖 Creating PPO agent with enhanced embeddings...")
+        # Get enhanced embedding dimension (original + attention feature)
+        node_embedding_dim = env.state_manager.embedding_dim
         region_embedding_dim = node_embedding_dim * 2
+
+        print(f"   Enhanced node embedding dimension: {node_embedding_dim}")
+        print(f"   Region embedding dimension: {region_embedding_dim}")
         
         agent = PPOAgent(
             node_embedding_dim=node_embedding_dim,
