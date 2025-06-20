@@ -3,9 +3,10 @@ import matplotlib.patches as mpatches
 import numpy as np
 import networkx as nx
 from matplotlib.patches import Patch
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Any
 import pandas as pd
 import seaborn as sns
+from pathlib import Path
 try:
         import plotly.graph_objects as go
         from plotly.subplots import make_subplots
@@ -18,38 +19,88 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
         from env import PowerGridPartitionEnv
 
-def get_color_palette(num_colors: int) -> List[str]:
+class VisualizationManager:
     """
-    动态生成颜色方案
+    可视化管理器 - 统一管理所有可视化功能
+    支持配置文件驱动的可视化参数设置
+    """
     
-    参数:
-        num_colors: 需要的颜色数量
+    def __init__(self, config: Dict[str, Any]):
+        """
+        初始化可视化管理器
         
-    返回:
-        颜色列表 (HEX格式)
-    """
-    # 使用Seaborn的husl色板，适合类别区分
-    palette = sns.color_palette("husl", num_colors)
-    # 转换为matplotlib和plotly都兼容的HEX格式
-    return [f'#{int(r*255):02x}{int(g*255):02x}{int(b*255):02x}' for r, g, b in palette]
-
-def visualize_partition(env: 'PowerGridPartitionEnv', title: str = "Power Grid Partition",
-                           save_path: Optional[str] = None, show_metrics: bool = True):
+        Args:
+            config: 完整的配置字典
+        """
+        self.config = config
+        self.viz_config = config.get('visualization', {})
+        self.enabled = self.viz_config.get('enabled', True)
+        self.save_figures = self.viz_config.get('save_figures', True)
+        self.figures_dir = Path(self.viz_config.get('figures_dir', 'figures'))
+        
+        # 创建图片目录
+        if self.save_figures:
+            self.figures_dir.mkdir(parents=True, exist_ok=True)
+            
+        # 设置matplotlib参数
+        self._setup_matplotlib()
+        
+    def _setup_matplotlib(self):
+        """设置matplotlib全局参数"""
+        figure_settings = self.viz_config.get('figure_settings', {})
+        plt.rcParams['figure.dpi'] = figure_settings.get('dpi', 300)
+        plt.rcParams['savefig.bbox'] = figure_settings.get('bbox_inches', 'tight')
+        plt.rcParams['savefig.format'] = figure_settings.get('format', 'png')
+        
+    def get_color_palette(self, num_colors: int) -> List[str]:
+        """
+        动态生成颜色方案
+        
+        Args:
+            num_colors: 需要的颜色数量
+            
+        Returns:
+            颜色列表 (HEX格式)
+        """
+        colors_config = self.viz_config.get('colors', {})
+        palette_type = colors_config.get('palette_type', 'husl')
+        
+        # 使用配置的颜色方案
+        palette = sns.color_palette(palette_type, num_colors)
+        return [f'#{int(r*255):02x}{int(g*255):02x}{int(b*255):02x}' for r, g, b in palette]
+        
+    def visualize_partition(self, env: 'PowerGridPartitionEnv', 
+                          title: str = "Power Grid Partition",
+                          save_path: Optional[str] = None) -> None:
         """
         可视化电网分区结果
         """
+        if not self.enabled:
+            return
+            
         try:
             import gc
+            
+            # 获取分区可视化配置
+            partition_config = self.viz_config.get('partition_plot', {})
+            figsize = partition_config.get('figsize', [16, 10])
+            show_metrics = partition_config.get('show_metrics', True)
+            node_size_scale = partition_config.get('node_size_scale', 500)
+            edge_alpha = partition_config.get('edge_alpha', 0.2)
+            coupling_edge_width = partition_config.get('coupling_edge_width', 2)
+            coupling_edge_alpha = partition_config.get('coupling_edge_alpha', 0.6)
+            font_size = partition_config.get('font_size', 8)
+            
             # 创建图形
             if show_metrics:
-                fig = plt.figure(figsize=(16, 10))
+                fig = plt.figure(figsize=figsize)
                 gs = fig.add_gridspec(2, 3, width_ratios=[2, 1, 1], height_ratios=[3, 1])
                 ax_main = fig.add_subplot(gs[:, 0])
                 ax_metrics = fig.add_subplot(gs[0, 1])
                 ax_load = fig.add_subplot(gs[0, 2])
                 ax_coupling = fig.add_subplot(gs[1, 1:])
             else:
-                fig, ax_main = plt.subplots(figsize=(12, 10))
+                fig, ax_main = plt.subplots(figsize=figsize)
             
             # 创建NetworkX图
             G = nx.Graph()
@@ -71,14 +122,15 @@ def visualize_partition(env: 'PowerGridPartitionEnv', title: str = "Power Grid P
             pos = nx.spring_layout(G, k=3, iterations=50, seed=42)
             
             # 颜色方案
-            colors = ['#E0E0E0'] + get_color_palette(env.K)
+            unassigned_color = self.viz_config.get('colors', {}).get('unassigned_color', '#E0E0E0')
+            colors = [unassigned_color] + self.get_color_palette(env.K)
             
             # 节点颜色和大小
             node_colors = [colors[env.z[i].item()] for i in range(env.N)]
-            node_sizes = [300 + env.Pd[i].item() * 500 for i in range(env.N)]
+            node_sizes = [300 + env.Pd[i].item() * node_size_scale for i in range(env.N)]
             
             # 绘制边
-            nx.draw_networkx_edges(G, pos, alpha=0.2, ax=ax_main)
+            nx.draw_networkx_edges(G, pos, alpha=edge_alpha, ax=ax_main)
             
             # 高亮跨区域边
             inter_edges = []
@@ -87,14 +139,14 @@ def visualize_partition(env: 'PowerGridPartitionEnv', title: str = "Power Grid P
                     inter_edges.append((u, v))
             
             nx.draw_networkx_edges(G, pos, edgelist=inter_edges, edge_color='red',
-                                  width=2, alpha=0.6, ax=ax_main)
+                                  width=coupling_edge_width, alpha=coupling_edge_alpha, ax=ax_main)
             
             # 绘制节点
             nx.draw_networkx_nodes(G, pos, node_color=node_colors, node_size=node_sizes,
                                   alpha=0.9, ax=ax_main)
             
             # 节点标签
-            nx.draw_networkx_labels(G, pos, font_size=8, font_weight='bold', ax=ax_main)
+            nx.draw_networkx_labels(G, pos, font_size=font_size, font_weight='bold', ax=ax_main)
             
             # 添加图例
             legend_elements = []
@@ -113,80 +165,89 @@ def visualize_partition(env: 'PowerGridPartitionEnv', title: str = "Power Grid P
             if show_metrics:
                 # 显示指标
                 metrics = env.current_metrics
-            
-            # 指标表格
-            ax_metrics.axis('off')
-            ax_metrics.set_title('Partition Metrics', fontsize=14, fontweight='bold')
-            
-            metric_data = [
-                ['Load CV', f'{metrics.load_cv:.4f}'],
-                ['Load Gini', f'{metrics.load_gini:.4f}'],
-                ['Total Coupling', f'{metrics.total_coupling:.4f}'],
-                ['Inter-region Lines', f'{metrics.inter_region_lines}'],
-                ['Connectivity', f'{metrics.connectivity:.2f}'],
-                ['Modularity', f'{metrics.modularity:.4f}']
-            ]
-            
-            table = ax_metrics.table(cellText=metric_data, loc='center',
-                                    cellLoc='left', colWidths=[0.6, 0.4])
-            table.auto_set_font_size(False)
-            table.set_fontsize(10)
-            table.scale(1, 1.5)
-            
-            # 负荷分布图
-            ax_load.set_title('Load Distribution', fontsize=12)
-            region_loads = []
-            region_labels = []
-            
-            for k in range(1, env.K + 1):
-                mask = (env.z == k)
-                if mask.any():
-                    load = env.Pd[mask].sum().item()
-                    gen = env.Pg[mask].sum().item()
-                    region_loads.append([load, gen])
-                    region_labels.append(f'R{k}')
-            
-            if region_loads:
-                region_loads = np.array(region_loads)
-                x = np.arange(len(region_labels))
-                width = 0.35
                 
-                bars1 = ax_load.bar(x - width/2, region_loads[:, 0], width,
-                                   label='Load', color='lightcoral')
-                bars2 = ax_load.bar(x + width/2, region_loads[:, 1], width,
-                                   label='Generation', color='lightgreen')
+                # 指标表格
+                ax_metrics.axis('off')
+                ax_metrics.set_title('Partition Metrics', fontsize=14, fontweight='bold')
                 
-                ax_load.set_ylabel('Power (p.u.)')
-                ax_load.set_xticks(x)
-                ax_load.set_xticklabels(region_labels)
-                ax_load.legend()
+                metric_data = [
+                    ['Load CV', f'{metrics.load_cv:.4f}'],
+                    ['Load Gini', f'{metrics.load_gini:.4f}'],
+                    ['Total Coupling', f'{metrics.total_coupling:.4f}'],
+                    ['Inter-region Lines', f'{metrics.inter_region_lines}'],
+                    ['Connectivity', f'{metrics.connectivity:.2f}'],
+                    ['Modularity', f'{metrics.modularity:.4f}']
+                ]
                 
-                # 添加数值标签
-                for bars in [bars1, bars2]:
-                    for bar in bars:
-                        height = bar.get_height()
-                        ax_load.text(bar.get_x() + bar.get_width()/2., height,
-                                    f'{height:.2f}', ha='center', va='bottom', fontsize=8)
+                table = ax_metrics.table(cellText=metric_data, loc='center',
+                                        cellLoc='left', colWidths=[0.6, 0.4])
+                table.auto_set_font_size(False)
+                table.set_fontsize(10)
+                table.scale(1, 1.5)
+                
+                # 负荷分布图
+                ax_load.set_title('Load Distribution', fontsize=12)
+                region_loads = []
+                region_labels = []
+                
+                for k in range(1, env.K + 1):
+                    mask = (env.z == k)
+                    if mask.any():
+                        load = env.Pd[mask].sum().item()
+                        gen = env.Pg[mask].sum().item()
+                        region_loads.append([load, gen])
+                        region_labels.append(f'R{k}')
+                
+                if region_loads:
+                    region_loads = np.array(region_loads)
+                    x = np.arange(len(region_labels))
+                    width = 0.35
+                    
+                    bars1 = ax_load.bar(x - width/2, region_loads[:, 0], width,
+                                       label='Load', color='lightcoral')
+                    bars2 = ax_load.bar(x + width/2, region_loads[:, 1], width,
+                                       label='Generation', color='lightgreen')
+                    
+                    ax_load.set_ylabel('Power (p.u.)')
+                    ax_load.set_xticks(x)
+                    ax_load.set_xticklabels(region_labels)
+                    ax_load.legend()
+                    
+                    # 添加数值标签
+                    for bars in [bars1, bars2]:
+                        for bar in bars:
+                            height = bar.get_height()
+                            ax_load.text(bar.get_x() + bar.get_width()/2., height,
+                                        f'{height:.2f}', ha='center', va='bottom', fontsize=8)
+                
+                # 耦合矩阵热图
+                ax_coupling.set_title('Region Coupling Matrix', fontsize=12)
+                coupling_matrix = np.zeros((env.K, env.K))
+                
+                for i in range(edge_array.shape[1]):
+                    u, v = edge_array[0, i], edge_array[1, i]
+                    if env.z[u] > 0 and env.z[v] > 0 and env.z[u] != env.z[v]:
+                        coupling_matrix[env.z[u]-1, env.z[v]-1] += env.admittance[i].item()
+                
+                heatmap_config = self.viz_config.get('heatmap', {})
+                colorscale = heatmap_config.get('colorscale', 'YlOrRd')
+                text_font_size = heatmap_config.get('text_font_size', 10)
+                
+                sns.heatmap(coupling_matrix, annot=True, fmt='.3f', cmap=colorscale,
+                           xticklabels=[f'R{i+1}' for i in range(env.K)],
+                           yticklabels=[f'R{i+1}' for i in range(env.K)],
+                           ax=ax_coupling, cbar_kws={'label': 'Coupling Strength'})
             
-            # 耦合矩阵热图
-            ax_coupling.set_title('Region Coupling Matrix', fontsize=12)
-            coupling_matrix = np.zeros((env.K, env.K))
-            
-            for i in range(edge_array.shape[1]):
-                u, v = edge_array[0, i], edge_array[1, i]
-                if env.z[u] > 0 and env.z[v] > 0 and env.z[u] != env.z[v]:
-                    coupling_matrix[env.z[u]-1, env.z[v]-1] += env.admittance[i].item()
-            
-            sns.heatmap(coupling_matrix, annot=True, fmt='.3f', cmap='YlOrRd',
-                       xticklabels=[f'R{i+1}' for i in range(env.K)],
-                       yticklabels=[f'R{i+1}' for i in range(env.K)],
-                       ax=ax_coupling, cbar_kws={'label': 'Coupling Strength'})
-        
             plt.tight_layout()
             
-            if save_path:
-                plt.savefig(save_path, dpi=300, bbox_inches='tight')
-                print(f"💾 Figure saved to {save_path}")
+            # 保存图片
+            if self.save_figures:
+                if save_path is None:
+                    save_path = self.figures_dir / 'partition_result.png'
+                else:
+                    save_path = self.figures_dir / save_path
+                plt.savefig(save_path)
+                print(f"💾 分区图已保存到: {save_path}")
             
             plt.show()
             
@@ -194,20 +255,28 @@ def visualize_partition(env: 'PowerGridPartitionEnv', title: str = "Power Grid P
             gc.collect()
             
         except Exception as e:
-            print(f"⚠️ 可视化出错: {e}")
-            # 尝试清理任何已创建的图形
+            print(f"⚠️ 分区可视化出错: {e}")
             try:
                 plt.close('all')
                 gc.collect()
             except:
                 pass
 
-
-def plot_training_curves(history: Dict[str, List[float]], env_N: int = None, save_path: Optional[str] = None):
+    def plot_training_curves(self, history: Dict[str, List[float]], 
+                           env_N: int = None, save_path: Optional[str] = None) -> None:
         """
         绘制训练曲线
         """
-        fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+        if not self.enabled:
+            return
+            
+        # 获取训练曲线配置
+        curves_config = self.viz_config.get('training_curves', {})
+        figsize = curves_config.get('figsize', [12, 10])
+        moving_average_window = curves_config.get('moving_average_window', 20)
+        grid_alpha = curves_config.get('grid_alpha', 0.3)
+        
+        fig, axes = plt.subplots(2, 2, figsize=figsize)
         
         # 1. 奖励曲线
         ax = axes[0, 0]
@@ -216,7 +285,7 @@ def plot_training_curves(history: Dict[str, List[float]], env_N: int = None, sav
         
         # 移动平均
         if len(history['episode_rewards']) > 10:
-            window = min(20, len(history['episode_rewards']) // 5)
+            window = min(moving_average_window, len(history['episode_rewards']) // 5)
             moving_avg = pd.Series(history['episode_rewards']).rolling(window).mean()
             ax.plot(episodes, moving_avg, 'r-', linewidth=2, label=f'MA({window})')
         
@@ -224,24 +293,26 @@ def plot_training_curves(history: Dict[str, List[float]], env_N: int = None, sav
         ax.set_ylabel('Total Reward')
         ax.set_title('Training Rewards')
         ax.legend()
-        ax.grid(True, alpha=0.3)
+        ax.grid(True, alpha=grid_alpha)
         
         # 2. Load CV曲线
         ax = axes[0, 1]
-        ax.plot(episodes, history['load_cv'], 'g-', alpha=0.8)
+        if 'load_cv' in history:
+            ax.plot(episodes, history['load_cv'], 'g-', alpha=0.8)
+            ax.set_ylim(0, max(history['load_cv']) * 1.1 if history['load_cv'] else 1)
         ax.set_xlabel('Episode')
         ax.set_ylabel('Load CV')
         ax.set_title('Load Balance (CV)')
-        ax.grid(True, alpha=0.3)
-        ax.set_ylim(0, max(history['load_cv']) * 1.1)
+        ax.grid(True, alpha=grid_alpha)
         
         # 3. 耦合度曲线
         ax = axes[1, 0]
-        ax.plot(episodes, history['total_coupling'], 'b-', alpha=0.8)
+        if 'coupling_edges' in history:
+            ax.plot(episodes, history['coupling_edges'], 'b-', alpha=0.8)
         ax.set_xlabel('Episode')
-        ax.set_ylabel('Total Coupling')
+        ax.set_ylabel('Coupling Edges')
         ax.set_title('Inter-region Coupling')
-        ax.grid(True, alpha=0.3)
+        ax.grid(True, alpha=grid_alpha)
         
         # 4. Episode长度
         ax = axes[1, 1]
@@ -249,7 +320,7 @@ def plot_training_curves(history: Dict[str, List[float]], env_N: int = None, sav
         ax.set_xlabel('Episode')
         ax.set_ylabel('Steps')
         ax.set_title('Episode Length')
-        ax.grid(True, alpha=0.3)
+        ax.grid(True, alpha=grid_alpha)
         
         # 添加完成线（如果提供了env_N）
         if env_N is not None:
@@ -259,28 +330,30 @@ def plot_training_curves(history: Dict[str, List[float]], env_N: int = None, sav
         fig.suptitle('Training Process Analysis', fontsize=16, fontweight='bold')
         plt.tight_layout(rect=[0, 0.03, 1, 0.95])
         
-        if save_path:
-            plt.savefig(save_path, dpi=300)
+        # 保存图片
+        if self.save_figures:
+            if save_path is None:
+                save_path = self.figures_dir / 'training_curves.png'
+            else:
+                save_path = self.figures_dir / save_path
+            plt.savefig(save_path)
             print(f"🖼️ 训练曲线图已保存到: {save_path}")
         plt.close()
 
-
-def run_basic_visualization(env, history):
-    """可视化基础结果"""
-    print("\n📈 生成基础可视化图表...")
-    
-    # 可视化最终分区
-    visualize_partition(env, "Final Partition Result (RL)", "figures/rl_partition_result.png")
-    
-    # 绘制训练曲线
-    plot_training_curves(history, env_N=env.N, save_path="figures/training_curves.png")
-
-def create_interactive_visualization(env: 'PowerGridPartitionEnv', 
-                                   comparison_df: pd.DataFrame) -> go.Figure:
+    def create_interactive_visualization(self, env: 'PowerGridPartitionEnv', 
+                                       comparison_df: pd.DataFrame) -> Optional[go.Figure]:
         """
         创建交互式可视化（使用Plotly）
         """
-        import torch  # 添加缺失的torch导入
+        interactive_config = self.viz_config.get('interactive', {})
+        if not interactive_config.get('enabled', True) or not PLOTLY_AVAILABLE:
+            print("⚠️ 交互式可视化未启用或Plotly不可用")
+            return None
+            
+        import torch
+        
+        template = interactive_config.get('template', 'plotly_white')
+        height = interactive_config.get('height', 800)
         
         # 创建子图
         fig = make_subplots(
@@ -328,7 +401,7 @@ def create_interactive_visualization(env: 'PowerGridPartitionEnv',
         )
         
         # 绘制节点
-        colors = ['#E0E0E0'] + get_color_palette(env.K)
+        colors = ['#E0E0E0'] + self.get_color_palette(env.K)
         
         for k in range(env.K + 1):
             mask = (env.z == k)
@@ -375,7 +448,7 @@ def create_interactive_visualization(env: 'PowerGridPartitionEnv',
                 region_data['Generation'].append(env.Pg[mask].sum().item())
         
         # 动态生成颜色
-        bar_colors = get_color_palette(env.K)
+        bar_colors = self.get_color_palette(env.K)
         
         fig.add_trace(go.Bar(
             x=[f'R{i+1}' for i in range(env.K)],
@@ -459,27 +532,89 @@ def create_interactive_visualization(env: 'PowerGridPartitionEnv',
             title_text="Power Grid Partition Analysis Dashboard",
             title_font_size=20,
             showlegend=True,
-            height=800,
-            template='plotly_white'
+            height=height,
+            template=template
         )
         
         # 更新子图标题
         fig.update_xaxes(showgrid=False, row=1, col=1)
         fig.update_yaxes(showgrid=False, row=1, col=1)
         
+        # 保存HTML文件
+        if interactive_config.get('save_html', True) and self.save_figures:
+            html_path = self.figures_dir / 'interactive_partition_analysis.html'
+            fig.write_html(str(html_path))
+            print(f"🌐 交互式图表已保存到: {html_path}")
+        
         return fig
 
+    def run_basic_visualization(self, env, history):
+        """运行基础可视化"""
+        if not self.enabled:
+            return
+            
+        print("\n📈 生成基础可视化图表...")
+        
+        # 可视化最终分区
+        self.visualize_partition(env, "Final Partition Result (RL)", "rl_partition_result.png")
+        
+        # 绘制训练曲线
+        self.plot_training_curves(history, env_N=env.N, save_path="training_curves.png")
+
+    def run_interactive_visualization(self, env, comparison_df):
+        """运行交互式可视化"""
+        interactive_config = self.viz_config.get('interactive', {})
+        if not interactive_config.get('enabled', True):
+            return
+            
+        if not PLOTLY_AVAILABLE:
+            print("⚠️ Plotly未安装，跳过交互式可视化。")
+            return
+            
+        print("📊 生成交互式对比图表...")
+        fig = self.create_interactive_visualization(env, comparison_df)
+        
+        if fig is not None:
+            print(f"🌐 交互式图表创建成功")
+
+
+# 向后兼容的函数接口
+def get_color_palette(num_colors: int) -> List[str]:
+    """向后兼容的颜色生成函数"""
+    palette = sns.color_palette("husl", num_colors)
+    return [f'#{int(r*255):02x}{int(g*255):02x}{int(b*255):02x}' for r, g, b in palette]
+
+def visualize_partition(env: 'PowerGridPartitionEnv', title: str = "Power Grid Partition",
+                       save_path: Optional[str] = None, show_metrics: bool = True):
+    """向后兼容的分区可视化函数"""
+    # 使用默认配置
+    default_config = {'visualization': {'enabled': True, 'save_figures': True}}
+    viz_manager = VisualizationManager(default_config)
+    viz_manager.visualize_partition(env, title, save_path)
+
+def plot_training_curves(history: Dict[str, List[float]], env_N: int = None, save_path: Optional[str] = None):
+    """向后兼容的训练曲线函数"""
+    # 使用默认配置
+    default_config = {'visualization': {'enabled': True, 'save_figures': True}}
+    viz_manager = VisualizationManager(default_config)
+    viz_manager.plot_training_curves(history, env_N, save_path)
+
+def run_basic_visualization(env, history):
+    """向后兼容的基础可视化函数"""
+    default_config = {'visualization': {'enabled': True, 'save_figures': True}}
+    viz_manager = VisualizationManager(default_config)
+    viz_manager.run_basic_visualization(env, history)
+
+def create_interactive_visualization(env: 'PowerGridPartitionEnv', 
+                                   comparison_df: pd.DataFrame) -> go.Figure:
+    """向后兼容的交互式可视化函数"""
+    default_config = {'visualization': {'enabled': True, 'save_figures': True}}
+    viz_manager = VisualizationManager(default_config)
+    return viz_manager.create_interactive_visualization(env, comparison_df)
 
 def run_interactive_visualization(env, comparison_df):
-    """创建并保存交互式可视化图表"""
-    if not PLOTLY_AVAILABLE:
-        print("⚠️ Plotly未安装，跳过交互式可视化。")
-        return
-        
-    print("📊 生成交互式对比图表...")
-    fig = create_interactive_visualization(env, comparison_df)
-    
-    # 保存为HTML文件
-    fig.write_html("figures/interactive_partition_analysis.html")
-    print(f"🌐 交互式图表已保存到: figures/interactive_partition_analysis.html")
+    """向后兼容的交互式可视化函数"""
+    default_config = {'visualization': {'enabled': True, 'save_figures': True}}
+    viz_manager = VisualizationManager(default_config)
+    viz_manager.run_interactive_visualization(env, comparison_df)
 

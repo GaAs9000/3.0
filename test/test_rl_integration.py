@@ -25,7 +25,7 @@ from src.data_processing import PowerGridDataProcessor
 from src.gat import create_hetero_graph_encoder
 from src.rl.environment import PowerGridPartitioningEnv
 from src.rl.agent import PPOAgent
-from src.rl.training import Trainer
+from training import Trainer
 
 # Suppress warnings for cleaner output
 warnings.filterwarnings('ignore')

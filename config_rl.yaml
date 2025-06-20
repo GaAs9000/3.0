@@ -1,73 +1,177 @@
 # Power Grid Partitioning RL Configuration
-# This file contains all hyperparameters and settings for training
+# 电力网络分区强化学习完整配置文件
+# 包含训练、可视化、评估等所有可配置参数
 
-# Data configuration
+# 数据配置
 data:
-  case_name: ieee14  # Power grid case name or path to MATPOWER file
-  normalize: true    # Whether to normalize features
-  cache_dir: cache   # Directory for caching processed data
+  case_name: ieee14  # 电网案例名称或MATPOWER文件路径
+  normalize: true    # 是否标准化特征
+  cache_dir: cache   # 缓存目录
 
-# Environment configuration
+# 环境配置
 environment:
-  num_partitions: 3  # Number of target partitions
-  max_steps: 200     # Maximum steps per episode
-  reward_weights:    # Weights for reward components
-    balance: 1.0           # Partition load balance weight
-    decoupling: 1.0        # Electrical decoupling weight
-    internal_balance: 1.0  # Internal power balance weight
+  num_partitions: 3  # 目标分区数量
+  max_steps: 200     # 每回合最大步数
+  reward_weights:    # 奖励组件权重
+    load_balance: 0.4        # 负载平衡权重
+    electrical_decoupling: 0.4  # 电气解耦权重
+    power_balance: 0.2       # 功率平衡权重
 
-# GAT encoder configuration
+# GAT编码器配置
 gat:
-  hidden_channels: 64  # Hidden layer dimension
-  gnn_layers: 3        # Number of GNN layers
-  heads: 4             # Number of attention heads
-  output_dim: 128      # Output embedding dimension
-  dropout: 0.1         # Dropout probability
+  hidden_channels: 64  # 隐藏层维度
+  gnn_layers: 3        # GNN层数
+  heads: 4             # 注意力头数
+  output_dim: 128      # 输出嵌入维度
+  dropout: 0.1         # Dropout概率
 
-# PPO agent configuration
+# PPO智能体配置
 agent:
-  lr_actor: 3.0e-4     # Actor learning rate
-  lr_critic: 1.0e-3    # Critic learning rate
-  gamma: 0.99          # Discount factor
-  eps_clip: 0.2        # PPO clipping parameter
-  k_epochs: 4          # Number of PPO epochs per update
-  entropy_coef: 0.01   # Entropy coefficient
-  value_coef: 0.5      # Value loss coefficient
+  lr_actor: 3.0e-4     # 演员学习率
+  lr_critic: 1.0e-3    # 评论家学习率
+  gamma: 0.99          # 折扣因子
+  eps_clip: 0.2        # PPO裁剪参数
+  k_epochs: 4          # 每次更新的PPO轮数
+  entropy_coef: 0.01   # 熵系数
+  value_coef: 0.5      # 价值损失系数
+  hidden_dim: 256      # 网络隐藏层维度
+  dropout: 0.1         # 网络dropout概率
 
-# Training configuration
+# 训练配置
 training:
-  num_episodes: 1000           # Total number of training episodes
-  max_steps_per_episode: 200   # Maximum steps per episode
-  update_interval: 10          # Episodes between agent updates
-  save_interval: 100           # Episodes between checkpoints
-  eval_interval: 50            # Episodes between evaluations
-  log_dir: logs               # Directory for logs
-  checkpoint_dir: checkpoints  # Directory for model checkpoints
-  use_tensorboard: true        # Whether to use TensorBoard logging
+  num_episodes: 1000           # 总训练回合数
+  max_steps_per_episode: 200   # 每回合最大步数
+  update_interval: 10          # 智能体更新间隔（回合数）
+  save_interval: 100           # 检查点保存间隔（回合数）
+  eval_interval: 50            # 评估间隔（回合数）
+  log_dir: logs               # 日志目录
+  checkpoint_dir: checkpoints  # 模型检查点目录
+  use_tensorboard: true        # 是否使用TensorBoard日志
+  
+  # 成功判定标准
+  success_criteria:
+    load_cv_threshold: 0.3      # 负载变异系数阈值
+    connectivity_threshold: 0.9  # 连通性阈值
+    min_length_threshold: 10     # 最小回合长度
+  
+  # 收敛检测
+  convergence:
+    window_size: 10      # 收敛检测窗口大小
+    threshold: 0.01      # 收敛阈值
+  
+  # 梯度裁剪
+  gradient_clipping:
+    max_norm: 0.5        # 梯度裁剪最大范数
 
-# System configuration
+# 评估配置
+evaluation:
+  num_episodes: 20       # 评估回合数
+  metrics_to_track:      # 要跟踪的指标
+    - episode_reward
+    - episode_length
+    - load_cv
+    - coupling_edges
+    - connectivity
+    - success_rate
+
+# 日志配置
+logging:
+  metrics_save_interval: 50    # 指标保存间隔
+  plot_save_interval: 100      # 图表保存间隔
+  tensorboard_log_interval: 1  # TensorBoard日志间隔
+  console_log_interval: 10     # 控制台日志间隔
+  
+  # 要记录的训练指标
+  training_metrics:
+    - episode_rewards
+    - episode_lengths
+    - success_rates
+    - load_cv
+    - coupling_edges
+    - actor_losses
+    - critic_losses
+    - entropies
+
+# 可视化配置
+visualization:
+  # 基础可视化设置
+  enabled: true
+  save_figures: true
+  figures_dir: figures
+  
+  # 图表设置
+  figure_settings:
+    dpi: 300
+    format: png
+    bbox_inches: tight
+    
+  # 训练曲线设置
+  training_curves:
+    figsize: [12, 10]
+    moving_average_window: 20
+    grid_alpha: 0.3
+    
+  # 分区可视化设置
+  partition_plot:
+    figsize: [16, 10]
+    node_size_scale: 500
+    edge_alpha: 0.2
+    coupling_edge_width: 2
+    coupling_edge_alpha: 0.6
+    font_size: 8
+    show_metrics: true
+    
+  # 交互式可视化设置
+  interactive:
+    enabled: true
+    plotly_available: true
+    save_html: true
+    template: plotly_white
+    height: 800
+    
+  # 颜色设置
+  colors:
+    palette_type: husl  # seaborn颜色方案
+    unassigned_color: "#E0E0E0"
+    
+  # 热图设置
+  heatmap:
+    colorscale: YlOrRd
+    text_font_size: 10
+
+# 系统配置
 system:
-  device: auto      # Device to use ('cpu', 'cuda', or 'auto')
-  seed: 42          # Random seed for reproducibility
-  num_threads: 1    # Number of CPU threads
+  device: auto      # 设备选择 ('cpu', 'cuda', 或 'auto')
+  seed: 42          # 随机种子
+  num_threads: 1    # CPU线程数
+  warnings: ignore  # 警告处理方式
 
-# Advanced configurations for different scenarios
+# 不同场景的预设配置
 
-# Quick training (for testing)
+# 快速训练（用于测试）
 quick_training:
-  num_episodes: 100
-  max_steps_per_episode: 50
-  update_interval: 5
-  save_interval: 25
+  training:
+    num_episodes: 100
+    max_steps_per_episode: 50
+    update_interval: 5
+    save_interval: 25
+    eval_interval: 20
+  logging:
+    console_log_interval: 5
+    metrics_save_interval: 20
 
-# Full training (for production)
+# 完整训练（用于生产）
 full_training:
-  num_episodes: 2000
-  max_steps_per_episode: 500
-  update_interval: 20
-  save_interval: 100
+  training:
+    num_episodes: 2000
+    max_steps_per_episode: 500
+    update_interval: 20
+    save_interval: 100
+    eval_interval: 50
+  evaluation:
+    num_episodes: 50
 
-# Large system configuration
+# 大规模系统配置
 large_system:
   gat:
     hidden_channels: 128
@@ -77,16 +181,20 @@ large_system:
   agent:
     lr_actor: 1.0e-4
     lr_critic: 5.0e-4
+    hidden_dim: 512
   environment:
     max_steps: 500
+  training:
+    max_steps_per_episode: 500
 
-# Curriculum learning configuration
+# 课程学习配置
 curriculum:
-  start_partitions: 2      # Start with fewer partitions
-  end_partitions: 5        # End with more partitions
-  episodes_per_stage: 200  # Episodes per curriculum stage
+  enabled: false
+  start_partitions: 2      # 起始分区数
+  end_partitions: 5        # 结束分区数
+  episodes_per_stage: 200  # 每阶段回合数
   
-# Hyperparameter search ranges (for optimization)
+# 超参数搜索范围（用于优化）
 hyperparameter_ranges:
   agent:
     lr_actor: [1.0e-5, 1.0e-3]
@@ -94,6 +202,7 @@ hyperparameter_ranges:
     gamma: [0.95, 0.999]
     eps_clip: [0.1, 0.3]
     entropy_coef: [0.001, 0.1]
+    hidden_dim: [128, 512]
   
   gat:
     hidden_channels: [32, 128]
@@ -103,6 +212,13 @@ hyperparameter_ranges:
     
   environment:
     reward_weights:
-      balance: [0.5, 2.0]
-      decoupling: [0.5, 2.0]
-      internal_balance: [0.5, 2.0]
+      load_balance: [0.2, 0.6]
+      electrical_decoupling: [0.2, 0.6]
+      power_balance: [0.1, 0.4]
+
+# 调试配置
+debug:
+  enabled: false
+  verbose_logging: false
+  save_intermediate_results: false
+  profile_training: false

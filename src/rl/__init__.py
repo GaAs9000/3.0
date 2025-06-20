@@ -11,7 +11,7 @@ from .reward import RewardFunction
 from .state import StateManager
 from .utils import MetisInitializer, PartitionEvaluator
 from .agent import PPOAgent, ActorNetwork, CriticNetwork
-from .training import Trainer, TrainingLogger, CheckpointManager
+from ..training import Trainer, TrainingLogger, CheckpointManager
 
 __all__ = [
     'PowerGridPartitioningEnv',
