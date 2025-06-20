@@ -1,0 +1,108 @@
+# Power Grid Partitioning RL Configuration
+# This file contains all hyperparameters and settings for training
+
+# Data configuration
+data:
+  case_name: ieee14  # Power grid case name or path to MATPOWER file
+  normalize: true    # Whether to normalize features
+  cache_dir: cache   # Directory for caching processed data
+
+# Environment configuration
+environment:
+  num_partitions: 3  # Number of target partitions
+  max_steps: 200     # Maximum steps per episode
+  reward_weights:    # Weights for reward components
+    balance: 1.0           # Partition load balance weight
+    decoupling: 1.0        # Electrical decoupling weight
+    internal_balance: 1.0  # Internal power balance weight
+
+# GAT encoder configuration
+gat:
+  hidden_channels: 64  # Hidden layer dimension
+  gnn_layers: 3        # Number of GNN layers
+  heads: 4             # Number of attention heads
+  output_dim: 128      # Output embedding dimension
+  dropout: 0.1         # Dropout probability
+
+# PPO agent configuration
+agent:
+  lr_actor: 3.0e-4     # Actor learning rate
+  lr_critic: 1.0e-3    # Critic learning rate
+  gamma: 0.99          # Discount factor
+  eps_clip: 0.2        # PPO clipping parameter
+  k_epochs: 4          # Number of PPO epochs per update
+  entropy_coef: 0.01   # Entropy coefficient
+  value_coef: 0.5      # Value loss coefficient
+
+# Training configuration
+training:
+  num_episodes: 1000           # Total number of training episodes
+  max_steps_per_episode: 200   # Maximum steps per episode
+  update_interval: 10          # Episodes between agent updates
+  save_interval: 100           # Episodes between checkpoints
+  eval_interval: 50            # Episodes between evaluations
+  log_dir: logs               # Directory for logs
+  checkpoint_dir: checkpoints  # Directory for model checkpoints
+  use_tensorboard: true        # Whether to use TensorBoard logging
+
+# System configuration
+system:
+  device: auto      # Device to use ('cpu', 'cuda', or 'auto')
+  seed: 42          # Random seed for reproducibility
+  num_threads: 1    # Number of CPU threads
+
+# Advanced configurations for different scenarios
+
+# Quick training (for testing)
+quick_training:
+  num_episodes: 100
+  max_steps_per_episode: 50
+  update_interval: 5
+  save_interval: 25
+
+# Full training (for production)
+full_training:
+  num_episodes: 2000
+  max_steps_per_episode: 500
+  update_interval: 20
+  save_interval: 100
+
+# Large system configuration
+large_system:
+  gat:
+    hidden_channels: 128
+    gnn_layers: 4
+    heads: 8
+    output_dim: 256
+  agent:
+    lr_actor: 1.0e-4
+    lr_critic: 5.0e-4
+  environment:
+    max_steps: 500
+
+# Curriculum learning configuration
+curriculum:
+  start_partitions: 2      # Start with fewer partitions
+  end_partitions: 5        # End with more partitions
+  episodes_per_stage: 200  # Episodes per curriculum stage
+  
+# Hyperparameter search ranges (for optimization)
+hyperparameter_ranges:
+  agent:
+    lr_actor: [1.0e-5, 1.0e-3]
+    lr_critic: [1.0e-4, 1.0e-2]
+    gamma: [0.95, 0.999]
+    eps_clip: [0.1, 0.3]
+    entropy_coef: [0.001, 0.1]
+  
+  gat:
+    hidden_channels: [32, 128]
+    gnn_layers: [2, 5]
+    heads: [2, 8]
+    dropout: [0.0, 0.3]
+    
+  environment:
+    reward_weights:
+      balance: [0.5, 2.0]
+      decoupling: [0.5, 2.0]
+      internal_balance: [0.5, 2.0]
