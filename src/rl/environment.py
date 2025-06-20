@@ -33,7 +33,7 @@ class PowerGridPartitioningEnv:
             reward_weights: 奖励组件权重
             max_steps: 每个回合的最大步数
             device: 用于计算的Torch设备
-            attention_weights: 可选的GAT编码器注意力权重，用于增强嵌入
+            attention_weights: GAT编码器注意力权重，用于增强嵌入
         """
         self.device = device or torch.device('cpu')
         self.hetero_data = hetero_data.to(self.device)
@@ -103,7 +103,7 @@ class PowerGridPartitioningEnv:
         """
         生成增强的静态节点特征嵌入 H'
 
-        实现步骤2：将边级注意力权重聚合为节点特征，然后与原始嵌入连接
+        将边级注意力权重聚合为节点特征，然后与原始嵌入连接
 
         参数:
             node_embeddings: 原始节点嵌入 H
@@ -163,65 +163,34 @@ class PowerGridPartitioningEnv:
             node_attention_accumulator[node_type] = torch.zeros(num_nodes, device=self.device)
             node_degree_counter[node_type] = torch.zeros(num_nodes, device=self.device)
 
-        # 遍历所有边类型和对应的注意力权重
+        # 处理每种边类型
         for edge_type, edge_index in self.hetero_data.edge_index_dict.items():
             src_type, relation, dst_type = edge_type
-
-            # 获取该边类型的注意力权重
-            edge_type_key = f"{src_type}__{relation}__{dst_type}"
-
-            # 尝试多种键格式来查找注意力权重
-            found_weights = None
-            used_key = None
-
-            # 1. 尝试标准格式
-            if edge_type_key in attention_weights:
-                found_weights = attention_weights[edge_type_key]
-                used_key = edge_type_key
-            else:
-                # 2. 尝试查找包含相关信息的键
-                for key, weights in attention_weights.items():
-                    if (src_type in key and dst_type in key and relation in key) or \
-                       ("unknown_edge_type" in key):
-                        found_weights = weights
-                        used_key = key
-                        break
-
-            if found_weights is None:
-                print(f"    ⚠️ 未找到边类型 {edge_type_key} 的注意力权重")
-                print(f"       可用的注意力权重键: {list(attention_weights.keys())}")
+            
+            # 使用改进的键匹配，找不到时返回None
+            attn_weights = self._get_attention_weights_for_edge_type(
+                edge_type, attention_weights, edge_type_to_key_mapping
+            )
+            
+            # 如果找不到权重，则跳过此边类型
+            if attn_weights is None:
                 continue
+            
+            # 处理维度和多头注意力（维度不匹配时返回None）
+            processed_weights = self._process_attention_weights(
+                attn_weights, edge_index, edge_type
+            )
+            
+            # 如果权重处理失败（如维度不匹配），则跳过此边类型
+            if processed_weights is None:
+                continue
+            
+            # 高效的节点聚合
+            dst_nodes = edge_index[1]
+            node_attention_accumulator[dst_type].index_add_(0, dst_nodes, processed_weights)
+            node_degree_counter[dst_type].index_add_(0, dst_nodes, torch.ones_like(processed_weights))
 
-            attn_weights = found_weights.to(self.device)
-            print(f"    🔍 使用注意力权重键: {used_key}")
-
-            # 确保注意力权重维度正确
-            if attn_weights.dim() > 1:
-                # 如果是多头注意力，取平均
-                attn_weights = attn_weights.mean(dim=-1)
-
-            # 获取目标节点索引（用于聚合incoming attention）
-            dst_nodes = edge_index[1]  # 目标节点（本地索引）
-
-            # 确保注意力权重数量与边数量匹配
-            num_edges = dst_nodes.shape[0]
-            if attn_weights.shape[0] != num_edges:
-                print(f"    ⚠️ 注意力权重维度不匹配: {attn_weights.shape[0]} vs {num_edges} 条边")
-                # 如果维度不匹配，尝试处理
-                if attn_weights.shape[0] > num_edges:
-                    # 如果权重数量多于边数量，截取前面的部分
-                    attn_weights = attn_weights[:num_edges]
-                    print(f"    🔧 截取前 {num_edges} 个权重")
-                else:
-                    # 如果权重数量少于边数量，使用均匀权重
-                    attn_weights = torch.ones(num_edges, device=self.device) / num_edges
-                    print(f"    🔧 使用均匀权重")
-
-            # 将注意力权重累积到目标节点（incoming attention）
-            node_attention_accumulator[dst_type].index_add_(0, dst_nodes, attn_weights)
-            node_degree_counter[dst_type].index_add_(0, dst_nodes, torch.ones_like(attn_weights))
-
-            print(f"    📊 {edge_type}: {len(attn_weights)} 条边的注意力权重已聚合")
+            print(f"    �� {edge_type}: {len(processed_weights)} 条边的注意力权重已聚合")
 
         # 计算平均注意力分数（避免除零）
         node_attention_scores = {}
@@ -240,6 +209,79 @@ class PowerGridPartitioningEnv:
             print(f"    ✅ {node_type}: 平均注意力分数计算完成 {node_attention_scores[node_type].shape}")
 
         return node_attention_scores
+
+    def _get_attention_weights_for_edge_type(self,
+                                            edge_type: tuple,
+                                            attention_weights: Dict[str, torch.Tensor],
+                                            edge_type_to_key_mapping: Dict[str, str]) -> Optional[torch.Tensor]:
+        """
+        获取特定边类型的注意力权重
+
+        参数:
+            edge_type: 边类型 (src_type, relation, dst_type)
+            attention_weights: 边级注意力权重字典
+            edge_type_to_key_mapping: 边类型到注意力权重键的映射
+
+        返回:
+            找到的注意力权重，如果找不到则返回None
+        """
+        # 构建边类型到注意力权重键的映射
+        edge_type_key = f"{edge_type[0]}__{edge_type[1]}__{edge_type[2]}"
+        edge_type_to_key_mapping[edge_type_key] = edge_type_key
+
+        # 尝试多种键格式来查找注意力权重
+        found_weights = None
+        used_key = None
+
+        # 1. 尝试标准格式
+        if edge_type_key in attention_weights:
+            found_weights = attention_weights[edge_type_key]
+            used_key = edge_type_key
+        else:
+            # 2. 尝试查找包含相关信息的键
+            for key, weights in attention_weights.items():
+                if (edge_type[0] in key and edge_type[2] in key and edge_type[1] in key) or \
+                   ("unknown_edge_type" in key):
+                    found_weights = weights
+                    used_key = key
+                    break
+
+        if found_weights is None:
+            print(f"    ⚠️ 未找到边类型 {edge_type_key} 的注意力权重")
+            print(f"       可用的注意力权重键: {list(attention_weights.keys())}")
+            return None
+
+        attn_weights = found_weights.to(self.device)
+        print(f"    🔍 边类型 {edge_type} 使用注意力权重键: {used_key}")
+        return attn_weights
+
+    def _process_attention_weights(self, 
+                                 attn_weights: torch.Tensor,
+                                 edge_index: torch.Tensor,
+                                 edge_type: tuple) -> Optional[torch.Tensor]:
+        """
+        处理注意力权重的维度和多头注意力。
+        如果维度不匹配，则返回 None，表示忽略此权重。
+        """
+        num_edges = edge_index.shape[1]
+        
+        # 处理多头注意力
+        if attn_weights.dim() > 1:
+            if attn_weights.shape[-1] > 1:  # 多头注意力
+                attn_weights = attn_weights.mean(dim=-1)
+            else:
+                attn_weights = attn_weights.squeeze(-1)
+        
+        # 维度验证
+        if attn_weights.shape[0] != num_edges:
+            print(
+                f"    ⚠️ 注意力权重维度不匹配 - 边类型: {edge_type}, "
+                f"权重数量: {attn_weights.shape[0]}, 边数量: {num_edges}."
+            )
+            print(f"    🔧 将忽略此边类型的注意力权重。")
+            return None
+        
+        return attn_weights
 
     def reset(self, seed: Optional[int] = None) -> Tuple[Dict[str, torch.Tensor], Dict[str, Any]]:
         """
@@ -510,3 +552,18 @@ class PowerGridPartitioningEnv:
             'is_terminated': self.is_terminated,
             'is_truncated': self.is_truncated
         }
+
+    def clear_cache(self):
+        """清理缓存数据"""
+        # 清理缓存数据
+        if hasattr(self, 'edge_info'):
+            del self.edge_info
+        if hasattr(self, 'global_node_mapping'):
+            del self.global_node_mapping
+            
+        # 清理组件引用
+        self.state_manager = None
+        self.action_space = None
+        self.reward_function = None
+        self.metis_initializer = None
+        self.evaluator = None

@@ -1,11 +1,11 @@
 """
-Training Infrastructure for Power Grid Partitioning RL
+电力网络分区强化学习的训练基础设施
 
-This module provides comprehensive training infrastructure including:
-- Training loops with experience collection
-- Model checkpointing and resuming
-- Logging and monitoring
-- Curriculum learning support
+本模块提供全面的训练基础设施，包括：
+- 带有经验收集的训练循环
+- 模型检查点和恢复
+- 日志记录和监控
+- 课程学习支持
 """
 
 import torch
@@ -30,16 +30,16 @@ from .environment import PowerGridPartitioningEnv
 
 class TrainingLogger:
     """
-    Comprehensive logging for training process
+    训练过程的综合日志记录
     """
     
     def __init__(self, log_dir: str, use_tensorboard: bool = True):
         """
-        Initialize Training Logger
+        初始化训练日志记录器
         
         Args:
-            log_dir: Directory for logs
-            use_tensorboard: Whether to use TensorBoard logging
+            log_dir: 日志目录
+            use_tensorboard: 是否使用TensorBoard日志记录
         """
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
@@ -49,7 +49,7 @@ class TrainingLogger:
         if use_tensorboard and TENSORBOARD_AVAILABLE:
             self.writer = SummaryWriter(str(self.log_dir / 'tensorboard'))
             
-        # Training metrics
+        # 训练指标
         self.metrics = {
             'episode_rewards': [],
             'episode_lengths': [],
@@ -61,48 +61,48 @@ class TrainingLogger:
             'entropies': []
         }
         
-        # Best model tracking
+        # 最佳模型跟踪
         self.best_reward = float('-inf')
         self.best_episode = 0
         
     def log_episode(self, episode: int, episode_data: Dict[str, Any]):
-        """Log episode data"""
-        # Store metrics with key mapping
+        """记录回合数据"""
+        # 存储带有键映射的指标
         key_mapping = {
             'episode_reward': 'episode_rewards',
             'episode_length': 'episode_lengths'
         }
 
         for key, value in episode_data.items():
-            # Use mapped key if available, otherwise use original key
+            # 如果可用使用映射键，否则使用原始键
             target_key = key_mapping.get(key, key)
             if target_key in self.metrics:
                 self.metrics[target_key].append(value)
                 
-        # TensorBoard logging
+        # TensorBoard日志记录
         if self.writer:
             for key, value in episode_data.items():
                 if isinstance(value, (int, float)):
                     self.writer.add_scalar(f'Episode/{key}', value, episode)
                     
-        # Update best model
+        # 更新最佳模型
         if 'episode_reward' in episode_data:
             if episode_data['episode_reward'] > self.best_reward:
                 self.best_reward = episode_data['episode_reward']
                 self.best_episode = episode
                 
     def log_training_step(self, step: int, training_data: Dict[str, Any]):
-        """Log training step data"""
+        """记录训练步骤数据"""
         if self.writer:
             for key, value in training_data.items():
                 if isinstance(value, (int, float)):
                     self.writer.add_scalar(f'Training/{key}', value, step)
                     
     def save_metrics(self):
-        """Save metrics to file"""
+        """将指标保存到文件"""
         metrics_file = self.log_dir / 'training_metrics.json'
         with open(metrics_file, 'w') as f:
-            # Convert numpy arrays to lists for JSON serialization
+            # 将numpy数组转换为列表以进行JSON序列化
             serializable_metrics = {}
             for key, value in self.metrics.items():
                 if isinstance(value, list):
@@ -113,17 +113,17 @@ class TrainingLogger:
             json.dump(serializable_metrics, f, indent=2)
             
     def plot_training_curves(self):
-        """Plot training curves"""
+        """绘制训练曲线"""
         fig, axes = plt.subplots(2, 3, figsize=(15, 10))
         axes = axes.flatten()
         
         plots = [
-            ('episode_rewards', 'Episode Rewards'),
-            ('episode_lengths', 'Episode Lengths'),
-            ('success_rates', 'Success Rate'),
-            ('load_cv', 'Load CV'),
-            ('coupling_edges', 'Coupling Edges'),
-            ('actor_losses', 'Actor Loss')
+            ('episode_rewards', '回合奖励'),
+            ('episode_lengths', '回合长度'),
+            ('success_rates', '成功率'),
+            ('load_cv', '负载变异系数'),
+            ('coupling_edges', '耦合边数'),
+            ('actor_losses', '演员损失')
         ]
         
         for i, (metric, title) in enumerate(plots):
@@ -132,7 +132,7 @@ class TrainingLogger:
                 axes[i].set_title(title)
                 axes[i].grid(True)
             else:
-                axes[i].text(0.5, 0.5, 'No Data', ha='center', va='center')
+                axes[i].text(0.5, 0.5, '无数据', ha='center', va='center')
                 axes[i].set_title(title)
                 
         plt.tight_layout()
@@ -140,22 +140,22 @@ class TrainingLogger:
         plt.close()
         
     def close(self):
-        """Close logger"""
+        """关闭日志记录器"""
         if self.writer:
             self.writer.close()
 
 
 class CheckpointManager:
     """
-    Model checkpointing and resuming
+    模型检查点和恢复
     """
     
     def __init__(self, checkpoint_dir: str):
         """
-        Initialize Checkpoint Manager
+        初始化检查点管理器
         
         Args:
-            checkpoint_dir: Directory for checkpoints
+            checkpoint_dir: 检查点目录
         """
         self.checkpoint_dir = Path(checkpoint_dir)
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -166,13 +166,13 @@ class CheckpointManager:
                        metrics: Dict[str, Any],
                        is_best: bool = False):
         """
-        Save training checkpoint
+        保存训练检查点
         
         Args:
-            agent: PPO agent to save
-            episode: Current episode number
-            metrics: Training metrics
-            is_best: Whether this is the best model so far
+            agent: 要保存的PPO智能体
+            episode: 当前回合数
+            metrics: 训练指标
+            is_best: 是否是目前最佳模型
         """
         checkpoint = {
             'episode': episode,
@@ -184,29 +184,29 @@ class CheckpointManager:
             'timestamp': time.time()
         }
         
-        # Save regular checkpoint
+        # 保存常规检查点
         checkpoint_path = self.checkpoint_dir / f'checkpoint_episode_{episode}.pt'
         torch.save(checkpoint, checkpoint_path)
         
-        # Save best model
+        # 保存最佳模型
         if is_best:
             best_path = self.checkpoint_dir / 'best_model.pt'
             torch.save(checkpoint, best_path)
             
-        # Save latest model
+        # 保存最新模型
         latest_path = self.checkpoint_dir / 'latest_model.pt'
         torch.save(checkpoint, latest_path)
         
     def load_checkpoint(self, agent: PPOAgent, checkpoint_path: str) -> Dict[str, Any]:
         """
-        Load training checkpoint
+        加载训练检查点
         
         Args:
-            agent: PPO agent to load into
-            checkpoint_path: Path to checkpoint file
+            agent: 要加载到的PPO智能体
+            checkpoint_path: 检查点文件路径
             
         Returns:
-            Checkpoint metadata
+            检查点元数据
         """
         checkpoint = torch.load(checkpoint_path, map_location=agent.device)
         
@@ -222,19 +222,19 @@ class CheckpointManager:
         }
         
     def get_latest_checkpoint(self) -> Optional[str]:
-        """Get path to latest checkpoint"""
+        """获取最新检查点的路径"""
         latest_path = self.checkpoint_dir / 'latest_model.pt'
         return str(latest_path) if latest_path.exists() else None
         
     def get_best_checkpoint(self) -> Optional[str]:
-        """Get path to best checkpoint"""
+        """获取最佳检查点的路径"""
         best_path = self.checkpoint_dir / 'best_model.pt'
         return str(best_path) if best_path.exists() else None
 
 
 class Trainer:
     """
-    Main training class for Power Grid Partitioning RL
+    电力网络分区强化学习的主要训练类
     """
     
     def __init__(self,
@@ -246,31 +246,31 @@ class Trainer:
                  eval_interval: int = 50,
                  use_tensorboard: bool = True):
         """
-        Initialize Trainer
+        初始化训练器
         
         Args:
-            agent: PPO agent
-            env: Training environment
-            log_dir: Logging directory
-            checkpoint_dir: Checkpoint directory
-            save_interval: Episodes between saves
-            eval_interval: Episodes between evaluations
-            use_tensorboard: Whether to use TensorBoard
+            agent: PPO智能体
+            env: 训练环境
+            log_dir: 日志目录
+            checkpoint_dir: 检查点目录
+            save_interval: 保存间隔（回合数）
+            eval_interval: 评估间隔（回合数）
+            use_tensorboard: 是否使用TensorBoard
         """
         self.agent = agent
         self.env = env
         self.save_interval = save_interval
         self.eval_interval = eval_interval
         
-        # Setup logging and checkpointing
+        # 设置日志记录和检查点
         self.logger = TrainingLogger(log_dir, use_tensorboard)
         self.checkpoint_manager = CheckpointManager(checkpoint_dir)
         
-        # Training state
+        # 训练状态
         self.current_episode = 0
         self.training_step = 0
         
-        # Success tracking
+        # 成功跟踪
         self.recent_successes = deque(maxlen=100)
         
     def train(self,
@@ -279,95 +279,95 @@ class Trainer:
               update_interval: int = 10,
               resume_from: Optional[str] = None) -> Dict[str, List[float]]:
         """
-        Main training loop
+        主训练循环
         
         Args:
-            num_episodes: Number of episodes to train
-            max_steps_per_episode: Maximum steps per episode
-            update_interval: Episodes between agent updates
-            resume_from: Path to checkpoint to resume from
+            num_episodes: 训练的回合数
+            max_steps_per_episode: 每回合最大步数
+            update_interval: 智能体更新间隔（回合数）
+            resume_from: 要恢复的检查点路径
             
         Returns:
-            Training history
+            训练历史
         """
-        # Resume from checkpoint if specified
+        # 如果指定则从检查点恢复
         if resume_from:
             checkpoint_info = self.checkpoint_manager.load_checkpoint(self.agent, resume_from)
             self.current_episode = checkpoint_info['episode']
-            print(f"Resumed training from episode {self.current_episode}")
+            print(f"从第{self.current_episode}回合恢复训练")
             
-        print(f"Starting training for {num_episodes} episodes...")
-        print(f"Environment: {self.env.total_nodes} nodes, {self.env.num_partitions} partitions")
+        print(f"开始训练{num_episodes}回合...")
+        print(f"环境：{self.env.total_nodes}个节点，{self.env.num_partitions}个分区")
         
         for episode in range(self.current_episode, self.current_episode + num_episodes):
             episode_start_time = time.time()
             
-            # Run episode
+            # 运行回合
             episode_data = self._run_episode(max_steps_per_episode)
             
-            # Log episode
+            # 记录回合
             episode_data['episode_time'] = time.time() - episode_start_time
             self.logger.log_episode(episode, episode_data)
             
-            # Update success tracking
+            # 更新成功跟踪
             success = self._is_successful_episode(episode_data)
             self.recent_successes.append(success)
             
-            # Print progress
+            # 打印进度
             if episode % 10 == 0:
                 success_rate = np.mean(self.recent_successes) if self.recent_successes else 0.0
-                print(f"Episode {episode}: Reward={episode_data['episode_reward']:.3f}, "
-                      f"Length={episode_data['episode_length']}, "
-                      f"Success Rate={success_rate:.3f}")
+                print(f"回合{episode}：奖励={episode_data['episode_reward']:.3f}，"
+                      f"长度={episode_data['episode_length']}，"
+                      f"成功率={success_rate:.3f}")
                       
-            # Update agent
+            # 更新智能体
             if episode % update_interval == 0 and len(self.agent.memory.states) > 0:
                 training_stats = self.agent.update()
                 self.logger.log_training_step(self.training_step, training_stats)
                 self.training_step += 1
                 
-            # Save checkpoint
+            # 保存检查点
             if episode % self.save_interval == 0:
                 is_best = episode_data['episode_reward'] >= self.logger.best_reward
                 self.checkpoint_manager.save_checkpoint(
                     self.agent, episode, self.logger.metrics, is_best
                 )
                 
-            # Save metrics periodically
+            # 定期保存指标
             if episode % 50 == 0:
                 self.logger.save_metrics()
                 self.logger.plot_training_curves()
                 
-        # Final save
+        # 最终保存
         self.checkpoint_manager.save_checkpoint(
             self.agent, self.current_episode + num_episodes - 1, self.logger.metrics
         )
         self.logger.save_metrics()
         self.logger.plot_training_curves()
         
-        print("Training completed!")
-        print(f"Best reward: {self.logger.best_reward:.3f} at episode {self.logger.best_episode}")
+        print("训练完成！")
+        print(f"最佳奖励：{self.logger.best_reward:.3f}，在第{self.logger.best_episode}回合")
         
         return self.logger.metrics
         
     def _run_episode(self, max_steps: int) -> Dict[str, Any]:
-        """Run a single training episode"""
+        """运行单个训练回合"""
         obs, info = self.env.reset()
         episode_reward = 0.0
         episode_length = 0
         
         for step in range(max_steps):
-            # Select action
+            # 选择动作
             action, log_prob, value = self.agent.select_action(obs, training=True)
             
             if action is None:
-                # No valid actions
+                # 没有有效动作
                 break
                 
-            # Take step
+            # 执行步骤
             next_obs, reward, terminated, truncated, next_info = self.env.step(action)
             
-            # Store experience
+            # 存储经验
             self.agent.store_experience(obs, action, reward, log_prob, value, terminated or truncated)
             
             episode_reward += reward
@@ -379,7 +379,7 @@ class Trainer:
             if terminated or truncated:
                 break
                 
-        # Get final metrics
+        # 获取最终指标
         final_metrics = info.get('metrics', {})
         
         return {
@@ -392,8 +392,8 @@ class Trainer:
         }
         
     def _is_successful_episode(self, episode_data: Dict[str, Any]) -> bool:
-        """Determine if episode was successful"""
-        # Define success criteria
+        """判断回合是否成功"""
+        # 定义成功标准
         load_cv_threshold = 0.3
         connectivity_threshold = 0.9
         min_length_threshold = 10
@@ -406,15 +406,15 @@ class Trainer:
         
     def evaluate(self, num_episodes: int = 10) -> Dict[str, float]:
         """
-        Evaluate agent performance
+        评估智能体性能
         
         Args:
-            num_episodes: Number of evaluation episodes
+            num_episodes: 评估回合数
             
         Returns:
-            Evaluation metrics
+            评估指标
         """
-        print(f"Evaluating agent for {num_episodes} episodes...")
+        print(f"评估智能体{num_episodes}回合...")
         
         eval_rewards = []
         eval_lengths = []
@@ -427,7 +427,7 @@ class Trainer:
             episode_length = 0
             
             while True:
-                # Select action (greedy)
+                # 选择动作（贪心）
                 action, _, _ = self.agent.select_action(obs, training=False)
                 
                 if action is None:
@@ -449,7 +449,7 @@ class Trainer:
             }))
             eval_metrics.append(info.get('metrics', {}))
             
-        # Compute evaluation statistics
+        # 计算评估统计
         eval_stats = {
             'mean_reward': np.mean(eval_rewards),
             'std_reward': np.std(eval_rewards),
@@ -459,13 +459,13 @@ class Trainer:
             'mean_coupling': np.mean([m.get('coupling_edges', 0) for m in eval_metrics])
         }
         
-        print(f"Evaluation Results:")
+        print(f"评估结果：")
         for key, value in eval_stats.items():
             print(f"  {key}: {value:.4f}")
             
         return eval_stats
         
     def close(self):
-        """Clean up trainer"""
+        """清理训练器"""
         self.logger.close()
         self.env.close()

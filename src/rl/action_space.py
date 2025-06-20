@@ -1,11 +1,11 @@
 """
-Action Space Management for Power Grid Partitioning MDP
+电力网络分区MDP的动作空间管理
 
-This module implements the two-stage action space as specified in the MDP formulation:
-1. Select a boundary node (from Bdry_t)
-2. Select a target partition (from neighboring partitions)
+本模块实现MDP公式中指定的两阶段动作空间：
+1. 选择边界节点（来自Bdry_t）
+2. 选择目标分区（来自相邻分区）
 
-Includes action masking for topological and physical constraints.
+包括用于拓扑和物理约束的mask function。
 """
 
 import torch
@@ -16,13 +16,13 @@ from torch_geometric.data import HeteroData
 
 class ActionSpace:
     """
-    Manages the two-stage action space for power grid partitioning
+    管理电力网络分区的两阶段动作空间
     
-    Action Structure:
-    - Stage 1: Select a boundary node i_t ∈ Bdry_t
-    - Stage 2: Select target partition k_new ≠ k_old from neighboring partitions
+    动作结构：
+    - 阶段1：选择边界节点 i_t ∈ Bdry_t
+    - 阶段2：选择目标分区 k_new ≠ k_old 来自相邻分区
     
-    Action Representation: (node_idx, target_partition)
+    动作表示：(node_idx, target_partition)
     """
     
     def __init__(self, 
@@ -30,49 +30,49 @@ class ActionSpace:
                  num_partitions: int,
                  device: torch.device):
         """
-        Initialize Action Space
+        初始化动作空间
         
         Args:
-            hetero_data: Heterogeneous graph data
-            num_partitions: Number of target partitions
-            device: Torch device for computations
+            hetero_data: 异构图数据
+            num_partitions: 目标分区数量
+            device: 计算设备
         """
         self.device = device
         self.hetero_data = hetero_data.to(device)
         self.num_partitions = num_partitions
         
-        # Setup adjacency information
+        # 设置邻接信息
         self._setup_adjacency_info()
         
-        # Cache for action validation
+        # 动作验证缓存
         self._action_cache = {}
         
     def _setup_adjacency_info(self):
-        """Setup adjacency information for action validation"""
-        # Get total number of nodes
+        """设置用于动作验证的邻接信息"""
+        # 获取节点总数
         self.total_nodes = sum(x.shape[0] for x in self.hetero_data.x_dict.values())
         
-        # Create global adjacency list
+        # 创建全局邻接列表
         self.adjacency_list = [set() for _ in range(self.total_nodes)]
         
-        # Setup node type mappings
+        # 设置节点类型映射
         self._setup_node_mappings()
         
-        # Build adjacency list from heterogeneous edges
+        # 从异构边构建邻接列表
         for edge_type, edge_index in self.hetero_data.edge_index_dict.items():
             src_type, _, dst_type = edge_type
             
-            # Convert to global indices
+            # 转换为全局索引
             src_global = self._local_to_global(edge_index[0], src_type)
             dst_global = self._local_to_global(edge_index[1], dst_type)
             
-            # Add to adjacency list (undirected)
+            # 添加到邻接列表（无向图）
             for src, dst in zip(src_global, dst_global):
                 self.adjacency_list[src.item()].add(dst.item())
                 self.adjacency_list[dst.item()].add(src.item())
                 
     def _setup_node_mappings(self):
-        """Setup mappings between local and global node indices"""
+        """设置局部和全局节点索引之间的映射"""
         self.node_types = list(self.hetero_data.x_dict.keys())
         self.local_to_global_map = {}
         
@@ -84,21 +84,21 @@ class ActionSpace:
             global_idx += num_nodes
             
     def _local_to_global(self, local_indices: torch.Tensor, node_type: str) -> torch.Tensor:
-        """Convert local indices to global indices"""
+        """将局部索引转换为全局索引"""
         return self.local_to_global_map[node_type][local_indices]
         
     def get_valid_actions(self, 
                          current_partition: torch.Tensor,
                          boundary_nodes: torch.Tensor) -> List[Tuple[int, int]]:
         """
-        Get all valid actions for current state
+        获取当前状态的所有有效动作
         
         Args:
-            current_partition: Current partition assignments [total_nodes]
-            boundary_nodes: Current boundary nodes [num_boundary]
+            current_partition: 当前分区分配 [total_nodes]
+            boundary_nodes: 当前边界节点 [num_boundary]
             
         Returns:
-            List of valid (node_idx, target_partition) tuples
+            有效的(node_idx, target_partition)元组列表
         """
         valid_actions = []
         
@@ -106,12 +106,12 @@ class ActionSpace:
             node_idx_int = node_idx.item()
             current_node_partition = current_partition[node_idx_int].item()
             
-            # Get neighboring partitions
+            # 获取相邻分区
             neighboring_partitions = self._get_neighboring_partitions(
                 node_idx_int, current_partition
             )
             
-            # Add valid actions for each neighboring partition
+            # 为每个相邻分区添加有效动作
             for target_partition in neighboring_partitions:
                 if target_partition != current_node_partition:
                     valid_actions.append((node_idx_int, target_partition))
@@ -122,14 +122,14 @@ class ActionSpace:
                                    node_idx: int,
                                    current_partition: torch.Tensor) -> Set[int]:
         """
-        Get partitions that are neighbors of the given node
+        获取给定节点的相邻分区
         
         Args:
-            node_idx: Global node index
-            current_partition: Current partition assignments
+            node_idx: 全局节点索引
+            current_partition: 当前分区分配
             
         Returns:
-            Set of neighboring partition IDs
+            相邻分区ID的集合
         """
         neighboring_partitions = set()
         
@@ -144,32 +144,32 @@ class ActionSpace:
                        current_partition: torch.Tensor,
                        boundary_nodes: torch.Tensor) -> bool:
         """
-        Check if an action is valid
+        检查动作是否有效
         
         Args:
-            action: (node_idx, target_partition) tuple
-            current_partition: Current partition assignments
-            boundary_nodes: Current boundary nodes
+            action: (node_idx, target_partition)元组
+            current_partition: 当前分区分配
+            boundary_nodes: 当前边界节点
             
         Returns:
-            True if action is valid, False otherwise
+            如果动作有效返回True，否则返回False
         """
         node_idx, target_partition = action
         
-        # Check if node is in boundary nodes
+        # 检查节点是否在边界节点中
         if node_idx not in boundary_nodes:
             return False
             
-        # Check if target partition is valid
+        # 检查目标分区是否有效
         if target_partition < 1 or target_partition > self.num_partitions:
             return False
             
-        # Check if node is currently in different partition
+        # 检查节点当前是否在不同分区中
         current_node_partition = current_partition[node_idx].item()
         if target_partition == current_node_partition:
             return False
             
-        # Check if target partition is neighboring
+        # 检查目标分区是否相邻
         neighboring_partitions = self._get_neighboring_partitions(node_idx, current_partition)
         if target_partition not in neighboring_partitions:
             return False
@@ -180,35 +180,35 @@ class ActionSpace:
                        current_partition: torch.Tensor,
                        boundary_nodes: torch.Tensor) -> torch.Tensor:
         """
-        Get action mask for current state
+        获取当前状态的动作掩码
         
         Args:
-            current_partition: Current partition assignments
-            boundary_nodes: Current boundary nodes
+            current_partition: 当前分区分配
+            boundary_nodes: 当前边界节点
             
         Returns:
-            Boolean tensor [total_nodes, num_partitions] indicating valid actions
+            布尔张量 [total_nodes, num_partitions] 表示有效动作
         """
-        # Initialize mask (all False)
+        # 初始化掩码（全为False）
         action_mask = torch.zeros(
             self.total_nodes, self.num_partitions, 
             dtype=torch.bool, device=self.device
         )
         
-        # Set valid actions to True
+        # 将有效动作设置为True
         for node_idx in boundary_nodes:
             node_idx_int = node_idx.item()
             current_node_partition = current_partition[node_idx_int].item()
             
-            # Get neighboring partitions
+            # 获取相邻分区
             neighboring_partitions = self._get_neighboring_partitions(
                 node_idx_int, current_partition
             )
             
-            # Mark valid target partitions
+            # 标记有效的目标分区
             for target_partition in neighboring_partitions:
                 if target_partition != current_node_partition:
-                    # Convert to 0-based indexing for mask
+                    # 转换为基于0的索引用于掩码
                     action_mask[node_idx_int, target_partition - 1] = True
                     
         return action_mask
@@ -217,123 +217,204 @@ class ActionSpace:
                            current_partition: torch.Tensor,
                            boundary_nodes: torch.Tensor) -> Optional[Tuple[int, int]]:
         """
-        Sample a random valid action
+        采样一个随机有效动作
         
         Args:
-            current_partition: Current partition assignments
-            boundary_nodes: Current boundary nodes
+            current_partition: 当前分区分配
+            boundary_nodes: 当前边界节点
             
         Returns:
-            Random valid action or None if no valid actions
+            随机有效动作或None（如果没有有效动作）
         """
         valid_actions = self.get_valid_actions(current_partition, boundary_nodes)
         
         if len(valid_actions) == 0:
             return None
             
-        # Sample random action
+        # 采样随机动作
         action_idx = torch.randint(0, len(valid_actions), (1,)).item()
         return valid_actions[action_idx]
         
     def get_action_space_size(self) -> int:
         """
-        Get the maximum size of the action space
+        获取动作空间的最大大小
         
         Returns:
-            Maximum number of possible actions
+            可能动作的最大数量
         """
         return self.total_nodes * self.num_partitions
+
+    def get_advanced_mask(self,
+                         state: Dict[str, torch.Tensor],
+                         boundary_nodes: torch.Tensor,
+                         hetero_data: HeteroData,
+                         apply_constraints: bool = True) -> torch.Tensor:
+        """
+        获取带有高级约束的动作掩码
+        
+        专为计算分区设计的约束系统，重点关注：
+        - 分区连通性
+        - 拓扑优化
+        - 大小平衡
+        
+        Args:
+            state: 当前状态
+            boundary_nodes: 当前边界节点
+            hetero_data: 异构图数据
+            apply_constraints: 是否应用高级约束
+            
+        Returns:
+            高级动作掩码
+        """
+        # 获取基础掩码
+        base_mask = self.get_action_mask(state['partition_assignment'], boundary_nodes)
+        
+        if not apply_constraints:
+            return base_mask
+            
+        # 初始化高级掩码处理器
+        if not hasattr(self, 'mask_handler'):
+            self.mask_handler = ActionMask(hetero_data, self.device)
+            
+        current_partition = state['partition_assignment']
+        advanced_mask = base_mask.clone()
+        
+        # 应用连通性约束
+        for node_idx in boundary_nodes:
+            for target_partition in range(self.num_partitions):
+                if advanced_mask[node_idx, target_partition]:
+                    action = (node_idx.item(), target_partition + 1)
+                    if not self.mask_handler.apply_connectivity_constraint(
+                        advanced_mask, current_partition, action):
+                        advanced_mask[node_idx, target_partition] = False
+                        
+        # 应用拓扑优化约束
+        advanced_mask = self.mask_handler.apply_topology_optimization(
+            advanced_mask, current_partition, boundary_nodes)
+            
+        # 应用大小平衡约束  
+        advanced_mask = self.mask_handler.apply_size_balance_constraint(
+            advanced_mask, current_partition)
+            
+        return advanced_mask
 
 
 class ActionMask:
     """
-    Advanced action masking with topological and physical constraints
+    用于计算分区的基础约束管理
     """
     
     def __init__(self, 
                  hetero_data: HeteroData,
                  device: torch.device):
         """
-        Initialize Action Mask
+        初始化动作掩码
         
         Args:
-            hetero_data: Heterogeneous graph data
-            device: Torch device for computations
+            hetero_data: 异构图数据
+            device: 计算设备
         """
         self.device = device
         self.hetero_data = hetero_data.to(device)
         
-        # Extract physical constraints from edge attributes
-        self._setup_physical_constraints()
+        # 设置基础的图结构信息
+        self._setup_graph_structure()
         
-    def _setup_physical_constraints(self):
-        """Setup physical constraints from edge attributes"""
-        # Extract impedance information for constraint checking
-        self.edge_impedances = {}
+    def _setup_graph_structure(self):
+        """设置图结构信息用于拓扑约束"""
+        # 构建全局邻接关系（用于连通性检查）
+        self.total_nodes = sum(x.shape[0] for x in self.hetero_data.x_dict.values())
+        self.adjacency_list = [[] for _ in range(self.total_nodes)]
         
-        for edge_type, edge_attr in self.hetero_data.edge_attr_dict.items():
-            # Impedance magnitude is typically at index 3 in edge features
-            if edge_attr.shape[1] > 3:
-                impedances = edge_attr[:, 3]  # |Z| column
-                self.edge_impedances[edge_type] = impedances
+        # 设置节点映射
+        self._setup_node_mappings()
+        
+        # 构建邻接列表
+        for edge_type, edge_index in self.hetero_data.edge_index_dict.items():
+            src_type, _, dst_type = edge_type
+            src_global = self._local_to_global(edge_index[0], src_type)
+            dst_global = self._local_to_global(edge_index[1], dst_type)
+            
+            for src, dst in zip(src_global, dst_global):
+                self.adjacency_list[src.item()].append(dst.item())
+                self.adjacency_list[dst.item()].append(src.item())
                 
+    def _setup_node_mappings(self):
+        """设置节点类型映射"""
+        self.node_types = list(self.hetero_data.x_dict.keys())
+        self.local_to_global_map = {}
+        
+        global_idx = 0
+        for node_type in self.node_types:
+            num_nodes = self.hetero_data.x_dict[node_type].shape[0]
+            global_indices = torch.arange(global_idx, global_idx + num_nodes, device=self.device)
+            self.local_to_global_map[node_type] = global_indices
+            global_idx += num_nodes
+            
+    def _local_to_global(self, local_indices: torch.Tensor, node_type: str) -> torch.Tensor:
+        """将局部索引转换为全局索引"""
+        return self.local_to_global_map[node_type][local_indices]
+        
     def apply_connectivity_constraint(self,
                                     action_mask: torch.Tensor,
                                     current_partition: torch.Tensor,
                                     action: Tuple[int, int]) -> bool:
         """
-        Check if action maintains partition connectivity
+        检查动作是否保持分区内部连通性
+        
+        目的：确保分区后每个子网络仍然连通，便于潮流计算
         
         Args:
-            action_mask: Current action mask
-            current_partition: Current partition assignments
-            action: Proposed action
+            action_mask: 当前动作掩码
+            current_partition: 当前分区分配
+            action: 提议的动作
             
         Returns:
-            True if action maintains connectivity, False otherwise
+            如果动作保持连通性返回True，否则返回False
         """
         node_idx, target_partition = action
-        
-        # For now, implement basic connectivity check
-        # This could be enhanced with more sophisticated graph connectivity algorithms
-        
-        # Check if moving this node would disconnect its current partition
         current_node_partition = current_partition[node_idx].item()
         
-        # Count nodes in current partition
+        # 检查移动节点后，原分区是否仍然连通
         current_partition_nodes = torch.where(current_partition == current_node_partition)[0]
         
-        # If this is the only node in the partition, allow the move
+        # 如果原分区只有这一个节点，移动后该分区消失，这是允许的
         if len(current_partition_nodes) <= 1:
             return True
             
-        # For more complex connectivity checking, we would need to:
-        # 1. Temporarily remove the node from its current partition
-        # 2. Check if the remaining nodes are still connected
-        # 3. Check if the target partition remains connected after adding the node
-        
-        # For now, return True (basic implementation)
+        # 如果有多个节点，需要检查移除该节点后剩余节点是否连通
+        remaining_nodes = current_partition_nodes[current_partition_nodes != node_idx]
+        if len(remaining_nodes) <= 1:
+            return True
+            
+        # 简化的连通性检查：检查剩余节点中是否有孤立节点
+        for remaining_node in remaining_nodes:
+            has_connection = False
+            for neighbor in self.adjacency_list[remaining_node.item()]:
+                if neighbor in remaining_nodes:
+                    has_connection = True
+                    break
+            if not has_connection:
+                return False  # 发现孤立节点，拒绝移动
+                
         return True
         
-    def apply_forced_moves(self,
-                          action_mask: torch.Tensor,
-                          current_partition: torch.Tensor,
-                          boundary_nodes: torch.Tensor,
-                          adjacency_list: List[Set[int]]) -> torch.Tensor:
+    def apply_topology_optimization(self,
+                                  action_mask: torch.Tensor,
+                                  current_partition: torch.Tensor,
+                                  boundary_nodes: torch.Tensor) -> torch.Tensor:
         """
-        Apply forced move constraints
+        应用拓扑优化约束
         
-        If all neighbors of a boundary node are in the same partition,
-        force the node to move to that partition.
+        目的：优化分区边界，减少分区间的连接数量，简化潮流计算
         
         Args:
-            action_mask: Current action mask
-            current_partition: Current partition assignments
-            boundary_nodes: Current boundary nodes
-            adjacency_list: Graph adjacency list
+            action_mask: 当前动作掩码
+            current_partition: 当前分区分配
+            boundary_nodes: 当前边界节点
             
         Returns:
-            Updated action mask with forced moves
+            优化后的动作掩码
         """
         updated_mask = action_mask.clone()
         
@@ -341,46 +422,64 @@ class ActionMask:
             node_idx_int = node_idx.item()
             current_node_partition = current_partition[node_idx_int].item()
             
-            # Get all neighbor partitions
-            neighbor_partitions = set()
-            for neighbor_idx in adjacency_list[node_idx_int]:
+            # 统计该节点邻居的分区分布
+            neighbor_partitions = {}
+            for neighbor_idx in self.adjacency_list[node_idx_int]:
                 neighbor_partition = current_partition[neighbor_idx].item()
-                neighbor_partitions.add(neighbor_partition)
+                if neighbor_partition != current_node_partition:
+                    neighbor_partitions[neighbor_partition] = neighbor_partitions.get(neighbor_partition, 0) + 1
+                    
+            # 如果某个邻居分区连接数明显更多，优先移动到该分区（减少跨分区连接）
+            if neighbor_partitions:
+                max_connections = max(neighbor_partitions.values())
+                total_neighbors = sum(neighbor_partitions.values())
                 
-            # Remove current partition from neighbors
-            neighbor_partitions.discard(current_node_partition)
-            
-            # If all neighbors are in a single partition, force move
-            if len(neighbor_partitions) == 1:
-                forced_partition = list(neighbor_partitions)[0]
-                
-                # Clear all other actions for this node
-                updated_mask[node_idx_int, :] = False
-                
-                # Enable only the forced action
-                updated_mask[node_idx_int, forced_partition - 1] = True
-                
+                # 如果某个分区的连接数超过80%，强烈建议移动到该分区
+                for partition_id, connections in neighbor_partitions.items():
+                    if connections < 0.8 * max_connections:
+                        # 降低移动到连接较少分区的优先级（但不完全禁止）
+                        # 这里可以选择保持原有掩码，不做强制限制
+                        pass
+                        
         return updated_mask
         
-    def apply_physical_constraints(self,
-                                 action_mask: torch.Tensor,
-                                 current_partition: torch.Tensor,
-                                 impedance_threshold: float = 1.0) -> torch.Tensor:
+    def apply_size_balance_constraint(self,
+                                    action_mask: torch.Tensor,
+                                    current_partition: torch.Tensor,
+                                    max_size_ratio: float = 3.0) -> torch.Tensor:
         """
-        Apply physical constraints based on electrical properties
+        应用分区大小平衡约束
+        
+        目的：避免分区大小差异过大，确保计算负载相对均衡
         
         Args:
-            action_mask: Current action mask
-            current_partition: Current partition assignments
-            impedance_threshold: Threshold for impedance-based constraints
+            action_mask: 当前动作掩码
+            current_partition: 当前分区分配
+            max_size_ratio: 最大分区大小比例
             
         Returns:
-            Updated action mask with physical constraints
+            应用大小约束后的动作掩码
         """
-        # This is a placeholder for more sophisticated physical constraints
-        # Could include:
-        # - Impedance-based connectivity requirements
-        # - Power flow constraints
-        # - Voltage stability requirements
+        updated_mask = action_mask.clone()
         
-        return action_mask
+        # 计算各分区大小
+        num_partitions = current_partition.max().item()
+        partition_sizes = torch.bincount(current_partition, minlength=num_partitions + 1)[1:]
+        
+        if len(partition_sizes) == 0:
+            return updated_mask
+            
+        avg_size = partition_sizes.float().mean()
+        
+        # 检查每个可能的动作是否会导致分区过大
+        valid_actions = torch.where(updated_mask)
+        for i in range(len(valid_actions[0])):
+            node_idx = valid_actions[0][i].item()
+            target_partition = valid_actions[1][i].item() + 1  # 转换为1-based
+            
+            # 检查目标分区移动后是否会过大
+            target_size_after = partition_sizes[target_partition - 1] + 1
+            if target_size_after > max_size_ratio * avg_size:
+                updated_mask[node_idx, target_partition - 1] = False
+                
+        return updated_mask

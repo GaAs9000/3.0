@@ -1,11 +1,11 @@
 """
-Utility functions for Power Grid Partitioning RL
+电力网络分区强化学习的实用函数
 
-This module provides utility functions including:
-- METIS initialization for initial partitioning
-- Partition quality evaluation
-- State management helpers
-- Visualization tools
+本模块提供实用函数，包括：
+- 用于初始分区的METIS初始化
+- 分区质量评估
+- 状态管理助手
+- 可视化工具
 """
 
 import torch
@@ -20,54 +20,54 @@ try:
     METIS_AVAILABLE = True
 except ImportError:
     METIS_AVAILABLE = False
-    warnings.warn("METIS not available. Using fallback spectral clustering for initialization.")
+    warnings.warn("METIS不可用。使用回退的谱聚类进行初始化。")
 
 try:
     from sklearn.cluster import SpectralClustering
     SKLEARN_AVAILABLE = True
 except ImportError:
     SKLEARN_AVAILABLE = False
-    warnings.warn("Scikit-learn not available. Using random initialization as fallback.")
+    warnings.warn("Scikit-learn不可用。使用随机初始化作为回退。")
 
 
 class MetisInitializer:
     """
-    METIS-based initialization for power grid partitioning
+    基于METIS的电力网络分区初始化
     
-    Provides initial partition using METIS graph partitioning algorithm
-    with node weights based on power loads.
+    使用METIS图分区算法提供初始分区，
+    节点权重基于功率负载。
     """
     
     def __init__(self, hetero_data: HeteroData, device: torch.device):
         """
-        Initialize METIS partitioner
+        初始化METIS分区器
         
         Args:
-            hetero_data: Heterogeneous graph data
-            device: Torch device for computations
+            hetero_data: 异构图数据
+            device: 计算设备
         """
         self.device = device
         self.hetero_data = hetero_data.to(device)
         
-        # Setup graph representation for METIS
+        # 设置与METIS兼容的图表示
         self._setup_graph_representation()
         
     def _setup_graph_representation(self):
-        """Setup graph representation compatible with METIS"""
-        # Get total number of nodes
+        """设置与METIS兼容的图表示"""
+        # 获取节点总数
         self.total_nodes = sum(x.shape[0] for x in self.hetero_data.x_dict.values())
         
-        # Setup node mappings
+        # 设置节点映射
         self._setup_node_mappings()
         
-        # Extract node weights (power loads)
+        # 提取节点权重（功率负载）
         self._extract_node_weights()
         
-        # Build adjacency list for METIS
+        # 为METIS构建邻接列表
         self._build_adjacency_list()
         
     def _setup_node_mappings(self):
-        """Setup mappings between local and global node indices"""
+        """设置局部和全局节点索引之间的映射"""
         self.node_types = list(self.hetero_data.x_dict.keys())
         self.local_to_global_map = {}
         
@@ -79,12 +79,12 @@ class MetisInitializer:
             global_idx += num_nodes
             
     def _local_to_global(self, local_indices: torch.Tensor, node_type: str) -> torch.Tensor:
-        """Convert local indices to global indices"""
+        """将局部索引转换为全局索引"""
         return self.local_to_global_map[node_type][local_indices]
         
     def _extract_node_weights(self):
-        """Extract node weights based on power loads"""
-        # Concatenate all node features
+        """基于功率负载提取节点权重"""
+        # 连接所有节点特征
         all_features = []
         for node_type in self.node_types:
             features = self.hetero_data.x_dict[node_type]
@@ -92,34 +92,34 @@ class MetisInitializer:
             
         all_node_features = torch.cat(all_features, dim=0)
         
-        # Extract load data (assuming Pd is at index 0)
+        # 提取负载数据（假设Pd在索引0处）
         if all_node_features.shape[1] > 0:
-            loads = all_node_features[:, 0]  # Pd column
-            # Convert to positive integers for METIS (scale and add offset)
+            loads = all_node_features[:, 0]  # Pd列
+            # 转换为METIS的正整数（缩放并添加偏移）
             loads_scaled = (loads * 1000 + 1000).clamp(min=1).int()
             try:
                 self.node_weights = loads_scaled.cpu().numpy()
             except RuntimeError:
-                # Fallback if numpy conversion fails
+                # numpy转换失败时的回退
                 self.node_weights = [int(x) for x in loads_scaled.cpu().tolist()]
         else:
-            # Uniform weights if no load data
+            # 如果没有负载数据则使用均匀权重
             self.node_weights = [1] * self.total_nodes
             
     def _build_adjacency_list(self):
-        """Build adjacency list for METIS"""
-        # Initialize adjacency list
+        """为METIS构建邻接列表"""
+        # 初始化邻接列表
         self.adjacency_list = [[] for _ in range(self.total_nodes)]
         
-        # Add edges from heterogeneous graph
+        # 从异构图添加边
         for edge_type, edge_index in self.hetero_data.edge_index_dict.items():
             src_type, _, dst_type = edge_type
             
-            # Convert to global indices
+            # 转换为全局索引
             src_global = self._local_to_global(edge_index[0], src_type)
             dst_global = self._local_to_global(edge_index[1], dst_type)
             
-            # Add to adjacency list
+            # 添加到邻接列表
             try:
                 src_list = src_global.cpu().numpy()
                 dst_list = dst_global.cpu().numpy()
@@ -129,9 +129,9 @@ class MetisInitializer:
 
             for src, dst in zip(src_list, dst_list):
                 self.adjacency_list[src].append(dst)
-                self.adjacency_list[dst].append(src)  # Undirected graph
+                self.adjacency_list[dst].append(src)  # 无向图
                 
-        # Remove duplicates and self-loops
+        # 移除重复项和自环
         for i in range(self.total_nodes):
             self.adjacency_list[i] = list(set(self.adjacency_list[i]))
             if i in self.adjacency_list[i]:
@@ -139,19 +139,19 @@ class MetisInitializer:
                 
     def initialize_partition(self, num_partitions: int) -> torch.Tensor:
         """
-        Initialize partition using METIS or fallback methods
+        使用METIS或回退方法初始化分区
         
         Args:
-            num_partitions: Number of target partitions
+            num_partitions: 目标分区数量
             
         Returns:
-            Initial partition assignments [total_nodes]
+            初始分区分配 [total_nodes]
         """
         if METIS_AVAILABLE and self.total_nodes > num_partitions:
             try:
                 return self._metis_partition(num_partitions)
             except Exception as e:
-                warnings.warn(f"METIS partitioning failed: {e}. Using fallback method.")
+                warnings.warn(f"METIS分区失败：{e}。使用回退方法。")
                 
         if SKLEARN_AVAILABLE:
             return self._spectral_partition(num_partitions)
@@ -159,8 +159,8 @@ class MetisInitializer:
             return self._random_partition(num_partitions)
             
     def _metis_partition(self, num_partitions: int) -> torch.Tensor:
-        """Partition using METIS algorithm"""
-        # Convert adjacency list to METIS format
+        """使用METIS算法分区"""
+        # 将邻接列表转换为METIS格式
         xadj = [0]
         adjncy = []
         
@@ -168,9 +168,9 @@ class MetisInitializer:
             adjncy.extend(neighbors)
             xadj.append(len(adjncy))
             
-        # Run METIS partitioning
+        # 运行METIS分区
         if len(adjncy) == 0:
-            # No edges - use random partition
+            # 没有边 - 使用随机分区
             return self._random_partition(num_partitions)
             
         try:
@@ -183,24 +183,24 @@ class MetisInitializer:
                 recursive=True
             )
             
-            # Convert to 1-based indexing and torch tensor
+            # 转换为基于1的索引和torch张量
             partition_tensor = torch.tensor(partition, device=self.device) + 1
             return partition_tensor
             
         except Exception as e:
-            warnings.warn(f"METIS failed: {e}. Using spectral clustering fallback.")
+            warnings.warn(f"METIS失败：{e}。使用谱聚类回退。")
             return self._spectral_partition(num_partitions)
             
     def _spectral_partition(self, num_partitions: int) -> torch.Tensor:
-        """Partition using spectral clustering"""
-        # Build adjacency matrix
+        """使用谱聚类分区"""
+        # 构建邻接矩阵
         adj_matrix = np.zeros((self.total_nodes, self.total_nodes))
         
         for i, neighbors in enumerate(self.adjacency_list):
             for j in neighbors:
                 adj_matrix[i, j] = 1.0
                 
-        # Handle edge cases
+        # 处理边界情况
         if np.sum(adj_matrix) == 0:
             return self._random_partition(num_partitions)
             
@@ -213,16 +213,16 @@ class MetisInitializer:
             
             partition = clustering.fit_predict(adj_matrix)
             
-            # Convert to 1-based indexing and torch tensor
+            # 转换为基于1的索引和torch张量
             partition_tensor = torch.tensor(partition, device=self.device) + 1
             return partition_tensor
             
         except Exception as e:
-            warnings.warn(f"Spectral clustering failed: {e}. Using random partition.")
+            warnings.warn(f"谱聚类失败：{e}。使用随机分区。")
             return self._random_partition(num_partitions)
             
     def _random_partition(self, num_partitions: int) -> torch.Tensor:
-        """Random partition as final fallback"""
+        """作为最终回退的随机分区"""
         partition = torch.randint(
             1, num_partitions + 1, 
             (self.total_nodes,), 
@@ -233,39 +233,39 @@ class MetisInitializer:
 
 class PartitionEvaluator:
     """
-    Comprehensive partition quality evaluation
+    综合分区质量评估
     
-    Provides various metrics for evaluating partition quality including
-    electrical, topological, and load balance metrics.
+    提供评估分区质量的各种指标，包括
+    电气、拓扑和负载平衡指标。
     """
     
     def __init__(self, hetero_data: HeteroData, device: torch.device):
         """
-        Initialize Partition Evaluator
+        初始化分区评估器
         
         Args:
-            hetero_data: Heterogeneous graph data
-            device: Torch device for computations
+            hetero_data: 异构图数据
+            device: 计算设备
         """
         self.device = device
         self.hetero_data = hetero_data.to(device)
         
-        # Setup evaluation data
+        # 设置评估数据
         self._setup_evaluation_data()
         
     def _setup_evaluation_data(self):
-        """Setup data needed for evaluation"""
-        # Setup node mappings
+        """设置评估所需的数据"""
+        # 设置节点映射
         self._setup_node_mappings()
         
-        # Extract power data
+        # 提取功率数据
         self._extract_power_data()
         
-        # Extract electrical data
+        # 提取电气数据
         self._extract_electrical_data()
         
     def _setup_node_mappings(self):
-        """Setup node type mappings"""
+        """设置节点类型映射"""
         self.node_types = list(self.hetero_data.x_dict.keys())
         self.local_to_global_map = {}
         
@@ -279,11 +279,11 @@ class PartitionEvaluator:
         self.total_nodes = global_idx
         
     def _local_to_global(self, local_indices: torch.Tensor, node_type: str) -> torch.Tensor:
-        """Convert local indices to global indices"""
+        """将局部索引转换为全局索引"""
         return self.local_to_global_map[node_type][local_indices]
         
     def _extract_power_data(self):
-        """Extract power data from node features"""
+        """从节点特征中提取功率数据"""
         all_features = []
         for node_type in self.node_types:
             features = self.hetero_data.x_dict[node_type]
@@ -291,7 +291,7 @@ class PartitionEvaluator:
             
         self.all_node_features = torch.cat(all_features, dim=0)
         
-        # Extract power data
+        # 提取功率数据
         self.load_active = self.all_node_features[:, 0]  # Pd
         if self.all_node_features.shape[1] > 9:
             self.gen_active = self.all_node_features[:, 9]  # Pg
@@ -299,7 +299,7 @@ class PartitionEvaluator:
             self.gen_active = torch.zeros_like(self.load_active)
             
     def _extract_electrical_data(self):
-        """Extract electrical data from edges"""
+        """从边中提取电气数据"""
         self.all_edges = []
         self.all_admittances = []
         
@@ -307,16 +307,16 @@ class PartitionEvaluator:
             edge_attr = self.hetero_data.edge_attr_dict[edge_type]
             src_type, _, dst_type = edge_type
             
-            # Convert to global indices
+            # 转换为全局索引
             src_global = self._local_to_global(edge_index[0], src_type)
             dst_global = self._local_to_global(edge_index[1], dst_type)
             
             global_edges = torch.stack([src_global, dst_global], dim=0)
             self.all_edges.append(global_edges)
             
-            # Extract admittance
+            # 提取导纳
             if edge_attr.shape[1] > 4:
-                admittances = edge_attr[:, 4]  # y column
+                admittances = edge_attr[:, 4]  # y列
             else:
                 admittances = torch.ones(edge_attr.shape[0], device=self.device)
                 
@@ -331,21 +331,21 @@ class PartitionEvaluator:
             
     def evaluate_partition(self, partition: torch.Tensor) -> Dict[str, float]:
         """
-        Comprehensive partition evaluation
+        综合分区评估
         
         Args:
-            partition: Partition assignments [total_nodes]
+            partition: 分区分配 [total_nodes]
             
         Returns:
-            Dictionary with evaluation metrics
+            包含评估指标的字典
         """
         metrics = {}
         
-        # Basic partition info
+        # 基本分区信息
         num_partitions = partition.max().item()
         partition_sizes = torch.bincount(partition, minlength=num_partitions + 1)[1:]
         
-        # Load balance metrics
+        # 负载平衡指标
         partition_loads = torch.zeros(num_partitions, device=self.device)
         for i in range(1, num_partitions + 1):
             mask = (partition == i)
@@ -356,7 +356,7 @@ class PartitionEvaluator:
         load_std = torch.std(partition_loads)
         load_cv = (load_std / load_mean).item() if load_mean > 0 else 0.0
         
-        # Coupling metrics
+        # 耦合指标
         if self.edge_index.shape[1] > 0:
             src_partitions = partition[self.edge_index[0]]
             dst_partitions = partition[self.edge_index[1]]
@@ -368,7 +368,7 @@ class PartitionEvaluator:
             coupling_edges = 0
             total_coupling = 0.0
             
-        # Power balance metrics
+        # 功率平衡指标
         power_imbalances = []
         for i in range(1, num_partitions + 1):
             mask = (partition == i)
@@ -378,7 +378,7 @@ class PartitionEvaluator:
                 imbalance = abs(gen - load).item()
                 power_imbalances.append(imbalance)
                 
-        # Connectivity check (simplified)
+        # 连通性检查（简化版）
         connectivity = self._check_connectivity(partition)
         
         try:
@@ -402,14 +402,14 @@ class PartitionEvaluator:
         
     def _check_connectivity(self, partition: torch.Tensor) -> float:
         """
-        Check partition connectivity (simplified version)
+        检查分区连通性（简化版本）
         
         Args:
-            partition: Partition assignments
+            partition: 分区分配
             
         Returns:
-            Connectivity score (1.0 if all partitions connected, lower otherwise)
+            连通性得分（如果所有分区连通为1.0，否则更低）
         """
-        # For now, return 1.0 (assume connected)
-        # A full implementation would check graph connectivity within each partition
+        # 目前返回1.0（假设连通）
+        # 完整实现将检查每个分区内的图连通性
         return 1.0
