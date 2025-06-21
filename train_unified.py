@@ -609,10 +609,21 @@ class UnifiedTrainingSystem:
         
     def _load_config(self, config_path: Optional[str]) -> Dict[str, Any]:
         """加载配置文件"""
+        # 如果没有指定配置文件，尝试使用默认的 config_unified.yaml
+        if not config_path:
+            default_config_path = 'config_unified.yaml'
+            if os.path.exists(default_config_path):
+                config_path = default_config_path
+                print(f"📄 使用默认配置文件: {config_path}")
+        
         if config_path and os.path.exists(config_path):
             with open(config_path, 'r', encoding='utf-8') as f:
-                return yaml.safe_load(f)
+                config = yaml.safe_load(f)
+                print(f"✅ 配置文件加载成功: {config_path}")
+                print(f"📊 案例名称: {config['data']['case_name']}")
+                return config
         else:
+            print("⚠️ 未找到配置文件，使用默认配置")
             return self._create_default_config()
     
     def _create_default_config(self) -> Dict[str, Any]:
@@ -1010,6 +1021,11 @@ class UnifiedTrainingSystem:
         from data_processing import PowerGridDataProcessor
         from rl.gym_wrapper import make_parallel_env
         from stable_baselines3 import PPO
+        
+        # 【修复】在创建并行环境前，将主进程中已解析好的设备名称更新到配置字典中
+        # 避免子进程收到 "auto" 字符串导致 torch.device() 报错
+        config['system']['device'] = str(self.device)
+        print(f"🔧 并行训练设备配置已更新: {config['system']['device']}")
 
         # 1. 数据处理
         print("\n1️⃣ 数据处理...")
@@ -1060,6 +1076,10 @@ class UnifiedTrainingSystem:
     def _run_simple_parallel_training(self, config: Dict[str, Any]) -> Dict[str, Any]:
         """简化的并行训练（不依赖gym和stable-baselines3）"""
         print("\n⚠️ 使用简化的并行训练模式（无gym/stable-baselines3）")
+        
+        # 【修复】确保设备配置正确传递给子进程
+        config['system']['device'] = str(self.device)
+        print(f"🔧 简化并行训练设备配置已更新: {config['system']['device']}")
 
         # 导入必要模块
         from data_processing import PowerGridDataProcessor

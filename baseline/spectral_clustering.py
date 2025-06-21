@@ -20,6 +20,54 @@ class SpectralPartitioner(BasePartitioner):
         # 每次执行前设置随机种子
         self._set_seed()
         
+        try:
+            # 首先尝试使用 METIS 进行分区
+            return self._metis_partition(env)
+        except Exception as e:
+            print(f"⚠️ METIS 分区失败: {str(e)}，使用谱聚类...")
+            return self._spectral_clustering_partition(env)
+    
+    def _metis_partition(self, env: 'PowerGridPartitionEnv') -> np.ndarray:
+        """使用 PyMetis 进行图分区"""
+        try:
+            import pymetis
+        except ImportError:
+            raise ImportError("PyMetis 未安装或不可用")
+        
+        # 构建邻接列表（PyMetis 需要的格式）
+        adjacency_list = self._build_adjacency_list(env)
+        
+        # 使用 PyMetis 进行分区
+        n_cuts, membership = pymetis.part_graph(env.K, adjacency=adjacency_list)
+        
+        # PyMetis 返回 0-based 标签，转换为 1-based
+        labels = np.array(membership) + 1
+        
+        print(f"✅ PyMetis 分区成功：切边数 = {n_cuts}")
+        return labels
+    
+    def _build_adjacency_list(self, env: 'PowerGridPartitionEnv') -> list:
+        """构建 PyMetis 需要的邻接列表格式"""
+        # 获取边信息
+        edge_array = env.edge_index.cpu().numpy()
+        
+        # 初始化邻接列表
+        adjacency_list = [[] for _ in range(env.N)]
+        
+        # 构建邻接列表
+        for i in range(edge_array.shape[1]):
+            u, v = edge_array[0, i], edge_array[1, i]
+            # PyMetis 需要无向图，每条边都要添加两次
+            adjacency_list[u].append(v)
+            adjacency_list[v].append(u)
+        
+        # 转换为 numpy 数组格式（PyMetis 要求）
+        adjacency_list = [np.array(adj, dtype=np.int32) for adj in adjacency_list]
+        
+        return adjacency_list
+    
+    def _spectral_clustering_partition(self, env: 'PowerGridPartitionEnv') -> np.ndarray:
+        """使用 scikit-learn 的谱聚类作为备选方案"""
         # 构建邻接矩阵
         adj_matrix = np.zeros((env.N, env.N))
         edge_array = env.edge_index.cpu().numpy()

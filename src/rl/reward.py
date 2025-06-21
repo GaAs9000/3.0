@@ -1,13 +1,7 @@
 """
-电力网络分区MDP的奖励函数
+电力网络分区MDP的增强奖励函数（带调试功能）
 
-本模块实现MDP公式中指定的复合奖励函数：
-R_t = w1 * R_balance + w2 * R_decoupling + w3 * R_internal_balance
-
-其中：
-- R_balance: 分区负载平衡奖励(-Var(L1, ..., LK))
-- R_decoupling: 电气解耦奖励(-Σ|Y_uv| 对于耦合边)
-- R_internal_balance: 内部功率平衡奖励(-Σ(P_gen - P_load)²)
+修复了物理属性的使用，并添加了详细的调试功能
 """
 
 import torch
@@ -18,7 +12,7 @@ from torch_geometric.data import HeteroData
 
 class RewardFunction:
     """
-    计算分区的奖励函数
+    计算分区的奖励函数（带调试功能）
     
     主要关注：
     1. 负载平衡 - 确保计算负载在各分区间相对均衡
@@ -29,7 +23,8 @@ class RewardFunction:
     def __init__(self,
                  hetero_data: HeteroData,
                  reward_weights: Dict[str, float] = None,
-                 device: torch.device = None):
+                 device: torch.device = None,
+                 debug_mode: bool = False):
         """
         初始化奖励函数
         
@@ -37,9 +32,11 @@ class RewardFunction:
             hetero_data: 异构图数据
             reward_weights: 奖励组件权重
             device: 计算设备
+            debug_mode: 是否启用调试模式
         """
         self.device = device or torch.device('cpu')
         self.hetero_data = hetero_data.to(self.device)
+        self.debug_mode = debug_mode
         
         # 默认权重配置（专为计算分区优化）
         default_weights = {
@@ -50,14 +47,73 @@ class RewardFunction:
         
         self.weights = reward_weights or default_weights
         
+        # 调试信息存储
+        self.debug_info = {}
+        
         # 预处理数据结构
         self._setup_network_data()
         
+        if self.debug_mode:
+            self._print_data_summary()
+    
     def _setup_network_data(self):
-        """设置网络数据用于奖励计算"""
-        # 提取边信息
+        """设置网络数据用于奖励计算 (已修复顺序)"""
+        
+        # 1. 【修复】首先计算节点总数，确保它在使用前已定义
+        self.total_nodes = sum(x.shape[0] for x in self.hetero_data.x_dict.values())
+        
+        # 2. 然后再提取依赖于 total_nodes 的物理数据
+        self._extract_physical_data()
+        
+        # 3. 最后提取边信息
+        self._extract_edge_data()
+        
+        if self.debug_mode:
+            print(f"🔍 网络数据设置完成:")
+            print(f"    - 总节点数: {self.total_nodes}")
+            print(f"    - 总负载: {self.node_loads.sum().item():.2f} MW")
+            print(f"    - 总发电: {self.node_generation.sum().item():.2f} MW")
+            print(f"    - 总边数: {self.all_edges.shape[1]}")
+    
+    def _extract_physical_data(self):
+        """提取真实的物理数据（有功负载、无功负载、发电等）"""
+        all_features = []
+        
+        # 收集所有节点特征
+        for node_type in self.hetero_data.x_dict.keys():
+            features = self.hetero_data.x_dict[node_type]
+            all_features.append(features)
+        
+        self.all_node_features = torch.cat(all_features, dim=0)
+        
+        # 根据data_processing.py中的特征顺序提取物理量
+        # 特征顺序: ['Pd', 'Qd', 'Gs', 'Bs', 'Vm', 'Va', 'Vmax', 'Vmin', 'degree']
+        self.node_loads = self.all_node_features[:, 0]  # Pd (有功负载)
+        self.node_reactive_loads = self.all_node_features[:, 1]  # Qd (无功负载)
+        
+        # 如果有发电机数据（在特征扩展后）
+        # 特征扩展后: [..., 'Pg', 'Qg', 'Pg_max', 'Pg_min', 'is_gen']
+        if self.all_node_features.shape[1] > 9:
+            self.node_generation = self.all_node_features[:, 9]  # Pg
+            self.node_reactive_generation = self.all_node_features[:, 10]  # Qg
+            self.is_generator = self.all_node_features[:, 13] > 0.5  # is_gen
+        else:
+            self.node_generation = torch.zeros_like(self.node_loads)
+            self.node_reactive_generation = torch.zeros_like(self.node_loads)
+            self.is_generator = torch.zeros(self.total_nodes, dtype=torch.bool, device=self.device)
+        
+        if self.debug_mode:
+            print(f"\n📊 物理数据提取:")
+            print(f"   - 有功负载范围: [{self.node_loads.min():.2f}, {self.node_loads.max():.2f}] MW")
+            print(f"   - 无功负载范围: [{self.node_reactive_loads.min():.2f}, {self.node_reactive_loads.max():.2f}] MVar")
+            print(f"   - 发电机节点数: {self.is_generator.sum().item()}")
+    
+    def _extract_edge_data(self):
+        """提取边数据（电气参数）"""
         self.edges = []
-        self.edge_powers = []
+        self.edge_admittances = []
+        self.edge_resistances = []
+        self.edge_reactances = []
         
         for edge_type, edge_index in self.hetero_data.edge_index_dict.items():
             edge_attr = self.hetero_data.edge_attr_dict[edge_type]
@@ -68,73 +124,71 @@ class RewardFunction:
             
             self.edges.append(global_edges)
             
-            # 提取有功功率信息（用于功率平衡计算）
-            if edge_attr.shape[1] > 1:
-                power = edge_attr[:, 1]  # 假设有功功率在索引1
-                self.edge_powers.append(power)
+            # 根据边特征顺序提取电气参数
+            # 特征顺序: ['r', 'x', 'b', '|z|', 'y', 'rateA', 'angle_diff', 'is_transformer', 'status']
+            if edge_attr.shape[1] >= 5:
+                resistance = edge_attr[:, 0]  # r
+                reactance = edge_attr[:, 1]   # x
+                admittance = edge_attr[:, 4]  # y
             else:
-                power = torch.ones(edge_index.shape[1], device=self.device)
-                self.edge_powers.append(power)
-                
+                # 默认值
+                num_edges = edge_index.shape[1]
+                resistance = torch.ones(num_edges, device=self.device) * 0.01
+                reactance = torch.ones(num_edges, device=self.device) * 0.1
+                admittance = 1.0 / torch.sqrt(resistance**2 + reactance**2)
+            
+            self.edge_resistances.append(resistance)
+            self.edge_reactances.append(reactance)
+            self.edge_admittances.append(admittance)
+        
         if self.edges:
             self.all_edges = torch.cat(self.edges, dim=1)
-            self.all_edge_powers = torch.cat(self.edge_powers, dim=0)
+            self.all_edge_admittances = torch.cat(self.edge_admittances, dim=0)
+            self.all_edge_resistances = torch.cat(self.edge_resistances, dim=0)
+            self.all_edge_reactances = torch.cat(self.edge_reactances, dim=0)
         else:
             self.all_edges = torch.empty((2, 0), device=self.device)
-            self.all_edge_powers = torch.empty(0, device=self.device)
-            
-        # 节点数量
-        self.total_nodes = sum(x.shape[0] for x in self.hetero_data.x_dict.values())
-        
-        # 节点负载数据（用于负载平衡计算）
-        self._setup_node_loads()
-        
-    def _setup_node_loads(self):
-        """设置节点负载数据"""
-        # 合并所有节点特征来估计负载
-        all_node_features = []
-        
-        for node_type, features in self.hetero_data.x_dict.items():
-            all_node_features.append(features)
-            
-        if all_node_features:
-            # 使用节点特征的L2范数作为负载指标
-            combined_features = torch.cat(all_node_features, dim=0)
-            self.node_loads = torch.norm(combined_features, dim=1)
-        else:
-            self.node_loads = torch.ones(self.total_nodes, device=self.device)
-            
+            self.all_edge_admittances = torch.empty(0, device=self.device)
+            self.all_edge_resistances = torch.empty(0, device=self.device)
+            self.all_edge_reactances = torch.empty(0, device=self.device)
+    
     def _convert_to_global_indices(self, edge_index: torch.Tensor, 
                                  src_type: str, dst_type: str) -> torch.Tensor:
         """将本地边索引转换为全局索引"""
-        # 这里需要节点类型映射，简化实现
-        # 实际实现中应该使用正确的映射逻辑
+        # 简化实现 - 实际应用中需要正确的映射
         return edge_index
-        
+    
     def compute_reward(self,
                       current_partition: torch.Tensor,
                       boundary_nodes: torch.Tensor,
-                      action: Tuple[int, int]) -> float:
+                      action: Tuple[int, int],
+                      return_components: bool = False) -> float:
         """
         计算给定动作的综合奖励
-        
-        专为计算分区优化：
-        - 平衡计算负载
-        - 减少跨分区连接复杂度
-        - 优化功率流分布
         
         Args:
             current_partition: 当前分区分配
             boundary_nodes: 边界节点
             action: 执行的动作
+            return_components: 是否返回各组件奖励（用于调试）
             
         Returns:
-            综合奖励值
+            综合奖励值或(奖励值, 组件字典)
         """
+        # 清空调试信息
+        self.debug_info = {}
+        
         # 计算各组件奖励
         load_balance_reward = self._compute_load_balance_reward(current_partition)
         electrical_decoupling_reward = self._compute_electrical_decoupling_reward(current_partition)
         power_balance_reward = self._compute_power_balance_reward(current_partition)
+        
+        # 记录组件值
+        components = {
+            'load_balance': load_balance_reward.item(),
+            'electrical_decoupling': electrical_decoupling_reward.item(),
+            'power_balance': power_balance_reward.item()
+        }
         
         # 综合加权奖励
         total_reward = (
@@ -143,106 +197,167 @@ class RewardFunction:
             self.weights['power_balance'] * power_balance_reward
         )
         
-        return total_reward.item()
+        if self.debug_mode:
+            self._print_reward_breakdown(components, total_reward.item())
         
+        if return_components:
+            return total_reward.item(), components
+        else:
+            return total_reward.item()
+    
     def _compute_load_balance_reward(self, current_partition: torch.Tensor) -> torch.Tensor:
         """
-        计算负载平衡奖励
-        
-        目的：确保各分区的计算负载相对均衡，避免某些分区计算任务过重
-        
-        Args:
-            current_partition: 当前分区分配
-            
-        Returns:
-            负载平衡奖励（越平衡奖励越高）
+        计算负载平衡奖励（基于真实物理负载）
         """
         num_partitions = current_partition.max().item()
         if num_partitions <= 1:
             return torch.tensor(1.0, device=self.device)
-            
-        # 计算每个分区的总负载
+        
+        # 计算每个分区的总负载（使用真实的有功负载）
         partition_loads = torch.zeros(num_partitions, device=self.device)
         
         for partition_id in range(1, num_partitions + 1):
             mask = (current_partition == partition_id)
             if mask.any():
                 partition_loads[partition_id - 1] = self.node_loads[mask].sum()
-                
+        
         # 计算负载分布的均匀程度
         mean_load = partition_loads.mean()
         load_std = partition_loads.std()
+        load_cv = load_std / mean_load if mean_load > 0 else 0.0
         
         # 奖励较低的标准差（更均匀的分布）
-        if mean_load > 0:
-            normalized_std = load_std / mean_load
-            reward = torch.exp(-normalized_std)  # 标准差越小，奖励越高
-        else:
-            reward = torch.tensor(1.0, device=self.device)
-            
-        return reward
+        reward = torch.exp(-2.0 * load_cv)  # 调整系数以获得更好的梯度
         
+        # 记录调试信息
+        if self.debug_mode:
+            self.debug_info['load_balance'] = {
+                'partition_loads': partition_loads.cpu().numpy().tolist(),
+                'mean_load': mean_load.item(),
+                'std_load': load_std.item(),
+                'cv': load_cv,
+                'reward': reward.item()
+            }
+        
+        return reward
+    
     def _compute_electrical_decoupling_reward(self, current_partition: torch.Tensor) -> torch.Tensor:
         """
-        计算电气解耦奖励
-        
-        目的：减少分区间的电气连接数量，简化潮流计算的复杂度
-        
-        Args:
-            current_partition: 当前分区分配
-            
-        Returns:
-            电气解耦奖励（跨分区连接越少奖励越高）
+        计算电气解耦奖励（基于真实导纳）
         """
         if self.all_edges.shape[1] == 0:
             return torch.tensor(1.0, device=self.device)
-            
-        # 计算跨分区连接数
-        src_partitions = current_partition[self.all_edges[0]]
-        dst_partitions = current_partition[self.all_edges[1]]
         
-        cross_partition_edges = (src_partitions != dst_partitions).sum().float()
-        total_edges = self.all_edges.shape[1]
-        
-        # 计算内部连接比例（用于奖励）
-        internal_edge_ratio = 1.0 - (cross_partition_edges / total_edges)
-        
-        # 使用sigmoid函数平滑奖励
-        reward = torch.sigmoid(5 * (internal_edge_ratio - 0.5))
-        
-        return reward
-        
-    def _compute_power_balance_reward(self, current_partition: torch.Tensor) -> torch.Tensor:
-        """
-        计算功率平衡奖励
-        
-        目的：减少分区间的功率交换，使联络线潮流预测更加准确
-        
-        Args:
-            current_partition: 当前分区分配
-            
-        Returns:
-            功率平衡奖励（分区间功率交换越少奖励越高）
-        """
-        if self.all_edges.shape[1] == 0:
-            return torch.tensor(1.0, device=self.device)
-            
-        # 计算跨分区功率流
+        # 计算跨分区连接
         src_partitions = current_partition[self.all_edges[0]]
         dst_partitions = current_partition[self.all_edges[1]]
         
         cross_partition_mask = (src_partitions != dst_partitions)
-        cross_partition_powers = self.all_edge_powers[cross_partition_mask]
+        cross_partition_edges = cross_partition_mask.sum().float()
+        total_edges = self.all_edges.shape[1]
         
-        # 计算总的跨分区功率交换
-        total_cross_power = cross_partition_powers.abs().sum()
-        total_power = self.all_edge_powers.abs().sum()
+        # 计算跨分区的总导纳（电气耦合强度）
+        cross_partition_admittance = self.all_edge_admittances[cross_partition_mask].sum()
+        total_admittance = self.all_edge_admittances.sum()
         
-        if total_power > 0:
-            # 内部功率流比例
-            internal_power_ratio = 1.0 - (total_cross_power / total_power)
-            reward = torch.sigmoid(3 * (internal_power_ratio - 0.3))
-        else:
-            reward = torch.tensor(1.0, device=self.device)
-            
+        # 内部连接比例
+        internal_edge_ratio = 1.0 - (cross_partition_edges / total_edges)
+        internal_admittance_ratio = 1.0 - (cross_partition_admittance / total_admittance) if total_admittance > 0 else 1.0
+        
+        # 综合考虑连接数和电气耦合强度
+        reward = 0.5 * torch.sigmoid(5 * (internal_edge_ratio - 0.5)) + \
+                 0.5 * torch.sigmoid(5 * (internal_admittance_ratio - 0.5))
+        
+        if self.debug_mode:
+            self.debug_info['electrical_decoupling'] = {
+                'cross_partition_edges': int(cross_partition_edges.item()),
+                'total_edges': total_edges,
+                'cross_partition_admittance': cross_partition_admittance.item(),
+                'total_admittance': total_admittance.item(),
+                'internal_edge_ratio': internal_edge_ratio.item(),
+                'internal_admittance_ratio': internal_admittance_ratio.item(),
+                'reward': reward.item()
+            }
+        
         return reward
+    
+    def _compute_power_balance_reward(self, current_partition: torch.Tensor) -> torch.Tensor:
+        """
+        计算功率平衡奖励（基于真实发电和负载）
+        """
+        num_partitions = current_partition.max().item()
+        if num_partitions <= 1:
+            return torch.tensor(1.0, device=self.device)
+        
+        # 计算每个分区的功率不平衡
+        power_imbalances = []
+        
+        for partition_id in range(1, num_partitions + 1):
+            mask = (current_partition == partition_id)
+            if mask.any():
+                partition_load = self.node_loads[mask].sum()
+                partition_generation = self.node_generation[mask].sum()
+                imbalance = abs(partition_generation - partition_load)
+                power_imbalances.append(imbalance)
+        
+        if not power_imbalances:
+            return torch.tensor(1.0, device=self.device)
+        
+        # 转换为张量
+        power_imbalances = torch.tensor(power_imbalances, device=self.device)
+        total_imbalance = power_imbalances.sum()
+        total_load = self.node_loads.sum()
+        
+        # 归一化不平衡
+        normalized_imbalance = total_imbalance / total_load if total_load > 0 else 0.0
+        
+        # 奖励较小的不平衡
+        reward = torch.exp(-3.0 * normalized_imbalance)
+        
+        if self.debug_mode:
+            self.debug_info['power_balance'] = {
+                'partition_imbalances': power_imbalances.cpu().numpy().tolist(),
+                'total_imbalance': total_imbalance.item(),
+                'normalized_imbalance': normalized_imbalance.item(),
+                'reward': reward.item()
+            }
+        
+        return reward
+    
+    def _print_data_summary(self):
+        """打印数据摘要（调试用）"""
+        print("\n" + "="*60)
+        print("📊 奖励函数数据摘要")
+        print("="*60)
+        print(f"总节点数: {self.total_nodes}")
+        print(f"总边数: {self.all_edges.shape[1] if hasattr(self, 'all_edges') else 0}")
+        print(f"\n负载统计:")
+        print(f"  - 总有功负载: {self.node_loads.sum().item():.2f} MW")
+        print(f"  - 平均有功负载: {self.node_loads.mean().item():.2f} MW")
+        print(f"  - 负载标准差: {self.node_loads.std().item():.2f} MW")
+        print(f"\n发电统计:")
+        print(f"  - 总有功发电: {self.node_generation.sum().item():.2f} MW")
+        print(f"  - 发电机数量: {self.is_generator.sum().item()}")
+        print(f"\n电气参数统计:")
+        if hasattr(self, 'all_edge_admittances'):
+            print(f"  - 平均导纳: {self.all_edge_admittances.mean().item():.4f}")
+            print(f"  - 导纳范围: [{self.all_edge_admittances.min().item():.4f}, {self.all_edge_admittances.max().item():.4f}]")
+        print("="*60)
+    
+    def _print_reward_breakdown(self, components: Dict[str, float], total: float):
+        """打印奖励分解（调试用）"""
+        print(f"\n🎯 奖励分解:")
+        print(f"  负载平衡: {components['load_balance']:.4f} (权重: {self.weights['load_balance']})")
+        print(f"  电气解耦: {components['electrical_decoupling']:.4f} (权重: {self.weights['electrical_decoupling']})")
+        print(f"  功率平衡: {components['power_balance']:.4f} (权重: {self.weights['power_balance']})")
+        print(f"  总奖励: {total:.4f}")
+    
+    def get_debug_info(self) -> Dict:
+        """获取调试信息"""
+        return self.debug_info
+    
+    def set_weights(self, weights: Dict[str, float]):
+        """动态设置奖励权重（用于调试不同组件）"""
+        self.weights.update(weights)
+        if self.debug_mode:
+            print(f"\n⚙️ 更新奖励权重: {self.weights}")

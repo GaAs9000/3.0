@@ -16,11 +16,11 @@ from torch_geometric.data import HeteroData
 import warnings
 
 try:
-    import metis
+    import pymetis
     METIS_AVAILABLE = True
-except ImportError:
+except (ImportError, RuntimeError):
     METIS_AVAILABLE = False
-    warnings.warn("METIS不可用。使用回退的谱聚类进行初始化。")
+    warnings.warn("PyMetis 库加载失败。将使用备用方法（谱聚类或随机分区）进行初始化。")
 
 try:
     from sklearn.cluster import SpectralClustering
@@ -159,36 +159,27 @@ class MetisInitializer:
             return self._random_partition(num_partitions)
             
     def _metis_partition(self, num_partitions: int) -> torch.Tensor:
-        """使用METIS算法分区"""
-        # 将邻接列表转换为METIS格式
-        xadj = [0]
-        adjncy = []
-        
-        for neighbors in self.adjacency_list:
-            adjncy.extend(neighbors)
-            xadj.append(len(adjncy))
-            
-        # 运行METIS分区
-        if len(adjncy) == 0:
+        """使用PyMetis算法分区"""
+        # 检查是否有边
+        if not any(self.adjacency_list):
             # 没有边 - 使用随机分区
             return self._random_partition(num_partitions)
             
         try:
-            vwgt = self.node_weights if isinstance(self.node_weights, list) else self.node_weights.tolist()
-            _, partition = metis.part_graph(
-                nparts=num_partitions,
-                xadj=xadj,
-                adjncy=adjncy,
-                vwgt=vwgt,
-                recursive=True
-            )
+            # PyMetis 需要邻接列表格式，每个元素是 numpy 数组
+            adjacency_list = [np.array(neighbors, dtype=np.int32) for neighbors in self.adjacency_list]
             
-            # 转换为基于1的索引和torch张量
+            # 使用 PyMetis 进行分区
+            n_cuts, partition = pymetis.part_graph(num_partitions, adjacency=adjacency_list)
+            
+            # PyMetis 返回 0-based 标签，转换为 1-based
             partition_tensor = torch.tensor(partition, device=self.device) + 1
+            
+            print(f"✅ PyMetis 初始化分区成功：切边数 = {n_cuts}")
             return partition_tensor
             
         except Exception as e:
-            warnings.warn(f"METIS失败：{e}。使用谱聚类回退。")
+            warnings.warn(f"PyMetis失败：{e}。使用谱聚类回退。")
             return self._spectral_partition(num_partitions)
             
     def _spectral_partition(self, num_partitions: int) -> torch.Tensor:

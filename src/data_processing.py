@@ -50,19 +50,44 @@ class PowerGridDataProcessor:
         case_hash = hashlib.md5(raw_bytes).hexdigest()[:8]
         cache_file = f"{self.cache_dir}/{case_hash}_hetero.pt"
         
-        # 2. 尝试从缓存加载
+        # 2. 尝试从缓存加载（带进程锁保护）
+        lock_file = cache_file + ".lock"
         if os.path.exists(cache_file):
-            print(f"📂 从缓存加载异构图: {cache_file}")
-            return torch.load(cache_file, map_location="cpu", weights_only=False)
+            try:
+                # 等待锁文件释放（最多等待30秒）
+                wait_count = 0
+                while os.path.exists(lock_file) and wait_count < 30:
+                    import time
+                    time.sleep(1)
+                    wait_count += 1
+                
+                if os.path.exists(cache_file):
+                    print(f"📂 从缓存加载异构图: {cache_file}")
+                    return torch.load(cache_file, map_location="cpu", weights_only=False)
+            except Exception as e:
+                print(f"⚠️ 缓存加载失败: {e}，重新构建...")
         
         # 3. 首次构建异构图数据
         print(f"🔨 首次构建异构图数据...")
         baseMVA, df_nodes, df_edges, df_edge_features = self.process_matpower_data(mpc)
         data = self.create_pyg_hetero_data(df_nodes, df_edges, df_edge_features)
         
-        # 4. 保存到缓存
-        torch.save(data, cache_file, pickle_protocol=pickle.DEFAULT_PROTOCOL)
-        print(f"💾 已缓存异构图到: {cache_file}")
+        # 4. 保存到缓存（带进程锁保护）
+        try:
+            # 创建锁文件
+            with open(lock_file, 'w') as f:
+                f.write(str(os.getpid()))
+            
+            torch.save(data, cache_file, pickle_protocol=pickle.DEFAULT_PROTOCOL)
+            print(f"💾 已缓存异构图到: {cache_file}")
+            
+            # 删除锁文件
+            if os.path.exists(lock_file):
+                os.remove(lock_file)
+        except Exception as e:
+            print(f"⚠️ 缓存保存失败: {e}")
+            if os.path.exists(lock_file):
+                os.remove(lock_file)
         
         return data   
     

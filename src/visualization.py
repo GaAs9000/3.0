@@ -73,9 +73,28 @@ class VisualizationManager:
                           title: str = "Power Grid Partition",
                           save_path: Optional[str] = None) -> None:
         """
-        可视化电网分区结果
+        可视化电网分区结果 (已修复以兼容新版环境)
         """
         if not self.enabled:
+            return
+            
+        # 从 env 对象的正确位置获取数据
+        try:
+            # 使用 state_manager 获取分区和节点总数
+            current_partition = env.state_manager.current_partition
+            total_nodes = env.total_nodes
+            num_partitions = env.num_partitions
+
+            # 使用 edge_info 获取边信息
+            edge_array = env.edge_info['edge_index'].cpu().numpy()
+            
+            # 使用 evaluator 获取物理数据
+            node_pd = env.evaluator.load_active
+            node_pg = env.evaluator.gen_active
+            edge_admittance = env.evaluator.edge_admittances
+
+        except AttributeError as e:
+            print(f"❌ 可视化失败：无法从env对象获取必要的属性。请确保env对象结构正确。错误: {e}")
             return
             
         try:
@@ -91,23 +110,14 @@ class VisualizationManager:
             coupling_edge_alpha = partition_config.get('coupling_edge_alpha', 0.6)
             font_size = partition_config.get('font_size', 8)
             
-            # 创建图形
-            if show_metrics:
-                fig = plt.figure(figsize=figsize)
-                gs = fig.add_gridspec(2, 3, width_ratios=[2, 1, 1], height_ratios=[3, 1])
-                ax_main = fig.add_subplot(gs[:, 0])
-                ax_metrics = fig.add_subplot(gs[0, 1])
-                ax_load = fig.add_subplot(gs[0, 2])
-                ax_coupling = fig.add_subplot(gs[1, 1:])
-            else:
-                fig, ax_main = plt.subplots(figsize=figsize)
+            # 创建图形 (简化版本，专注于核心可视化)
+            fig, ax_main = plt.subplots(figsize=figsize)
             
             # 创建NetworkX图
             G = nx.Graph()
-            edge_array = env.edge_index.cpu().numpy()
             
             # 添加节点
-            for i in range(env.N):
+            for i in range(total_nodes):
                 G.add_node(i)
             
             # 添加边（去重）
@@ -123,11 +133,11 @@ class VisualizationManager:
             
             # 颜色方案
             unassigned_color = self.viz_config.get('colors', {}).get('unassigned_color', '#E0E0E0')
-            colors = [unassigned_color] + self.get_color_palette(env.K)
+            colors = [unassigned_color] + self.get_color_palette(num_partitions)
             
             # 节点颜色和大小
-            node_colors = [colors[env.z[i].item()] for i in range(env.N)]
-            node_sizes = [300 + env.Pd[i].item() * node_size_scale for i in range(env.N)]
+            node_colors = [colors[current_partition[i].item()] for i in range(total_nodes)]
+            node_sizes = [300 + node_pd[i].item() * node_size_scale for i in range(total_nodes)]
             
             # 绘制边
             nx.draw_networkx_edges(G, pos, alpha=edge_alpha, ax=ax_main)
@@ -135,23 +145,21 @@ class VisualizationManager:
             # 高亮跨区域边
             inter_edges = []
             for u, v in edge_set:
-                if env.z[u] > 0 and env.z[v] > 0 and env.z[u] != env.z[v]:
+                if current_partition[u] > 0 and current_partition[v] > 0 and current_partition[u] != current_partition[v]:
                     inter_edges.append((u, v))
             
             nx.draw_networkx_edges(G, pos, edgelist=inter_edges, edge_color='red',
                                   width=coupling_edge_width, alpha=coupling_edge_alpha, ax=ax_main)
             
-            # 绘制节点
+            # 绘制节点和标签
             nx.draw_networkx_nodes(G, pos, node_color=node_colors, node_size=node_sizes,
                                   alpha=0.9, ax=ax_main)
-            
-            # 节点标签
             nx.draw_networkx_labels(G, pos, font_size=font_size, font_weight='bold', ax=ax_main)
             
-            # 添加图例
+            # 图例
             legend_elements = []
-            for k in range(env.K + 1):
-                count = (env.z == k).sum().item()
+            for k in range(num_partitions + 1):
+                count = (current_partition == k).sum().item()
                 if k == 0:
                     label = f'Unassigned ({count} nodes)'
                 else:
@@ -161,83 +169,7 @@ class VisualizationManager:
             ax_main.legend(handles=legend_elements, loc='upper right', bbox_to_anchor=(1.15, 1))
             ax_main.set_title(title, fontsize=16, fontweight='bold')
             ax_main.axis('off')
-            
-            if show_metrics:
-                # 显示指标
-                metrics = env.current_metrics
-                
-                # 指标表格
-                ax_metrics.axis('off')
-                ax_metrics.set_title('Partition Metrics', fontsize=14, fontweight='bold')
-                
-                metric_data = [
-                    ['Load CV', f'{metrics.load_cv:.4f}'],
-                    ['Load Gini', f'{metrics.load_gini:.4f}'],
-                    ['Total Coupling', f'{metrics.total_coupling:.4f}'],
-                    ['Inter-region Lines', f'{metrics.inter_region_lines}'],
-                    ['Connectivity', f'{metrics.connectivity:.2f}'],
-                    ['Modularity', f'{metrics.modularity:.4f}']
-                ]
-                
-                table = ax_metrics.table(cellText=metric_data, loc='center',
-                                        cellLoc='left', colWidths=[0.6, 0.4])
-                table.auto_set_font_size(False)
-                table.set_fontsize(10)
-                table.scale(1, 1.5)
-                
-                # 负荷分布图
-                ax_load.set_title('Load Distribution', fontsize=12)
-                region_loads = []
-                region_labels = []
-                
-                for k in range(1, env.K + 1):
-                    mask = (env.z == k)
-                    if mask.any():
-                        load = env.Pd[mask].sum().item()
-                        gen = env.Pg[mask].sum().item()
-                        region_loads.append([load, gen])
-                        region_labels.append(f'R{k}')
-                
-                if region_loads:
-                    region_loads = np.array(region_loads)
-                    x = np.arange(len(region_labels))
-                    width = 0.35
-                    
-                    bars1 = ax_load.bar(x - width/2, region_loads[:, 0], width,
-                                       label='Load', color='lightcoral')
-                    bars2 = ax_load.bar(x + width/2, region_loads[:, 1], width,
-                                       label='Generation', color='lightgreen')
-                    
-                    ax_load.set_ylabel('Power (p.u.)')
-                    ax_load.set_xticks(x)
-                    ax_load.set_xticklabels(region_labels)
-                    ax_load.legend()
-                    
-                    # 添加数值标签
-                    for bars in [bars1, bars2]:
-                        for bar in bars:
-                            height = bar.get_height()
-                            ax_load.text(bar.get_x() + bar.get_width()/2., height,
-                                        f'{height:.2f}', ha='center', va='bottom', fontsize=8)
-                
-                # 耦合矩阵热图
-                ax_coupling.set_title('Region Coupling Matrix', fontsize=12)
-                coupling_matrix = np.zeros((env.K, env.K))
-                
-                for i in range(edge_array.shape[1]):
-                    u, v = edge_array[0, i], edge_array[1, i]
-                    if env.z[u] > 0 and env.z[v] > 0 and env.z[u] != env.z[v]:
-                        coupling_matrix[env.z[u]-1, env.z[v]-1] += env.admittance[i].item()
-                
-                heatmap_config = self.viz_config.get('heatmap', {})
-                colorscale = heatmap_config.get('colorscale', 'YlOrRd')
-                text_font_size = heatmap_config.get('text_font_size', 10)
-                
-                sns.heatmap(coupling_matrix, annot=True, fmt='.3f', cmap=colorscale,
-                           xticklabels=[f'R{i+1}' for i in range(env.K)],
-                           yticklabels=[f'R{i+1}' for i in range(env.K)],
-                           ax=ax_coupling, cbar_kws={'label': 'Coupling Strength'})
-            
+
             plt.tight_layout()
             
             # 保存图片
@@ -255,7 +187,9 @@ class VisualizationManager:
             gc.collect()
             
         except Exception as e:
-            print(f"⚠️ 分区可视化出错: {e}")
+            print(f"⚠️ 可视化执行出错: {e}")
+            import traceback
+            traceback.print_exc()
             try:
                 plt.close('all')
                 gc.collect()
@@ -586,7 +520,7 @@ def get_color_palette(num_colors: int) -> List[str]:
 
 def visualize_partition(env: 'PowerGridPartitionEnv', title: str = "Power Grid Partition",
                        save_path: Optional[str] = None, show_metrics: bool = True):
-    """向后兼容的分区可视化函数"""
+    """向后兼容的分区可视化函数 (已修复)"""
     # 使用默认配置
     default_config = {'visualization': {'enabled': True, 'save_figures': True}}
     viz_manager = VisualizationManager(default_config)
