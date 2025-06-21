@@ -14,7 +14,15 @@ from typing import Dict, List, Tuple, Optional, Any
 from collections import deque
 import copy
 
-from ..gat import HeteroGraphEncoder
+try:
+    from ..gat import HeteroGraphEncoder
+except ImportError:
+    # 如果相对导入失败，尝试绝对导入
+    try:
+        from gat import HeteroGraphEncoder
+    except ImportError:
+        # 如果都失败了，定义一个占位符
+        HeteroGraphEncoder = None
 
 
 class ActorNetwork(nn.Module):

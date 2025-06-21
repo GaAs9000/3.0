@@ -8,7 +8,7 @@ system:
   description: "电力网络分区强化学习统一训练系统"
   device: auto          # 设备选择 ('cpu', 'cuda', 或 'auto')
   seed: 42              # 随机种子
-  num_threads: 1        # CPU线程数
+  num_threads: 12        # CPU线程数
   warnings: ignore      # 警告处理方式
 
 # ==================== 数据配置 ====================

@@ -84,6 +84,46 @@ python train_unified.py --mode curriculum
 python train_unified.py --mode standard --save-results
 ```
 
+## 📈 训练过程监控
+
+系统提供完整的训练监控功能，帮助您实时观测训练进展：
+
+### 启动训练（自动启用监控）
+```bash
+# 标准训练（已集成TensorBoard、检查点、可视化）
+python train_unified.py --mode standard --save-results
+```
+
+### 实时监控工具
+```bash
+# 实时图表监控（6个子图显示关键指标）
+python monitor_training.py
+
+# 快速检查训练进度
+python check_training_progress.py
+
+# 持续监控模式（每10秒更新）
+python check_training_progress.py --watch --interval 10
+
+# TensorBoard详细分析
+tensorboard --logdir=logs
+# 访问 http://localhost:6006
+```
+
+### 监控指标
+- **训练指标**: 奖励曲线、回合长度、成功率
+- **性能指标**: 负载变异系数、电气耦合度
+- **训练损失**: Actor/Critic损失、策略熵
+- **统计信息**: 最佳奖励、移动平均、训练时间
+
+### 输出文件
+- `logs/` - TensorBoard日志文件
+- `checkpoints/` - 训练中间检查点
+- `experiments/` - 最终结果和报告
+- `figures/` - 训练曲线和分区可视化图
+
+详细监控使用说明请参考：[训练监控指南](TRAINING_MONITORING_GUIDE.md)
+
 ## 📖 详细文档
 
 - **[技术文档](docs/TECHNICAL_GUIDE.md)** - src目录各模块详细说明

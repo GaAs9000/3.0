@@ -174,7 +174,7 @@ class StateManager:
                     boundary_set.add(node_idx)
                     break
                     
-        self.boundary_nodes = torch.tensor(list(boundary_set), device=self.device)
+        self.boundary_nodes = torch.tensor(list(boundary_set), dtype=torch.long, device=self.device)
         
     def _update_boundary_nodes_incremental(self, changed_node: int, old_partition: int, new_partition: int):
         """单个节点变化后增量更新边界节点"""
@@ -217,7 +217,7 @@ class StateManager:
             else:
                 boundary_set.discard(neighbor_idx)
                 
-        self.boundary_nodes = torch.tensor(list(boundary_set), device=self.device)
+        self.boundary_nodes = torch.tensor(list(boundary_set), dtype=torch.long, device=self.device)
         
     def _compute_region_embeddings(self):
         """计算所有分区的区域聚合嵌入"""

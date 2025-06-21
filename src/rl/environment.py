@@ -4,10 +4,20 @@ from typing import Dict, Tuple, List, Optional, Union, Any
 from torch_geometric.data import HeteroData
 import copy
 
-from .state import StateManager
-from .action_space import ActionSpace, ActionMask
-from .reward import RewardFunction
-from .utils import MetisInitializer, PartitionEvaluator
+try:
+    from .state import StateManager
+    from .action_space import ActionSpace, ActionMask
+    from .reward import RewardFunction
+    from .utils import MetisInitializer, PartitionEvaluator
+except ImportError:
+    # 如果相对导入失败，尝试绝对导入
+    try:
+        from rl.state import StateManager
+        from rl.action_space import ActionSpace, ActionMask
+        from rl.reward import RewardFunction
+        from rl.utils import MetisInitializer, PartitionEvaluator
+    except ImportError:
+        print("警告：无法导入RL模块的某些组件")
 
 
 class PowerGridPartitioningEnv:
@@ -156,6 +166,7 @@ class PowerGridPartitioningEnv:
         # 初始化节点注意力分数累积器
         node_attention_accumulator = {}
         node_degree_counter = {}
+        edge_type_to_key_mapping = {}  # 添加这个变量
 
         # 初始化所有节点类型的累积器
         for node_type in self.hetero_data.x_dict.keys():
