@@ -1,30 +1,26 @@
 """
-Reinforcement Learning module for Power Grid Partitioning
-
-This module implements the complete RL system for power grid partitioning
-based on the MDP formulation described in the project documentation.
+强化学习模块
 """
 
 from .environment import PowerGridPartitioningEnv
+from .agent import PPOAgent
+from .state import StateManager
 from .action_space import ActionSpace, ActionMask
 from .reward import RewardFunction
-from .state import StateManager
 from .utils import MetisInitializer, PartitionEvaluator
-from .agent import PPOAgent, ActorNetwork, CriticNetwork
-from ..training import Trainer, TrainingLogger, CheckpointManager
+from .scenario_generator import ScenarioGenerator
+from .gym_wrapper import PowerGridPartitionGymEnv, make_parallel_env
 
 __all__ = [
     'PowerGridPartitioningEnv',
+    'PPOAgent',
+    'StateManager',
     'ActionSpace',
     'ActionMask',
     'RewardFunction',
-    'StateManager',
     'MetisInitializer',
     'PartitionEvaluator',
-    'PPOAgent',
-    'ActorNetwork',
-    'CriticNetwork',
-    'Trainer',
-    'TrainingLogger',
-    'CheckpointManager'
+    'ScenarioGenerator',
+    'PowerGridPartitionGymEnv',
+    'make_parallel_env'
 ]

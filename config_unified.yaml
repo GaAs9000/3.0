@@ -1,0 +1,364 @@
+# 电力网络分区强化学习统一配置文件
+# 整合了所有训练模式的配置参数
+
+# ==================== 系统配置 ====================
+system:
+  name: "unified_power_grid_partitioning"
+  version: "2.0"
+  description: "电力网络分区强化学习统一训练系统"
+  device: auto          # 设备选择 ('cpu', 'cuda', 或 'auto')
+  seed: 42              # 随机种子
+  num_threads: 1        # CPU线程数
+  warnings: ignore      # 警告处理方式
+
+# ==================== 数据配置 ====================
+data:
+  case_name: ieee14     # 电网案例名称或MATPOWER文件路径
+  normalize: true       # 是否标准化特征
+  cache_dir: cache      # 缓存目录
+  
+  # 支持的电网案例
+  available_cases:
+    - ieee14
+    - ieee30
+    - ieee57
+    - ieee118
+    - custom        # 自定义MATPOWER文件
+
+# ==================== 训练模式配置 ====================
+training:
+  # 基础训练参数
+  mode: standard              # 训练模式
+  num_episodes: 1000          # 总训练回合数
+  max_steps_per_episode: 200  # 每回合最大步数
+  update_interval: 10         # 智能体更新间隔（回合数）
+  save_interval: 100          # 检查点保存间隔（回合数）
+  eval_interval: 50           # 评估间隔（回合数）
+  
+  # 成功判定标准
+  success_criteria:
+    load_cv_threshold: 0.3      # 负载变异系数阈值
+    connectivity_threshold: 0.9  # 连通性阈值
+    min_length_threshold: 10     # 最小回合长度
+  
+  # 收敛检测
+  convergence:
+    window_size: 10      # 收敛检测窗口大小
+    threshold: 0.01      # 收敛阈值
+  
+  # 梯度裁剪
+  gradient_clipping:
+    max_norm: 0.5        # 梯度裁剪最大范数
+
+# ==================== 环境配置 ====================
+environment:
+  num_partitions: 3     # 目标分区数量
+  max_steps: 200        # 每回合最大步数
+  
+  # 奖励组件权重
+  reward_weights:
+    load_balance: 0.4           # 负载平衡权重
+    electrical_decoupling: 0.4  # 电气解耦权重
+    power_balance: 0.2          # 功率平衡权重
+
+# ==================== GAT编码器配置 ====================
+gat:
+  hidden_channels: 64   # 隐藏层维度
+  gnn_layers: 3         # GNN层数
+  heads: 4              # 注意力头数
+  output_dim: 128       # 输出嵌入维度
+  dropout: 0.1          # Dropout概率
+  edge_dim: 9           # 边特征维度
+  
+  # 物理增强参数
+  physics_enhanced: true
+  temperature: 1.0      # 注意力温度参数
+  physics_weight: 1.0   # 物理约束权重
+
+# ==================== PPO智能体配置 ====================
+agent:
+  type: ppo             # 智能体类型 (ppo, sb3_ppo)
+  lr_actor: 3.0e-4      # 演员学习率
+  lr_critic: 1.0e-3     # 评论家学习率
+  gamma: 0.99           # 折扣因子
+  eps_clip: 0.2         # PPO裁剪参数
+  k_epochs: 4           # 每次更新的PPO轮数
+  entropy_coef: 0.01    # 熵系数
+  value_coef: 0.5       # 价值损失系数
+  hidden_dim: 256       # 网络隐藏层维度
+  dropout: 0.1          # 网络dropout概率
+
+# ==================== 并行训练配置 ====================
+parallel_training:
+  enabled: false        # 是否启用并行训练
+  num_cpus: 12          # 并行环境数量
+  total_timesteps: 5000000  # 总训练时间步
+  scenario_generation: true # 是否使用场景生成
+  
+  # Stable-Baselines3 PPO参数
+  sb3_ppo_params:
+    n_steps: 2048       # 每个环境的步数
+    batch_size: 64      # 批大小
+    n_epochs: 10        # 优化轮数
+    gae_lambda: 0.95    # GAE lambda
+    clip_range: 0.2     # 裁剪范围
+    ent_coef: 0.01      # 熵系数
+    vf_coef: 0.5        # 价值函数系数
+    max_grad_norm: 0.5  # 最大梯度范数
+    learning_rate: 3.0e-4  # 学习率
+  
+  # 网络架构
+  policy_network:
+    net_arch:
+      pi: [512, 512, 256]  # 策略网络架构
+      vf: [512, 512, 256]  # 价值网络架构
+    activation_fn: relu    # 激活函数
+
+# ==================== 场景生成配置 ====================
+scenario_generation:
+  enabled: false        # 是否启用场景生成
+  perturb_prob: 0.8     # 应用扰动的概率
+  perturb_types:        # 允许的扰动类型
+    - n-1               # N-1故障
+    - load_gen_fluctuation  # 负荷/发电波动
+    - both              # 同时应用两种扰动
+    - none              # 无扰动
+  scale_range: [0.8, 1.2]  # 负荷/发电缩放范围
+  
+  # N-1故障参数
+  n1_contingency:
+    line_outage_prob: 0.1    # 线路故障概率
+    gen_outage_prob: 0.05    # 发电机故障概率
+  
+  # 负荷波动参数  
+  load_fluctuation:
+    mean_scale: 1.0          # 平均缩放
+    std_scale: 0.1           # 标准差缩放
+
+# ==================== 课程学习配置 ====================
+curriculum:
+  enabled: false        # 是否启用课程学习
+  start_partitions: 2   # 起始分区数
+  end_partitions: 5     # 结束分区数
+  episodes_per_stage: 200  # 每阶段回合数
+  
+  # 课程学习策略
+  strategy: linear      # 学习策略 (linear, exponential, adaptive)
+  success_threshold: 0.8  # 进入下一阶段的成功率阈值
+
+# ==================== 评估配置 ====================
+evaluation:
+  num_episodes: 20      # 评估回合数
+  include_baselines: true  # 是否包含基线方法对比
+  baseline_methods:     # 基线方法列表
+    - spectral
+    - kmeans
+    - random
+  
+  # 评估指标
+  metrics_to_track:
+    - episode_reward
+    - episode_length
+    - load_cv
+    - coupling_edges
+    - connectivity
+    - success_rate
+    - robustness_score
+
+# ==================== 日志配置 ====================
+logging:
+  # 基础日志配置
+  use_tensorboard: true       # 是否使用TensorBoard
+  log_dir: logs              # 日志目录
+  checkpoint_dir: checkpoints # 检查点目录
+  
+  # 日志间隔
+  console_log_interval: 10    # 控制台日志间隔
+  metrics_save_interval: 50   # 指标保存间隔
+  plot_save_interval: 100     # 图表保存间隔
+  tensorboard_log_interval: 1 # TensorBoard日志间隔
+  
+  # 要记录的训练指标
+  training_metrics:
+    - episode_rewards
+    - episode_lengths
+    - success_rates
+    - load_cv
+    - coupling_edges
+    - actor_losses
+    - critic_losses
+    - entropies
+    - explained_variance
+    - approx_kl
+
+# ==================== 可视化配置 ====================
+visualization:
+  # 基础可视化设置
+  enabled: true
+  save_figures: true
+  figures_dir: figures
+  interactive: true
+  
+  # 图表设置
+  figure_settings:
+    dpi: 300
+    format: png
+    bbox_inches: tight
+    
+  # 训练曲线设置
+  training_curves:
+    figsize: [12, 10]
+    moving_average_window: 20
+    grid_alpha: 0.3
+    
+  # 分区可视化设置
+  partition_plot:
+    figsize: [16, 10]
+    node_size_scale: 500
+    edge_alpha: 0.2
+    coupling_edge_width: 2
+    coupling_edge_alpha: 0.6
+    font_size: 8
+    show_metrics: true
+    
+  # 交互式可视化设置
+  interactive_viz:
+    enabled: true
+    plotly_available: true
+    save_html: true
+    template: plotly_white
+    height: 800
+    
+  # 颜色设置
+  colors:
+    palette_type: husl      # seaborn颜色方案
+    unassigned_color: "#E0E0E0"
+    
+  # 热图设置
+  heatmap:
+    colorscale: YlOrRd
+    text_font_size: 10
+
+# ==================== 预设配置 ====================
+# 快速训练配置
+quick_training:
+  training:
+    num_episodes: 100
+    max_steps_per_episode: 50
+    update_interval: 5
+    save_interval: 25
+    eval_interval: 20
+  logging:
+    console_log_interval: 5
+    metrics_save_interval: 20
+
+# 完整训练配置
+full_training:
+  training:
+    num_episodes: 2000
+    max_steps_per_episode: 500
+    update_interval: 20
+    save_interval: 100
+    eval_interval: 50
+  evaluation:
+    num_episodes: 50
+
+# IEEE 118节点系统配置
+ieee118_training:
+  data:
+    case_name: ieee118
+  environment:
+    num_partitions: 8
+    max_steps: 500
+  gat:
+    hidden_channels: 128
+    gnn_layers: 4
+    heads: 8
+    output_dim: 256
+  agent:
+    lr_actor: 1.0e-4
+    lr_critic: 5.0e-4
+    hidden_dim: 512
+  training:
+    num_episodes: 5000
+    max_steps_per_episode: 500
+    success_criteria:
+      load_cv_threshold: 0.35
+      connectivity_threshold: 0.95
+  parallel_training:
+    enabled: true
+    num_cpus: 12
+  scenario_generation:
+    enabled: true
+  visualization:
+    partition_plot:
+      figsize: [20, 12]
+      node_size_scale: 300
+      font_size: 6
+
+# 大规模系统配置
+large_system:
+  gat:
+    hidden_channels: 128
+    gnn_layers: 4
+    heads: 8
+    output_dim: 256
+  agent:
+    lr_actor: 1.0e-4
+    lr_critic: 5.0e-4
+    hidden_dim: 512
+  environment:
+    max_steps: 500
+  training:
+    max_steps_per_episode: 500
+
+# 并行训练专用配置
+parallel_training_config:
+  parallel_training:
+    enabled: true
+    num_cpus: 12
+    total_timesteps: 5000000
+    scenario_generation: true
+  scenario_generation:
+    enabled: true
+    perturb_prob: 0.8
+
+# 课程学习专用配置
+curriculum_config:
+  curriculum:
+    enabled: true
+    start_partitions: 2
+    end_partitions: 5
+    episodes_per_stage: 200
+    strategy: linear
+    success_threshold: 0.8
+
+# ==================== 超参数搜索范围 ====================
+hyperparameter_ranges:
+  agent:
+    lr_actor: [1.0e-5, 1.0e-3]
+    lr_critic: [1.0e-4, 1.0e-2]
+    gamma: [0.95, 0.999]
+    eps_clip: [0.1, 0.3]
+    entropy_coef: [0.001, 0.1]
+    hidden_dim: [128, 512]
+  
+  gat:
+    hidden_channels: [32, 128]
+    gnn_layers: [2, 5]
+    heads: [2, 8]
+    dropout: [0.0, 0.3]
+    
+  environment:
+    reward_weights:
+      load_balance: [0.2, 0.6]
+      electrical_decoupling: [0.2, 0.6]
+      power_balance: [0.1, 0.4]
+
+# ==================== 调试配置 ====================
+debug:
+  enabled: false
+  verbose_logging: false
+  save_intermediate_results: false
+  profile_training: false
+  memory_monitoring: false 

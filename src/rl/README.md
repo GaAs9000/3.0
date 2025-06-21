@@ -1,167 +1,327 @@
-# Power Grid Partitioning RL Module
+# 电力网络分区强化学习模块
 
-This module implements a complete reinforcement learning system for power grid partitioning based on the MDP formulation described in the project documentation.
+本模块实现了基于项目文档中MDP建模的完整电力网络分区强化学习系统。
 
-## Overview
+## 概述
 
-The system follows a "top-down optimization" paradigm where:
-1. **METIS** provides initial partitioning
-2. **RL agent** performs iterative fine-tuning to optimize the partition
+系统采用"自顶向下优化"范式：
+1. **METIS** 提供初始分区
+2. **RL智能体** 执行迭代微调以优化分区
 
-## Components
+## 🔧 核心组件
 
-### Core Components
+### 主要模块
 
-- **`environment.py`**: MDP environment implementing state space, action space, and transitions
-- **`agent.py`**: PPO agent with actor-critic networks for two-stage action selection
-- **`state.py`**: State management with node embeddings and boundary tracking
-- **`action_space.py`**: Two-stage action space with masking constraints
-- **`reward.py`**: Composite reward function (balance + decoupling + internal balance)
-- **`utils.py`**: METIS initialization and partition evaluation utilities
-- **`training.py`**: Training infrastructure with logging and checkpointing
+- **`environment.py`**: 实现状态空间、动作空间和状态转移的MDP环境
+- **`agent.py`**: 具有Actor-Critic网络的PPO智能体，支持两阶段动作选择
+- **`state.py`**: 状态管理，包含节点嵌入和边界跟踪
+- **`action_space.py`**: 两阶段动作空间，支持掩码约束
+- **`reward.py`**: 复合奖励函数（平衡+解耦+内部平衡）
+- **`utils.py`**: METIS初始化和分区评估工具
+- **`scenario_generator.py`**: 场景生成器，支持N-1故障和负荷波动
+- **`gym_wrapper.py`**: OpenAI Gym环境包装器，支持并行训练
 
-### State Representation
+### 扩展组件
 
-The MDP state consists of:
-- **Node Feature Embeddings (H)**: Static, pre-computed from GAT encoder
-- **Node Assignment Labels (z_t)**: Dynamic partition assignments
-- **Boundary Nodes**: Nodes with neighbors in different partitions
-- **Region Embeddings**: Aggregated embeddings per partition
+- **`__init__.py`**: 模块初始化文件，定义公共接口
+- **统一训练系统**: 通过 `train_unified.py` 集成所有训练模式
 
-### Action Space
+## 📊 状态表示
 
-Two-stage action selection:
-1. **Node Selection**: Choose a boundary node to move
-2. **Partition Selection**: Choose target partition from neighboring partitions
+MDP状态包含：
+- **节点特征嵌入 (H)**: 从GAT编码器预计算的静态嵌入
+- **节点分配标签 (z_t)**: 动态分区分配
+- **边界节点**: 与不同分区节点相邻的节点
+- **区域嵌入**: 每个分区的聚合嵌入
 
-Action masking enforces:
-- Only boundary nodes can be moved
-- Only moves to neighboring partitions are allowed
-- Connectivity constraints (optional)
+## 🎯 动作空间
 
-### Reward Function
+两阶段动作选择：
+1. **节点选择**: 选择要移动的边界节点
+2. **分区选择**: 从相邻分区中选择目标分区
 
-Composite reward with three components:
-- **R_balance**: Partition load balance (-Var(L₁, ..., Lₖ))
-- **R_decoupling**: Electrical decoupling (-Σ|Y_uv| for coupling edges)
-- **R_internal_balance**: Internal power balance (-Σ(P_gen - P_load)²)
+动作掩码强制执行：
+- 只有边界节点可以移动
+- 只允许移动到相邻分区
+- 连通性约束（可选）
 
-## Usage
+## 🏆 奖励函数
 
-### Basic Training
+包含三个组件的复合奖励：
+- **R_balance**: 分区负载平衡 (-Var(L₁, ..., Lₖ))
+- **R_decoupling**: 电气解耦 (-Σ|Y_uv| 对于耦合边)
+- **R_internal_balance**: 内部功率平衡 (-Σ(P_gen - P_load)²)
+
+## 🚀 使用方法
+
+### 基本训练
 
 ```python
-from src.rl import PowerGridPartitioningEnv, PPOAgent, Trainer
+from src.rl import PowerGridPartitioningEnv, PPOAgent
 
-# Create environment
+# 创建环境
 env = PowerGridPartitioningEnv(
     hetero_data=hetero_data,
     node_embeddings=node_embeddings,
     num_partitions=3
 )
 
-# Create agent
+# 创建智能体
 agent = PPOAgent(
     node_embedding_dim=128,
     region_embedding_dim=256,
     num_partitions=3
 )
 
-# Train
-trainer = Trainer(agent, env)
-history = trainer.train(num_episodes=1000)
+# 训练（通过统一训练系统）
+python train_unified.py --mode standard --case ieee14 --partitions 3
 ```
 
-### Using the Training Script
+### 使用统一训练脚本
 
 ```bash
-# Quick training with default settings
-python train_rl.py --case ieee14 --episodes 100 --partitions 3
+# 快速训练（默认设置）
+python train_unified.py --mode quick --case ieee14 --episodes 100 --partitions 3
 
-# Training with custom configuration
-python train_rl.py --config config_rl.yaml
+# 使用自定义配置训练
+python train_unified.py --config config_unified.yaml
 
-# Resume from checkpoint
-python train_rl.py --resume checkpoints/best_model.pt
+# IEEE 118节点大规模训练
+python train_unified.py --mode ieee118
 
-# Evaluation only
-python train_rl.py --eval-only --resume checkpoints/best_model.pt
+# 并行训练
+python train_unified.py --mode parallel --episodes 2000
+
+# 课程学习训练
+python train_unified.py --mode curriculum
 ```
 
-### Configuration
+### 配置管理
 
-Use `config_rl.yaml` to configure:
-- Data loading and preprocessing
-- Environment parameters
-- GAT encoder settings
-- PPO hyperparameters
-- Training settings
+使用 `config_unified.yaml` 配置：
+- 数据加载和预处理
+- 环境参数
+- GAT编码器设置
+- PPO超参数
+- 训练设置
+- 并行训练参数
+- 场景生成配置
 
-## Key Features
+## ✨ 关键特性
 
-### Physics-Guided Learning
-- Incorporates electrical impedance in attention mechanisms
-- Reward function based on power system objectives
-- Action masking for physical constraints
+### 物理引导学习
+- 在注意力机制中融入电气阻抗
+- 基于电力系统目标的奖励函数
+- 通过动作掩码强制物理约束
 
-### Scalable Architecture
-- Heterogeneous graph representation
-- Efficient boundary node tracking
-- Incremental state updates
+### 可扩展架构
+- 异构图表示
+- 高效的边界节点跟踪
+- 增量状态更新
+- 支持多种电力系统规模
 
-### Robust Training
-- PPO with action masking
-- Comprehensive logging and checkpointing
-- Curriculum learning support
-- Evaluation metrics
+### 鲁棒训练
+- 带动作掩码的PPO
+- 全面的日志记录和检查点
+- 场景生成支持
+- 课程学习支持
+- 评估指标
 
-### Integration
-- Compatible with existing data processing pipeline
-- Uses pre-trained GAT embeddings
-- Supports multiple power grid formats
+### 系统集成
+- 与现有数据处理流水线兼容
+- 使用预训练的GAT嵌入
+- 支持多种电力网络格式
+- 统一的训练入口
 
-## Testing
+## 🧪 测试
 
-Run integration tests:
+运行集成测试：
 ```bash
 python test/test_rl_integration.py
+python test/test_scenario_generator.py
 ```
 
-This validates the entire pipeline end-to-end with a test power grid.
+这些测试验证了整个流水线的端到端功能。
 
-## Performance Tips
+## 🎛️ 场景生成
 
-1. **GPU Usage**: Set `device: cuda` in config for GPU acceleration
-2. **Batch Updates**: Increase `update_interval` for more stable training
-3. **Memory**: Use smaller embedding dimensions for large grids
-4. **Convergence**: Monitor reward curves and adjust learning rates
+### N-1故障模拟
+```python
+from src.rl.scenario_generator import ScenarioGenerator
 
-## Troubleshooting
+generator = ScenarioGenerator(base_case_data)
 
-### Common Issues
+# 生成随机N-1故障
+perturbed_case = generator.generate_random_scene()
 
-1. **No Valid Actions**: Check boundary node computation and action masking
-2. **Training Instability**: Reduce learning rates or increase clipping
-3. **Memory Issues**: Reduce batch size or embedding dimensions
-4. **Slow Training**: Enable GPU or reduce network complexity
+# 应用特定故障
+case_n1 = generator.apply_specific_contingency(base_case_data, branch_idx=10)
+```
 
-### Debug Mode
+### 负荷波动
+```python
+# 应用负荷缩放
+case_scaled = generator.apply_load_scaling(base_case_data, scale_factor=1.2)
 
-Enable detailed logging:
+# 批量生成场景
+scenarios = generator.generate_batch_scenarios(num_scenarios=100)
+```
+
+## 🌐 并行训练
+
+### OpenAI Gym包装器
+```python
+from src.rl.gym_wrapper import make_parallel_env
+
+# 创建并行环境
+parallel_env = make_parallel_env(
+    base_case_data=case_data,
+    config=config,
+    num_envs=12,
+    use_scenario_generator=True
+)
+```
+
+### 使用Stable-Baselines3
+```bash
+# 安装依赖
+pip install stable-baselines3[extra]
+
+# 运行并行训练
+python train_unified.py --mode parallel --episodes 5000
+```
+
+## ⚡ 性能优化建议
+
+1. **GPU使用**: 在配置中设置 `device: cuda` 启用GPU加速
+2. **批量更新**: 增加 `update_interval` 以获得更稳定的训练
+3. **内存优化**: 对大型电网使用较小的嵌入维度
+4. **收敛监控**: 监控奖励曲线并调整学习率
+
+## 🔧 故障排除
+
+### 常见问题
+
+1. **无有效动作**: 检查边界节点计算和动作掩码
+2. **训练不稳定**: 降低学习率或增加裁剪
+3. **内存问题**: 减少批大小或嵌入维度
+4. **训练缓慢**: 启用GPU或减少网络复杂度
+
+### 调试模式
+
+启用详细日志记录：
 ```python
 import logging
 logging.basicConfig(level=logging.DEBUG)
 ```
 
-## Extension Points
+### 系统检查
 
-The modular design allows easy extension:
+```bash
+# 检查依赖
+python train_unified.py --check-deps
 
-- **Custom Reward Functions**: Modify `reward.py`
-- **Advanced Action Spaces**: Extend `action_space.py`
-- **Different Algorithms**: Replace PPO in `agent.py`
-- **Curriculum Learning**: Implement in `training.py`
+# 查看可用配置
+python train_unified.py --list-configs
 
-## References
+# 运行系统演示
+python train_unified.py --mode demo
+```
 
-See the main project documentation for the complete MDP formulation and mathematical details.
+## 🔌 扩展点
+
+模块化设计允许轻松扩展：
+
+- **自定义奖励函数**: 修改 `reward.py`
+- **高级动作空间**: 扩展 `action_space.py`
+- **不同算法**: 在 `agent.py` 中替换PPO
+- **课程学习**: 通过统一训练系统实现
+- **新场景类型**: 扩展 `scenario_generator.py`
+
+## 📈 训练模式
+
+| 模式 | 描述 | 用途 | 特色功能 |
+|------|------|------|----------|
+| `quick` | 快速测试 | 功能验证 | 100回合，快速收敛 |
+| `standard` | 标准训练 | 常规研究 | 1000回合，平衡性能 |
+| `full` | 完整训练 | 深度研究 | 2000回合，高质量结果 |
+| `ieee118` | 大规模训练 | 复杂系统 | 自动启用并行+场景生成 |
+| `parallel` | 并行训练 | 高效训练 | 多进程，3-5倍加速 |
+| `curriculum` | 课程学习 | 渐进训练 | 分区数递增，稳定收敛 |
+
+## 📚 配置示例
+
+### 快速测试配置
+```yaml
+training:
+  mode: quick
+  num_episodes: 100
+  max_steps_per_episode: 50
+
+environment:
+  num_partitions: 3
+  
+agent:
+  lr_actor: 3e-4
+  lr_critic: 1e-3
+```
+
+### 大规模训练配置
+```yaml
+data:
+  case_name: ieee118
+
+environment:
+  num_partitions: 8
+  max_steps: 500
+
+parallel_training:
+  enabled: true
+  num_cpus: 12
+
+scenario_generation:
+  enabled: true
+  perturb_prob: 0.8
+```
+
+
+
+## 📋 依赖要求
+
+### 必需依赖
+```bash
+pip install torch torch-geometric numpy scipy scikit-learn pandas pyyaml matplotlib
+```
+
+### 可选依赖
+```bash
+# 并行训练支持
+pip install stable-baselines3[extra]
+
+# 可视化增强
+pip install plotly tensorboard
+
+# 性能优化
+pip install metis  # 或使用conda install -c conda-forge metis
+```
+
+## 🎉 完整工作流程
+
+```bash
+# 1. 检查系统
+python train_unified.py --check-deps
+
+# 2. 快速体验
+python train_unified.py --mode quick
+
+# 3. 标准训练
+python train_unified.py --mode standard --case ieee30 --partitions 5
+
+# 4. 大规模训练
+python train_unified.py --mode ieee118
+
+# 5. 保存结果
+python train_unified.py --mode standard --save-results
+```
+
+

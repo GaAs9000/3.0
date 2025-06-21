@@ -1,0 +1,8 @@
+stable-baselines3[extra]
+gymnasium
+pyyaml
+matplotlib
+pandas
+tqdm
+pytest
+numpy<2.0 
