@@ -38,7 +38,7 @@ class SpectralPartitioner(BasePartitioner):
         adjacency_list = self._build_adjacency_list(env)
         
         # 使用 PyMetis 进行分区
-        n_cuts, membership = pymetis.part_graph(env.K, adjacency=adjacency_list)
+        n_cuts, membership = pymetis.part_graph(env.num_partitions, adjacency=adjacency_list)
         
         # PyMetis 返回 0-based 标签，转换为 1-based
         labels = np.array(membership) + 1
@@ -47,40 +47,49 @@ class SpectralPartitioner(BasePartitioner):
         return labels
     
     def _build_adjacency_list(self, env: 'PowerGridPartitionEnv') -> list:
-        """构建 PyMetis 需要的邻接列表格式"""
-        # 获取边信息
-        edge_array = env.edge_index.cpu().numpy()
-        
+        """构建 PyMetis 需要的邻接列表格式（已更新以兼容新环境API）"""
+        # 获取边信息 - 使用新的环境API
+        edge_array = env.edge_info['edge_index'].cpu().numpy()
+
+        # 获取节点总数
+        total_nodes = env.total_nodes
+
         # 初始化邻接列表
-        adjacency_list = [[] for _ in range(env.N)]
-        
+        adjacency_list = [[] for _ in range(total_nodes)]
+
         # 构建邻接列表
         for i in range(edge_array.shape[1]):
             u, v = edge_array[0, i], edge_array[1, i]
             # PyMetis 需要无向图，每条边都要添加两次
             adjacency_list[u].append(v)
             adjacency_list[v].append(u)
-        
+
         # 转换为 numpy 数组格式（PyMetis 要求）
         adjacency_list = [np.array(adj, dtype=np.int32) for adj in adjacency_list]
-        
+
         return adjacency_list
     
     def _spectral_clustering_partition(self, env: 'PowerGridPartitionEnv') -> np.ndarray:
-        """使用 scikit-learn 的谱聚类作为备选方案"""
+        """使用 scikit-learn 的谱聚类作为备选方案（已更新以兼容新环境API）"""
+        # 获取节点总数和边信息
+        total_nodes = env.total_nodes
+        edge_array = env.edge_info['edge_index'].cpu().numpy()
+
         # 构建邻接矩阵
-        adj_matrix = np.zeros((env.N, env.N))
-        edge_array = env.edge_index.cpu().numpy()
-        
+        adj_matrix = np.zeros((total_nodes, total_nodes))
+
         for i in range(edge_array.shape[1]):
             u, v = edge_array[0, i], edge_array[1, i]
-            # 使用导纳作为权重
-            weight = env.admittance[i].item()
-            
+            # 使用导纳作为权重（从evaluator获取）
+            if hasattr(env.evaluator, 'edge_admittances') and i < len(env.evaluator.edge_admittances):
+                weight = env.evaluator.edge_admittances[i].item()
+            else:
+                weight = 1.0  # 默认权重
+
             # 检查权重是否为NaN或无穷大
             if np.isnan(weight) or np.isinf(weight):
                 weight = 1e-10  # 使用极小的正值代替
-            
+
             adj_matrix[u, v] = weight
             adj_matrix[v, u] = weight
         
@@ -99,11 +108,11 @@ class SpectralPartitioner(BasePartitioner):
         # 最终验证矩阵的有效性
         if np.any(np.isnan(adj_matrix)) or np.any(np.isinf(adj_matrix)):
             print("⚠️ 警告：邻接矩阵仍有异常值，使用单位矩阵作为备选方案...")
-            adj_matrix = np.eye(env.N) * 1e-10 + np.ones((env.N, env.N)) * 1e-12
-        
+            adj_matrix = np.eye(total_nodes) * 1e-10 + np.ones((total_nodes, total_nodes)) * 1e-12
+
         # 谱聚类
         clustering = SpectralClustering(
-            n_clusters=env.K,
+            n_clusters=env.num_partitions,
             affinity='precomputed',
             n_init=10,
             random_state=self.seed,  # 使用实例的种子

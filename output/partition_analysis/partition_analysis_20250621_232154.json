@@ -1,0 +1,87 @@
+{
+  "case_name": "ieee14",
+  "timestamp": "2025-06-21T23:21:54.472199",
+  "total_nodes": 14,
+  "num_partitions": 3,
+  "unassigned_count": 1,
+  "partitions": {
+    "partition_0": {
+      "label": 0,
+      "name": "未分区",
+      "nodes": [
+        2
+      ],
+      "size": 1
+    },
+    "partition_1": {
+      "label": 1,
+      "name": "分区1",
+      "nodes": [
+        1,
+        8,
+        9,
+        12
+      ],
+      "size": 4
+    },
+    "partition_2": {
+      "label": 2,
+      "name": "分区2",
+      "nodes": [
+        3,
+        4,
+        10,
+        11,
+        13
+      ],
+      "size": 5
+    },
+    "partition_3": {
+      "label": 3,
+      "name": "分区3",
+      "nodes": [
+        0,
+        5,
+        6,
+        7
+      ],
+      "size": 4
+    }
+  },
+  "inter_partition_connections": [],
+  "connectivity_analysis": {
+    "partition_1": {
+      "is_connected": false,
+      "num_components": 2
+    },
+    "partition_2": {
+      "is_connected": false,
+      "num_components": 2
+    },
+    "partition_3": {
+      "is_connected": false,
+      "num_components": 4
+    }
+  },
+  "graph_structure": {
+    "total_edges": 5,
+    "is_connected": false,
+    "num_components": 9,
+    "degrees": [
+      0,
+      0,
+      0,
+      2,
+      1,
+      0,
+      0,
+      0,
+      2,
+      1,
+      1,
+      1,
+      1,
+      1
+    ]
+  }
+}

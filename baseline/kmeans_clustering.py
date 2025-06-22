@@ -28,17 +28,17 @@ class KMeansPartitioner(BasePartitioner):
         os.environ['OPENBLAS_NUM_THREADS'] = '1'
         
         try:
-            # 确保使用CPU版本的嵌入，避免CUDA内存问题
-            embeddings = env.embeddings.detach().cpu().numpy().copy()
-            
+            # 确保使用CPU版本的嵌入，避免CUDA内存问题（已更新以兼容新环境API）
+            embeddings = env.node_embeddings.detach().cpu().numpy().copy()
+
             # 检查和清理数据
             if np.any(np.isnan(embeddings)) or np.any(np.isinf(embeddings)):
                 print("⚠️ 警告：嵌入中存在异常值，进行清理...")
                 embeddings = np.nan_to_num(embeddings, nan=0.0, posinf=1.0, neginf=-1.0)
-            
+
             # 使用MiniBatchKMeans，它更稳定且内存友好
             kmeans = MiniBatchKMeans(
-                n_clusters=env.K,
+                n_clusters=env.num_partitions,
                 n_init=3,
                 max_iter=50,
                 random_state=self.seed,  # 使用实例的种子

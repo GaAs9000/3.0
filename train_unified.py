@@ -51,27 +51,34 @@ def check_dependencies():
     deps = {
         'stable_baselines3': False,
         'tensorboard': False,
-        'plotly': False
+        'plotly': False,
+        'networkx': False
     }
-    
+
     try:
         import stable_baselines3
         deps['stable_baselines3'] = True
     except ImportError:
         pass
-    
+
     try:
         from torch.utils.tensorboard import SummaryWriter
         deps['tensorboard'] = True
     except ImportError:
         pass
-        
+
     try:
         import plotly.graph_objects as go
         deps['plotly'] = True
     except ImportError:
         pass
-    
+
+    try:
+        import networkx as nx
+        deps['networkx'] = True
+    except ImportError:
+        pass
+
     return deps
 
 

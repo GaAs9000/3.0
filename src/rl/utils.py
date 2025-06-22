@@ -11,6 +11,7 @@
 import torch
 import numpy as np
 import networkx as nx
+import random
 from typing import Dict, List, Tuple, Optional, Any
 from torch_geometric.data import HeteroData
 import warnings
@@ -107,56 +108,73 @@ class MetisInitializer:
             self.node_weights = [1] * self.total_nodes
             
     def _build_adjacency_list(self):
-        """为METIS构建邻接列表"""
-        # 初始化邻接列表
+        """
+        从异构图构建邻接列表 (修复版本)
+        """
         self.adjacency_list = [[] for _ in range(self.total_nodes)]
         
-        # 从异构图添加边
-        for edge_type, edge_index in self.hetero_data.edge_index_dict.items():
-            src_type, _, dst_type = edge_type
+        # 创建全局索引映射
+        self._create_global_index_mapping()
+        
+        # 遍历所有边类型，构建邻接关系
+        for edge_type in self.hetero_data.edge_types:
+            edge_index = self.hetero_data[edge_type].edge_index
             
-            # 转换为全局索引
-            src_global = self._local_to_global(edge_index[0], src_type)
-            dst_global = self._local_to_global(edge_index[1], dst_type)
+            # 解析边类型元组 (src_node_type, relation, dst_node_type)
+            src_node_type, relation, dst_node_type = edge_type
             
-            # 添加到邻接列表
-            try:
-                src_list = src_global.cpu().numpy()
-                dst_list = dst_global.cpu().numpy()
-            except RuntimeError:
-                src_list = src_global.cpu().tolist()
-                dst_list = dst_global.cpu().tolist()
-
-            for src, dst in zip(src_list, dst_list):
-                self.adjacency_list[src].append(dst)
-                self.adjacency_list[dst].append(src)  # 无向图
+            # 获取源节点和目标节点类型的全局索引映射
+            src_global_ids = self.hetero_data[src_node_type].global_ids
+            dst_global_ids = self.hetero_data[dst_node_type].global_ids
+            
+            # 添加边到邻接列表
+            for i in range(edge_index.shape[1]):
+                src_local = edge_index[0, i].item()
+                dst_local = edge_index[1, i].item()
                 
-        # 移除重复项和自环
-        for i in range(self.total_nodes):
-            self.adjacency_list[i] = list(set(self.adjacency_list[i]))
-            if i in self.adjacency_list[i]:
-                self.adjacency_list[i].remove(i)
-                
+                # 转换为全局索引
+                if src_local < len(src_global_ids) and dst_local < len(dst_global_ids):
+                    src_global = src_global_ids[src_local].item()
+                    dst_global = dst_global_ids[dst_local].item()
+                    
+                    # 检查全局索引有效性
+                    if 0 <= src_global < self.total_nodes and 0 <= dst_global < self.total_nodes:
+                        # 添加双向连接（无向图）
+                        if dst_global not in self.adjacency_list[src_global]:
+                            self.adjacency_list[src_global].append(dst_global)
+                        if src_global not in self.adjacency_list[dst_global]:
+                            self.adjacency_list[dst_global].append(src_global)
+        
+        # 打印调试信息
+        edge_count = sum(len(neighbors) for neighbors in self.adjacency_list) // 2
+        non_isolated = sum(1 for neighbors in self.adjacency_list if len(neighbors) > 0)
+        print(f"🔗 构建邻接列表: {edge_count} 条边, {non_isolated} 个非孤立节点")
+        
     def initialize_partition(self, num_partitions: int) -> torch.Tensor:
         """
-        使用METIS或回退方法初始化分区
-        
-        Args:
-            num_partitions: 目标分区数量
-            
-        Returns:
-            初始分区分配 [total_nodes]
+        【最终版】使用METIS初始化分区，保证连通性，并为RL创造初始动作空间。
         """
+        partition_tensor = None
         if METIS_AVAILABLE and self.total_nodes > num_partitions:
             try:
-                return self._metis_partition(num_partitions)
+                # 步骤1: 获取基础分区
+                partition_tensor = self._metis_partition(num_partitions)
             except Exception as e:
                 warnings.warn(f"METIS分区失败：{e}。使用回退方法。")
-                
-        if SKLEARN_AVAILABLE:
-            return self._spectral_partition(num_partitions)
-        else:
-            return self._random_partition(num_partitions)
+
+        if partition_tensor is None:
+            if SKLEARN_AVAILABLE:
+                partition_tensor = self._spectral_partition(num_partitions)
+            else:
+                partition_tensor = self._random_partition(num_partitions)
+
+        # 步骤2: 保证分区内部连通性
+        repaired_partition = self._check_and_repair_connectivity(partition_tensor, num_partitions)
+
+        # 【新增】步骤3: 创造初始动作空间，将边界节点置为"未分区"(标签0)
+        final_partition = self._create_action_space_on_boundaries(repaired_partition)
+
+        return final_partition
             
     def _metis_partition(self, num_partitions: int) -> torch.Tensor:
         """使用PyMetis算法分区"""
@@ -215,11 +233,120 @@ class MetisInitializer:
     def _random_partition(self, num_partitions: int) -> torch.Tensor:
         """作为最终回退的随机分区"""
         partition = torch.randint(
-            1, num_partitions + 1, 
-            (self.total_nodes,), 
+            1, num_partitions + 1,
+            (self.total_nodes,),
             device=self.device
         )
         return partition
+
+    def _check_and_repair_connectivity(self, partition_labels: torch.Tensor, num_partitions: int) -> torch.Tensor:
+        """
+        检查并修复分区连通性
+
+        Args:
+            partition_labels: 初始分区标签
+            num_partitions: 分区数量
+
+        Returns:
+            修复后的分区标签
+        """
+        print("🔧 检查并修复分区连通性...")
+        labels_np = partition_labels.cpu().numpy()
+
+        # 构建NetworkX图
+        G = nx.Graph()
+        G.add_nodes_from(range(self.total_nodes))
+
+        # 添加边
+        for i in range(self.total_nodes):
+            for neighbor in self.adjacency_list[i]:
+                G.add_edge(i, neighbor)
+
+        # 检查每个分区的连通性
+        repaired_labels = labels_np.copy()
+        needs_repair = True
+        repair_iterations = 0
+        max_repair_iterations = 3
+
+        while needs_repair and repair_iterations < max_repair_iterations:
+            needs_repair = False
+            repair_iterations += 1
+            
+            for partition_id in range(1, num_partitions + 1):
+                partition_nodes = np.where(repaired_labels == partition_id)[0]
+
+                if len(partition_nodes) <= 1:
+                    continue
+
+                # 提取子图
+                subgraph = G.subgraph(partition_nodes)
+
+                # 检查连通性
+                if not nx.is_connected(subgraph):
+                    print(f"⚠️ 分区 {partition_id} 不连通，正在修复... (第{repair_iterations}次尝试)")
+                    needs_repair = True
+
+                    # 获取连通分量，按大小排序
+                    components = sorted(list(nx.connected_components(subgraph)), key=len, reverse=True)
+                    largest_component = components[0]
+
+                    # 将较小分量的节点重新分配
+                    for component in components[1:]:
+                        for node in component:
+                            # 找到该节点的邻居分区统计
+                            neighbor_partitions_count = {}
+                            for neighbor in self.adjacency_list[node]:
+                                if neighbor < len(repaired_labels):
+                                    neighbor_partition = repaired_labels[neighbor]
+                                    if neighbor_partition != 0:  # 忽略未分区的邻居
+                                        neighbor_partitions_count[neighbor_partition] = neighbor_partitions_count.get(neighbor_partition, 0) + 1
+
+                            if neighbor_partitions_count:
+                                # 选择连接最多的邻居分区
+                                best_partition = max(neighbor_partitions_count, key=neighbor_partitions_count.get)
+                                repaired_labels[node] = best_partition
+                            else:
+                                # 如果没有有效邻居，保持在主分量中
+                                pass
+
+        if repair_iterations >= max_repair_iterations:
+            print(f"⚠️ 连通性修复达到最大迭代次数({max_repair_iterations})，可能仍有不连通的分区")
+        else:
+            print("✅ 分区连通性修复完成")
+            
+        return torch.from_numpy(repaired_labels).to(self.device)
+
+    def _create_action_space_on_boundaries(self, partition_labels: torch.Tensor) -> torch.Tensor:
+        """
+        【新增】识别分区边界，并将边界节点置为"未分区"(0)，为RL Agent创造动作空间。
+        """
+        print("🔎 识别边界节点并创造初始动作空间...")
+        labels_np = partition_labels.cpu().numpy()
+        boundary_nodes = set()
+
+        # 遍历所有边来找到边界节点
+        for i in range(self.total_nodes):
+            for neighbor in self.adjacency_list[i]:
+                if labels_np[i] != labels_np[neighbor]:
+                    boundary_nodes.add(i)
+                    # 只要发现一个邻居在不同区，就是边界节点，可以跳出内层循环
+                    break
+
+        if not boundary_nodes:
+            # 如果没有边界（例如，图本身就是非连通的），随机选择一些节点
+            warnings.warn("未发现边界节点，随机选择5%的节点作为可移动节点。")
+            num_to_unassign = max(1, int(self.total_nodes * 0.05))
+            nodes_to_unassign = random.sample(range(self.total_nodes), num_to_unassign)
+        else:
+            nodes_to_unassign = list(boundary_nodes)
+
+        # 将这些边界节点的分区标签设置为0
+        final_labels_np = labels_np.copy()
+        final_labels_np[nodes_to_unassign] = 0
+
+        print(f"✅ 成功将 {len(nodes_to_unassign)} 个边界节点置为'未分区'状态。")
+
+        return torch.from_numpy(final_labels_np).to(self.device)
 
 
 class PartitionEvaluator:

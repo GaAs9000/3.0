@@ -493,7 +493,7 @@ class VisualizationManager:
         self.visualize_partition(env, "Final Partition Result (RL)", "rl_partition_result.png")
         
         # 绘制训练曲线
-        self.plot_training_curves(history, env_N=env.N, save_path="training_curves.png")
+        self.plot_training_curves(history, env_N=env.total_nodes, save_path="training_curves.png")
 
     def run_interactive_visualization(self, env, comparison_df):
         """运行交互式可视化"""

@@ -15,8 +15,8 @@ class RandomPartitioner(BasePartitioner):
         super().__init__(seed)
     
     def partition(self, env: 'PowerGridPartitionEnv') -> np.ndarray:
-        """执行随机分区"""
+        """执行随机分区（已更新以兼容新环境API）"""
         # 确保使用固定种子
         self._set_seed()
-        labels = np.random.randint(1, env.K + 1, size=env.N)
-        return labels 
+        labels = np.random.randint(1, env.num_partitions + 1, size=env.total_nodes)
+        return labels
