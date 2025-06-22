@@ -144,29 +144,37 @@ class MetisInitializer:
         
     def initialize_partition(self, num_partitions: int) -> torch.Tensor:
         """
-        【最终版】使用METIS初始化分区，保证连通性，并为RL创造初始动作空间。
+        使用多阶段方法初始化分区
+
+        1. 尝试 PyMetis (如果可用)
+        2. 如果失败，回退到谱聚类
+        3. 如果两者都失败，则抛出异常
+
+        参数:
+            num_partitions: 目标分区数
+
+        返回:
+            初始分区标签 [num_nodes]
         """
-        partition_tensor = None
-        if METIS_AVAILABLE and self.total_nodes > num_partitions:
+        try:
+            # 1. 尝试 METIS
+            print("🚀 使用 METIS 进行高质量的初始分区...")
+            partition_labels = self._metis_partition(num_partitions)
+            print("✅ METIS 分区成功")
+        except (ImportError, Exception) as e:
+            print(f"⚠️ METIS 初始化失败: {e}，回退到谱聚类...")
             try:
-                # 步骤1: 获取基础分区
-                partition_tensor = self._metis_partition(num_partitions)
-            except Exception as e:
-                warnings.warn(f"METIS分区失败：{e}。使用回退方法。")
+                # 2. 尝试谱聚类
+                partition_labels = self._spectral_partition(num_partitions)
+                print("✅ 谱聚类分区成功")
+            except Exception as e_spectral:
+                print(f"❌ 谱聚类也失败: {e_spectral}")
+                raise RuntimeError("无法使用 METIS 或谱聚类进行初始分区。请检查您的环境和数据。") from e_spectral
 
-        if partition_tensor is None:
-            if SKLEARN_AVAILABLE:
-                partition_tensor = self._spectral_partition(num_partitions)
-            else:
-                partition_tensor = self._random_partition(num_partitions)
+        # 检查并修复连通性
+        repaired_labels = self._check_and_repair_connectivity(partition_labels, num_partitions)
 
-        # 步骤2: 保证分区内部连通性
-        repaired_partition = self._check_and_repair_connectivity(partition_tensor, num_partitions)
-
-        # 【新增】步骤3: 创造初始动作空间，将边界节点置为"未分区"(标签0)
-        final_partition = self._create_action_space_on_boundaries(repaired_partition)
-
-        return final_partition
+        return repaired_labels
             
     def _metis_partition(self, num_partitions: int) -> torch.Tensor:
         """使用PyMetis算法分区"""
@@ -180,13 +188,10 @@ class MetisInitializer:
             adjacency_list = [np.array(neighbors, dtype=np.int32) for neighbors in self.adjacency_list]
             
             # 使用 PyMetis 进行分区
-            n_cuts, partition = pymetis.part_graph(num_partitions, adjacency=adjacency_list)
+            n_cuts, labels = pymetis.part_graph(num_partitions, adjacency=adjacency_list)
             
             # PyMetis 返回 0-based 标签，转换为 1-based
-            partition_tensor = torch.tensor(partition, device=self.device) + 1
-            
-            # print(f"✅ PyMetis 初始化分区成功：切边数 = {n_cuts}")
-            return partition_tensor
+            return torch.tensor(labels + 1, dtype=torch.long, device=self.device)
             
         except Exception as e:
             warnings.warn(f"PyMetis失败：{e}。使用谱聚类回退。")
@@ -212,11 +217,10 @@ class MetisInitializer:
                 random_state=42
             )
             
-            partition = clustering.fit_predict(adj_matrix)
+            labels = clustering.fit_predict(adj_matrix)
             
             # 转换为基于1的索引和torch张量
-            partition_tensor = torch.tensor(partition, device=self.device) + 1
-            return partition_tensor
+            return torch.tensor(labels + 1, dtype=torch.long, device=self.device)
             
         except Exception as e:
             warnings.warn(f"谱聚类失败：{e}。使用随机分区。")

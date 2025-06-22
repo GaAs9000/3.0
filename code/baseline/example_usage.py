@@ -7,13 +7,12 @@ Baseline方法使用示例
 from baseline import BaselinePartitioner, run_baseline_comparison
 
 # 方式2: 使用新的模块化接口
-from baseline import SpectralPartitioner, KMeansPartitioner, RandomPartitioner
+from baseline import SpectralPartitioner, KMeansPartitioner
 from baseline import evaluate_partition_method, compare_methods
 
 # 方式3: 直接导入特定模块
 from baseline.spectral_clustering import SpectralPartitioner
 from baseline.kmeans_clustering import KMeansPartitioner
-from baseline.random_partition import RandomPartitioner
 from baseline.comparison import run_baseline_comparison
 
 
@@ -24,16 +23,13 @@ def example_usage_old_interface(env, agent):
     # 创建不同的基线分区器
     spectral = BaselinePartitioner('spectral', seed=42)
     kmeans = BaselinePartitioner('kmeans', seed=42)
-    random = BaselinePartitioner('random', seed=42)
     
     # 执行分区
     spectral_result = spectral.partition(env)
     kmeans_result = kmeans.partition(env)
-    random_result = random.partition(env)
     
     print(f"谱聚类结果: {spectral_result[:10]}...")
     print(f"K-means结果: {kmeans_result[:10]}...")
-    print(f"随机分区结果: {random_result[:10]}...")
     
     # 运行完整对比
     comparison_results = run_baseline_comparison(env, agent, seed=42)
@@ -47,16 +43,13 @@ def example_usage_new_interface(env, agent):
     # 创建不同的分区器
     spectral = SpectralPartitioner(seed=42)
     kmeans = KMeansPartitioner(seed=42)
-    random = RandomPartitioner(seed=42)
     
     # 执行分区
     spectral_result = spectral.partition(env)
     kmeans_result = kmeans.partition(env)
-    random_result = random.partition(env)
     
     print(f"谱聚类结果: {spectral_result[:10]}...")
     print(f"K-means结果: {kmeans_result[:10]}...")
-    print(f"随机分区结果: {random_result[:10]}...")
     
     # 评估单个方法
     spectral_metrics = evaluate_partition_method(env, spectral_result)
@@ -82,12 +75,6 @@ def example_individual_methods(env):
     result = kmeans.partition(env)
     metrics = evaluate_partition_method(env, result)
     print(f"K-means - 负载CV: {metrics['load_cv']:.4f}, 连通性: {metrics['connectivity']:.4f}")
-    
-    # 只使用随机分区
-    random = RandomPartitioner(seed=42)
-    result = random.partition(env)
-    metrics = evaluate_partition_method(env, result)
-    print(f"随机分区 - 负载CV: {metrics['load_cv']:.4f}, 连通性: {metrics['connectivity']:.4f}")
 
 
 if __name__ == "__main__":

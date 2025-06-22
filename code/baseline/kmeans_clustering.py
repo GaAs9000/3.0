@@ -57,8 +57,6 @@ class KMeansPartitioner(BasePartitioner):
             return labels + 1
             
         except Exception as e:
-            print(f"⚠️ K-means聚类失败: {str(e)}，使用随机分区...")
-            # 降级到随机分区
-            from .random_partition import RandomPartitioner
-            random_partitioner = RandomPartitioner(self.seed)
-            return random_partitioner.partition(env) 
+            print(f"❌ K-means聚类失败: {str(e)}")
+            # 不再降级到随机分区，直接抛出异常
+            raise RuntimeError("K-means 聚类失败，无法生成分区。") from e 

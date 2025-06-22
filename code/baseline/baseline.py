@@ -57,9 +57,6 @@ class BaselinePartitioner:
             elif self.method == 'kmeans':
                 from .kmeans_clustering import KMeansPartitioner
                 self._partitioner = KMeansPartitioner(self.seed)
-            elif self.method == 'random':
-                from .random_partition import RandomPartitioner
-                self._partitioner = RandomPartitioner(self.seed)
             else:
                 raise ValueError(f"Unknown method: {self.method}")
         return self._partitioner

@@ -11,7 +11,6 @@ baseline/
 ├── baseline.py               # 主函数文件（包含基础类和兼容接口）
 ├── spectral_clustering.py    # 谱聚类分区方法
 ├── kmeans_clustering.py      # K-means聚类分区方法
-├── random_partition.py       # 随机分区方法
 ├── evaluator.py              # 分区方案评估器
 ├── comparison.py             # 方法对比功能
 └── example_usage.py          # 使用示例
@@ -42,16 +41,9 @@ baseline/
 - **特点**:
   - 使用MiniBatchKMeans提高稳定性
   - 自动内存管理和清理
-  - 失败时自动降级到随机分区
+  - 失败时会抛出错误，而不是使用低质量的回退方案
 
-#### 4. `random_partition.py` - 随机分区方法
-- **功能**: 随机分配节点到不同分区
-- **主要类**: `RandomPartitioner`
-- **特点**: 
-  - 使用固定随机种子确保可重现性
-  - 作为其他方法的备选方案
-
-#### 5. `evaluator.py` - 评估器
+#### 4. `evaluator.py` - 评估器
 - **功能**: 评估分区方案的性能指标
 - **主要函数**: `evaluate_partition_method()`
 - **评估指标**:
@@ -63,7 +55,7 @@ baseline/
   - `power_balance`: 功率平衡
   - `modularity`: 模块度
 
-#### 6. `comparison.py` - 方法对比
+#### 5. `comparison.py` - 方法对比
 - **功能**: 比较不同分区方法的性能
 - **主要函数**:
   - `compare_methods()`: 执行多种方法对比
@@ -71,11 +63,11 @@ baseline/
 
 ### 辅助文件
 
-#### 7. `__init__.py` - 包初始化
+#### 6. `__init__.py` - 包初始化
 - **功能**: 定义包的公共接口
 - **导出**: 所有主要类和函数
 
-#### 8. `example_usage.py` - 使用示例
+#### 7. `example_usage.py` - 使用示例
 - **功能**: 展示三种不同的使用方式
 - **示例类型**:
   - 原有接口使用（向后兼容）
@@ -92,12 +84,10 @@ from baseline import BaselinePartitioner, run_baseline_comparison
 # 创建分区器
 spectral = BaselinePartitioner('spectral', seed=42)
 kmeans = BaselinePartitioner('kmeans', seed=42)
-random = BaselinePartitioner('random', seed=42)
 
 # 执行分区
 spectral_result = spectral.partition(env)
 kmeans_result = kmeans.partition(env)
-random_result = random.partition(env)
 
 # 完整对比（包含RL方法）
 comparison_df = run_baseline_comparison(env, agent, seed=42)
@@ -108,8 +98,7 @@ comparison_df = run_baseline_comparison(env, agent, seed=42)
 ```python
 from baseline import (
     SpectralPartitioner, 
-    KMeansPartitioner, 
-    RandomPartitioner,
+    KMeansPartitioner,
     evaluate_partition_method,
     compare_methods
 )
@@ -117,7 +106,6 @@ from baseline import (
 # 创建分区器
 spectral = SpectralPartitioner(seed=42)
 kmeans = KMeansPartitioner(seed=42)
-random = RandomPartitioner(seed=42)
 
 # 执行分区
 spectral_result = spectral.partition(env)
@@ -152,7 +140,6 @@ method
 RL (PPO)             0.1234          0.5678        0.9876      0.7890
 Spectral Clustering  0.2345          0.6789        0.8765      0.6789
 K-means              0.3456          0.7890        0.7654      0.5678
-Random               0.4567          0.8901        0.6543      0.4567
 
 🏆 综合评分排名:
                     overall_score
@@ -160,7 +147,6 @@ method
 RL (PPO)                  0.1234
 Spectral Clustering      -0.0123
 K-means                  -0.1234
-Random                   -0.2345
 ```
 
 ## 🔧 扩展新方法
@@ -204,7 +190,7 @@ networkx>=2.6.0    # 用于图分析
 
 1. **随机种子**: 所有方法都支持设置随机种子以确保结果可重现
 2. **内存管理**: K-means方法包含自动内存清理机制
-3. **错误处理**: 所有方法都包含异常处理，失败时会提供备选方案
+3. **错误处理**: 所有方法都包含异常处理，失败时会抛出错误
 4. **GPU支持**: 自动检测并使用GPU加速（如果可用）
 5. **线程安全**: K-means方法设置了单线程环境变量避免冲突
 

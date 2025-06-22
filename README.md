@@ -38,25 +38,11 @@ cd 2.0
 
 2. **安装依赖**
 
-**选项A：完整安装（推荐）**
 ```bash
 pip install -r requirements.txt
 ```
 
-**选项B：最小安装（快速开始）**
-```bash
-# 1. 首先安装PyTorch（根据你的CUDA版本）
-# CPU版本
-pip install torch --index-url https://download.pytorch.org/whl/cpu
-
-# 或GPU版本（CUDA 11.8）
-pip install torch --index-url https://download.pytorch.org/whl/cu118
-
-# 2. 安装最小依赖
-pip install -r requirements-minimal.txt
-```
-
-3. **验证安装**
+1. **验证安装**
 ```bash
 python main.py --check-deps
 ```
@@ -160,7 +146,7 @@ env_config = {
 python main.py --mode standard --save-results
 
 # 实时监控训练进展
-python monitor_training.py
+python code/monitor_training.py
 
 # TensorBoard可视化
 tensorboard --logdir=logs

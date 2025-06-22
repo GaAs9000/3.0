@@ -13,7 +13,7 @@ system:
 
 # ==================== 数据配置 ====================
 data:
-  case_name: ieee30     # 电网案例名称或MATPOWER文件路径
+  case_name: ieee57     # 电网案例名称或MATPOWER文件路径
   normalize: true       # 是否标准化特征
   cache_dir: cache      # 缓存目录
   
@@ -91,7 +91,7 @@ agent:
 
 # ==================== 并行训练配置 ====================
 parallel_training:
-  enabled: false       # 是否启用并行训练 (修改为false以避免卡死)
+  enabled: false       # 是否启用并行训练
   num_cpus: 12          # 并行环境数量
   total_timesteps: 5000000  # 总训练时间步
   scenario_generation: true # 是否使用场景生成
@@ -117,7 +117,7 @@ parallel_training:
 
 # ==================== 场景生成配置 ====================
 scenario_generation:
-  enabled: false        # 是否启用场景生成 (保持禁用以确保稳定运行)
+  enabled: true        # 是否启用场景生成
   perturb_prob: 0.8     # 应用扰动的概率
   perturb_types:        # 允许的扰动类型
     - n-1               # N-1故障
@@ -154,7 +154,6 @@ evaluation:
   baseline_methods:     # 基线方法列表
     - spectral
     - kmeans
-    - random
   
   # 评估指标
   metrics_to_track:

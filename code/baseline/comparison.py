@@ -85,21 +85,6 @@ def compare_methods(env: 'PowerGridPartitioningEnv', agent, seed: int = 42) -> p
         results.append({'method': 'K-means', 'load_cv': 999, 'total_coupling': 999,
                        'connectivity': 0, 'modularity': 0})
 
-    try:
-        # 4. 随机分区
-        print("🎲 评估随机分区...")
-        random_partitioner = RandomPartitioner(seed=seed)
-        random_partition = random_partitioner.partition(env)
-        random_metrics = evaluate_partition_method(env, random_partition)
-        random_metrics['method'] = 'Random'
-        results.append(random_metrics)
-        gc.collect()
-
-    except Exception as e:
-        print(f"⚠️ 随机分区评估失败: {str(e)}")
-        results.append({'method': 'Random', 'load_cv': 999, 'total_coupling': 999,
-                       'connectivity': 0, 'modularity': 0})
-    
     # 创建结果DataFrame，确保至少有一些结果
     if not results:
         results = [{'method': 'No Method Succeeded', 'load_cv': 999, 'total_coupling': 999,
