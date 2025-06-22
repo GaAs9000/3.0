@@ -89,6 +89,19 @@ agent:
   dropout: 0.1          # 网络dropout概率
   max_grad_norm: 0.5    # 最大梯度范数（用于梯度裁剪，防止梯度爆炸）
 
+  # =============================================================
+  # 【修改】为Actor和Critic提供独立的预热与退火(余弦)调度策略
+  # =============================================================
+  actor_scheduler:
+    enabled: true
+    warmup_updates: 100      # 为Actor设置更长的预热期 (例如100次更新)
+    total_training_updates: 1000 # 估算的总更新次数
+
+  critic_scheduler:
+    enabled: true
+    warmup_updates: 20       # 为Critic设置非常短的预热期 (例如20次更新)
+    total_training_updates: 1000 # 估算的总更新次数
+
 # ==================== 并行训练配置 ====================
 parallel_training:
   enabled: false       # 是否启用并行训练

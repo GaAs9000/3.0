@@ -13,6 +13,7 @@ import numpy as np
 from typing import Dict, List, Tuple, Optional, Any
 from collections import deque
 import copy
+import math  # 确保导入了 math 库
 
 
 def _check_tensor(t: torch.Tensor, tag: str):
@@ -360,7 +361,9 @@ class PPOAgent:
                  entropy_coef: float = 0.01,
                  value_coef: float = 0.5,
                  device: torch.device = None,
-                 max_grad_norm: float = None):
+                 max_grad_norm: float = None,
+                 actor_scheduler_config: Dict = None,   # 【新增】
+                 critic_scheduler_config: Dict = None): # 【新增】
         """
         初始化PPO智能体
 
@@ -377,6 +380,8 @@ class PPOAgent:
             value_coef: 价值损失系数
             device: 计算设备
             max_grad_norm: 最大梯度范数（用于梯度裁剪）
+            actor_scheduler_config: Actor学习率调度器配置
+            critic_scheduler_config: Critic学习率调度器配置
         """
         self.device = device or torch.device('cpu')
         self.num_partitions = num_partitions
@@ -399,21 +404,51 @@ class PPOAgent:
         # 优化器
         self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=lr_actor)
         self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=lr_critic)
-        
+
+        # 【修改】初始化独立的学习率调度器
+        self.actor_scheduler = None
+        self.critic_scheduler = None
+
+        if actor_scheduler_config and actor_scheduler_config.get('enabled', False):
+            print("✅ 启用 Actor 学习率调度器")
+            self.actor_scheduler = self._create_scheduler(self.actor_optimizer, actor_scheduler_config)
+
+        if critic_scheduler_config and critic_scheduler_config.get('enabled', False):
+            print("✅ 启用 Critic 学习率调度器")
+            self.critic_scheduler = self._create_scheduler(self.critic_optimizer, critic_scheduler_config)
+
         # 内存
         self.memory = PPOMemory()
-        
+
         # 训练统计
         self.training_stats = {
             'actor_loss': deque(maxlen=100),
             'critic_loss': deque(maxlen=100),
             'entropy': deque(maxlen=100)
         }
-        
+
         # --- 新增：为 Actor 和 Critic 安装 NaN 检测钩子 ---
         _install_nan_hooks(self.actor, name="Actor")
         _install_nan_hooks(self.critic, name="Critic")
-        
+
+    # 【新增/修改】一个泛化的创建调度器的方法
+    def _create_scheduler(self, optimizer: torch.optim.Optimizer, config: Dict) -> torch.optim.lr_scheduler._LRScheduler:
+        """根据配置为给定的优化器创建学习率调度器（线性预热 + 余弦退火）"""
+        warmup_updates = config.get('warmup_updates', 0)
+        total_updates = config.get('total_training_updates', 1000)
+
+        print(f"   - 预热更新次数: {warmup_updates}, 总更新次数: {total_updates}")
+
+        def lr_lambda(current_update: int):
+            # 线性预热阶段
+            if current_update < warmup_updates:
+                return float(current_update) / float(max(1, warmup_updates))
+            # 余弦退火阶段
+            progress = float(current_update - warmup_updates) / float(max(1, total_updates - warmup_updates))
+            return 0.5 * (1.0 + math.cos(math.pi * progress))
+
+        return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
     def select_action(self, state: Dict[str, torch.Tensor], training: bool = True) -> Tuple[Tuple[int, int], float, float]:
         """
         使用当前策略选择动作
@@ -574,10 +609,16 @@ class PPOAgent:
         for key in stats:
             stats[key] /= self.k_epochs
             self.training_stats[key].append(stats[key])
-            
+
+        # 【修改】在每次更新后独立推进学习率调度器
+        if self.actor_scheduler:
+            self.actor_scheduler.step()
+        if self.critic_scheduler:
+            self.critic_scheduler.step()
+
         # 清除内存
         self.memory.clear()
-        
+
         return stats
         
     def _compute_advantages(self, rewards, values, dones):

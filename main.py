@@ -960,7 +960,10 @@ class UnifiedTrainingSystem:
             entropy_coef=agent_config['entropy_coef'],
             value_coef=agent_config['value_coef'],
             device=self.device,
-            max_grad_norm=agent_config.get('max_grad_norm', None)
+            max_grad_norm=agent_config.get('max_grad_norm', None),
+            # 【修改】传递独立的调度器配置
+            actor_scheduler_config=agent_config.get('actor_scheduler', {}),
+            critic_scheduler_config=agent_config.get('critic_scheduler', {})
         )
         
         print(f"✅ 智能体创建完成")
@@ -1180,7 +1183,10 @@ class UnifiedTrainingSystem:
                 entropy_coef=agent_config['entropy_coef'],
                 value_coef=agent_config['value_coef'],
                 device=self.device,
-                max_grad_norm=agent_config.get('max_grad_norm', None)
+                max_grad_norm=agent_config.get('max_grad_norm', None),
+                # 【修改】传递独立的调度器配置
+                actor_scheduler_config=agent_config.get('actor_scheduler', {}),
+                critic_scheduler_config=agent_config.get('critic_scheduler', {})
             )
 
             # 训练
