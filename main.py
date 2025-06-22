@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Any
 from collections import deque
 import matplotlib.pyplot as plt
+from tqdm import tqdm
 
 # 添加src到路径
 sys.path.append(str(Path(__file__).parent / 'src'))
@@ -309,7 +310,7 @@ def convert_pandapower_to_matpower(net) -> Dict:
 class TrainingLogger:
     """增强的训练日志记录器"""
 
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any], total_episodes: int):
         self.config = config
         self.best_reward = -float('inf')
         self.episode_rewards = []
@@ -323,7 +324,6 @@ class TrainingLogger:
 
         # 日志配置
         self.log_config = config.get('logging', {})
-        self.console_log_interval = self.log_config.get('console_log_interval', 10)
         self.metrics_save_interval = self.log_config.get('metrics_save_interval', 50)
 
         # TensorBoard设置
@@ -332,8 +332,9 @@ class TrainingLogger:
         if self.use_tensorboard:
             self._setup_tensorboard()
 
-        # 实时监控
-        self.recent_rewards = deque(maxlen=100)  # 最近100个回合的奖励
+        # TQDM 进度条
+        self.progress_bar = tqdm(total=total_episodes, desc="🚀 训练进度",
+                                 bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}]")
         self.start_time = time.time()
 
     def _setup_tensorboard(self):
@@ -352,10 +353,16 @@ class TrainingLogger:
         """记录单个回合"""
         self.episode_rewards.append(reward)
         self.episode_lengths.append(length)
-        self.recent_rewards.append(reward)
-
+        
         if reward > self.best_reward:
             self.best_reward = reward
+
+        # 更新进度条
+        self.progress_bar.update(1)
+        self.progress_bar.set_postfix({
+            "奖励": f"{reward:.2f}",
+            "最佳": f"{self.best_reward:.2f}"
+        })
 
         # 记录额外信息
         if info:
@@ -375,10 +382,6 @@ class TrainingLogger:
                     if isinstance(value, (int, float)):
                         self.tensorboard_writer.add_scalar(f'Episode/{key}', value, episode)
 
-        # 控制台日志
-        if episode % self.console_log_interval == 0:
-            self._print_progress(episode)
-
     def log_training_step(self, episode: int, actor_loss: float = None,
                          critic_loss: float = None, entropy: float = None):
         """记录训练步骤"""
@@ -396,29 +399,6 @@ class TrainingLogger:
             self.entropies.append(entropy)
             if self.use_tensorboard and self.tensorboard_writer:
                 self.tensorboard_writer.add_scalar('Training/Entropy', entropy, episode)
-
-    def _print_progress(self, episode: int):
-        """打印训练进度"""
-        if len(self.recent_rewards) == 0:
-            return
-
-        avg_reward = np.mean(self.recent_rewards)
-        std_reward = np.std(self.recent_rewards)
-        elapsed_time = time.time() - self.start_time
-
-        print(f"Episode {episode:4d} | "
-              f"Avg Reward: {avg_reward:7.3f} ± {std_reward:5.3f} | "
-              f"Best: {self.best_reward:7.3f} | "
-              f"Time: {elapsed_time/60:.1f}m")
-
-        # 额外指标
-        if self.success_rates:
-            recent_success = np.mean(self.success_rates[-self.console_log_interval:])
-            print(f"         Success Rate: {recent_success:.3f}")
-
-        if self.load_cvs:
-            recent_load_cv = np.mean(self.load_cvs[-self.console_log_interval:])
-            print(f"         Load CV: {recent_load_cv:.3f}")
 
     def get_statistics(self) -> Dict[str, Any]:
         """获取训练统计信息"""
@@ -447,6 +427,7 @@ class TrainingLogger:
 
     def close(self):
         """关闭日志记录器"""
+        self.progress_bar.close()
         if self.tensorboard_writer:
             self.tensorboard_writer.close()
 
@@ -464,18 +445,15 @@ class UnifiedTrainer:
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         else:
             self.device = torch.device(device_config)
-        self.logger = TrainingLogger(config)
+        self.logger = None # 将在train方法中初始化
 
     def train(self, num_episodes: int, max_steps_per_episode: int, update_interval: int = 10):
         """训练智能体"""
-        print(f"🚀 开始训练 {num_episodes} 轮...")
+        self.logger = TrainingLogger(self.config, num_episodes)
+        
         print(f"📊 监控信息:")
         print(f"   - TensorBoard: {'✅' if self.logger.use_tensorboard else '❌'}")
-        print(f"   - 控制台日志间隔: {self.logger.console_log_interval} 回合")
         print(f"   - 指标保存间隔: {self.logger.metrics_save_interval} 回合")
-
-        episode_rewards = []
-        episode_lengths = []
 
         for episode in range(num_episodes):
             state, _ = self.env.reset()  # 解包元组
@@ -508,14 +486,11 @@ class UnifiedTrainer:
                 if done:
                     break
 
-            episode_rewards.append(episode_reward)
-            episode_lengths.append(episode_length)
-
             # 记录到logger（包含详细信息）
             self.logger.log_episode(episode, episode_reward, episode_length, episode_info)
 
             # 更新智能体并记录训练指标
-            if episode % update_interval == 0:
+            if episode % update_interval == 0 and episode > 0:
                 try:
                     # --- 使用 try-except 包裹 agent.update() ---
                     training_stats = self.agent.update()
@@ -578,8 +553,8 @@ class UnifiedTrainer:
             print(f"   - 成功率: {final_stats['success_rate']:.3f}")
 
         return {
-            'episode_rewards': episode_rewards,
-            'episode_lengths': episode_lengths,
+            'episode_rewards': self.logger.episode_rewards,
+            'episode_lengths': self.logger.episode_lengths,
             'training_stats': final_stats
         }
 
@@ -636,7 +611,7 @@ class UnifiedTrainer:
     def run_final_visualization(self):
         """运行最终可视化"""
         try:
-            from visualization import VisualizationManager
+            from code.src.visualization import VisualizationManager
             viz = VisualizationManager(self.config)
             viz.visualize_partition(self.env, title="Final Partition")
             print("✅ 可视化完成")
@@ -663,7 +638,7 @@ class UnifiedTrainingSystem:
         """加载配置文件"""
         # 如果没有指定配置文件，尝试使用默认的 config_unified.yaml
         if not config_path:
-            default_config_path = 'config_unified.yaml'
+            default_config_path = 'config.yaml'
             if os.path.exists(default_config_path):
                 config_path = default_config_path
                 print(f"📄 使用默认配置文件: {config_path}")
@@ -918,10 +893,10 @@ class UnifiedTrainingSystem:
         print("📊 标准训练模式")
 
         # 导入必要模块
-        from data_processing import PowerGridDataProcessor
-        from gat import create_hetero_graph_encoder
-        from rl.environment import PowerGridPartitioningEnv
-        from rl.agent import PPOAgent
+        from code.src.data_processing import PowerGridDataProcessor
+        from code.src.gat import create_hetero_graph_encoder
+        from code.src.rl.environment import PowerGridPartitioningEnv
+        from code.src.rl.agent import PPOAgent
 
         # 1. 数据处理
         print("\n1️⃣ 数据处理...")
@@ -1010,7 +985,7 @@ class UnifiedTrainingSystem:
         if config['evaluation']['include_baselines']:
             print("\n7️⃣ 基线方法对比...")
             try:
-                from baseline import run_baseline_comparison
+                from code.baseline import run_baseline_comparison
                 baseline_results = run_baseline_comparison(env, agent, seed=42)
                 print("✅ 基线对比完成")
             except Exception as e:
@@ -1022,7 +997,7 @@ class UnifiedTrainingSystem:
             try:
                 trainer.run_final_visualization()
                 if baseline_results is not None and config['visualization']['interactive']:
-                    from visualization import run_interactive_visualization
+                    from code.src.visualization import run_interactive_visualization
                     run_interactive_visualization(env, baseline_results)
             except Exception as e:
                 print(f"⚠️ 可视化失败: {e}")
@@ -1071,8 +1046,8 @@ class UnifiedTrainingSystem:
 
     def _run_sb3_parallel_training(self, config: Dict[str, Any]) -> Dict[str, Any]:
         """使用Stable-Baselines3的并行训练"""
-        from data_processing import PowerGridDataProcessor
-        from rl.gym_wrapper import make_parallel_env
+        from code.src.data_processing import PowerGridDataProcessor
+        from code.src.rl.gym_wrapper import make_parallel_env
         from stable_baselines3 import PPO
         
         # 【修复】在创建并行环境前，将主进程中已解析好的设备名称更新到配置字典中
@@ -1135,10 +1110,10 @@ class UnifiedTrainingSystem:
         print(f"🔧 简化并行训练设备配置已更新: {config['system']['device']}")
 
         # 导入必要模块
-        from data_processing import PowerGridDataProcessor
-        from gat import create_hetero_graph_encoder
-        from rl.environment import PowerGridPartitioningEnv
-        from rl.agent import PPOAgent
+        from code.src.data_processing import PowerGridDataProcessor
+        from code.src.gat import create_hetero_graph_encoder
+        from code.src.rl.environment import PowerGridPartitioningEnv
+        from code.src.rl.agent import PPOAgent
         import multiprocessing as mp
 
         # 1. 数据处理

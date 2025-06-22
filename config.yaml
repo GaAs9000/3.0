@@ -197,7 +197,7 @@ visualization:
   # 基础可视化设置
   enabled: true
   save_figures: true
-  figures_dir: figures
+  figures_dir: output/figures
   interactive: true
   
   # 图表设置

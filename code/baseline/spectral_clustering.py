@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING
 from .baseline import BasePartitioner, set_baseline_seed
 
 if TYPE_CHECKING:
-    from env import PowerGridPartitionEnv
+    from ..src.rl.environment import PowerGridPartitioningEnv
 
 
 class SpectralPartitioner(BasePartitioner):
@@ -15,7 +15,7 @@ class SpectralPartitioner(BasePartitioner):
     def __init__(self, seed: int = 42):
         super().__init__(seed)
     
-    def partition(self, env: 'PowerGridPartitionEnv') -> np.ndarray:
+    def partition(self, env: 'PowerGridPartitioningEnv') -> np.ndarray:
         """执行谱聚类分区"""
         # 每次执行前设置随机种子
         self._set_seed()
@@ -27,7 +27,7 @@ class SpectralPartitioner(BasePartitioner):
             print(f"⚠️ METIS 分区失败: {str(e)}，使用谱聚类...")
             return self._spectral_clustering_partition(env)
     
-    def _metis_partition(self, env: 'PowerGridPartitionEnv') -> np.ndarray:
+    def _metis_partition(self, env: 'PowerGridPartitioningEnv') -> np.ndarray:
         """使用 PyMetis 进行图分区"""
         try:
             import pymetis
@@ -46,7 +46,7 @@ class SpectralPartitioner(BasePartitioner):
         print(f"✅ PyMetis 分区成功：切边数 = {n_cuts}")
         return labels
     
-    def _build_adjacency_list(self, env: 'PowerGridPartitionEnv') -> list:
+    def _build_adjacency_list(self, env: 'PowerGridPartitioningEnv') -> list:
         """构建 PyMetis 需要的邻接列表格式（已更新以兼容新环境API）"""
         # 获取边信息 - 使用新的环境API
         edge_array = env.edge_info['edge_index'].cpu().numpy()
@@ -69,7 +69,7 @@ class SpectralPartitioner(BasePartitioner):
 
         return adjacency_list
     
-    def _spectral_clustering_partition(self, env: 'PowerGridPartitionEnv') -> np.ndarray:
+    def _spectral_clustering_partition(self, env: 'PowerGridPartitioningEnv') -> np.ndarray:
         """使用 scikit-learn 的谱聚类作为备选方案（已更新以兼容新环境API）"""
         # 获取节点总数和边信息
         total_nodes = env.total_nodes

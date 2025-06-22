@@ -286,6 +286,20 @@ class VisualizationManager:
             
         import torch
         
+        # --- 正确地从env对象获取数据 ---
+        try:
+            current_partition = env.state_manager.current_partition
+            total_nodes = env.total_nodes
+            num_partitions = env.num_partitions
+            edge_array = env.edge_info['edge_index'].cpu().numpy()
+            node_pd = env.evaluator.load_active
+            node_pg = env.evaluator.gen_active
+            edge_admittance = env.evaluator.edge_admittances
+            rl_metrics = comparison_df.loc['RL (PPO)']
+        except (AttributeError, KeyError) as e:
+            print(f"❌ 交互式可视化失败：无法从env或comparison_df获取必要的属性。错误: {e}")
+            return None
+
         template = interactive_config.get('template', 'plotly_white')
         height = interactive_config.get('height', 800)
         
@@ -306,9 +320,8 @@ class VisualizationManager:
         
         # 1. 网络拓扑
         G = nx.Graph()
-        edge_array = env.edge_index.cpu().numpy()
         
-        for i in range(env.N):
+        for i in range(total_nodes):
             G.add_node(i)
         
         edge_set = set()
@@ -335,15 +348,15 @@ class VisualizationManager:
         )
         
         # 绘制节点
-        colors = ['#E0E0E0'] + self.get_color_palette(env.K)
+        colors = ['#E0E0E0'] + self.get_color_palette(num_partitions)
         
-        for k in range(env.K + 1):
-            mask = (env.z == k)
+        for k in range(num_partitions + 1):
+            mask = (current_partition == k)
             if mask.any():
                 node_indices = torch.where(mask)[0].cpu().numpy()
                 node_x = [pos[i][0] for i in node_indices]
                 node_y = [pos[i][1] for i in node_indices]
-                node_text = [f'Node {i}<br>Load: {env.Pd[i]:.3f}' for i in node_indices]
+                node_text = [f'Node {i}<br>Load: {node_pd[i]:.3f}' for i in node_indices]
                 
                 fig.add_trace(
                     go.Scatter(
@@ -374,42 +387,44 @@ class VisualizationManager:
         
         # 3. 负荷分布
         region_data = {'Region': [], 'Load': [], 'Generation': []}
-        for k in range(1, env.K + 1):
-            mask = (env.z == k)
+        for k in range(1, num_partitions + 1):
+            mask = (current_partition == k)
             if mask.any():
                 region_data['Region'].append(f'R{k}')
-                region_data['Load'].append(env.Pd[mask].sum().item())
-                region_data['Generation'].append(env.Pg[mask].sum().item())
+                region_data['Load'].append(node_pd[mask].sum().item())
+                region_data['Generation'].append(node_pg[mask].sum().item())
         
         # 动态生成颜色
-        bar_colors = self.get_color_palette(env.K)
+        bar_colors = self.get_color_palette(num_partitions)
         
         fig.add_trace(go.Bar(
-            x=[f'R{i+1}' for i in range(env.K)],
+            x=[f'R{i+1}' for i in range(num_partitions)],
             y=region_data['Load'],
             marker_color=bar_colors,
             name='Load'
         ), row=1, col=3)
         
         fig.add_trace(go.Bar(
-            x=[f'R{i+1}' for i in range(env.K)],
+            x=[f'R{i+1}' for i in range(num_partitions)],
             y=region_data['Generation'],
             marker_color=bar_colors,
             name='Generation'
         ), row=1, col=3)
         
         # 4. 耦合矩阵
-        coupling_matrix = np.zeros((env.K, env.K))
+        coupling_matrix = np.zeros((num_partitions, num_partitions))
         for i in range(edge_array.shape[1]):
             u, v = edge_array[0, i], edge_array[1, i]
-            if env.z[u] > 0 and env.z[v] > 0 and env.z[u] != env.z[v]:
-                coupling_matrix[env.z[u]-1, env.z[v]-1] += env.admittance[i].item()
+            part_u = current_partition[u].item()
+            part_v = current_partition[v].item()
+            if part_u > 0 and part_v > 0 and part_u != part_v:
+                coupling_matrix[part_u-1, part_v-1] += edge_admittance[i].item()
         
         fig.add_trace(
             go.Heatmap(
                 z=coupling_matrix,
-                x=[f'R{i+1}' for i in range(env.K)],
-                y=[f'R{i+1}' for i in range(env.K)],
+                x=[f'R{i+1}' for i in range(num_partitions)],
+                y=[f'R{i+1}' for i in range(num_partitions)],
                 colorscale='YlOrRd',
                 text=np.round(coupling_matrix, 3),
                 texttemplate='%{text}',
@@ -420,7 +435,9 @@ class VisualizationManager:
         
         # 5. 指标雷达图（只显示RL方法）
         metrics_to_plot = ['load_cv', 'connectivity', 'modularity']
-        rl_values = [comparison_df.loc['RL (PPO)', m] for m in metrics_to_plot]
+        
+        # 从DataFrame中获取RL指标，如果不存在则使用0
+        rl_values = [rl_metrics.get(m, 0.0) for m in metrics_to_plot]
         
         # 归一化到0-1（用于雷达图）
         norm_values = []
@@ -442,11 +459,11 @@ class VisualizationManager:
         
         # 6. 统计表格
         stats_data = [
-            ['Total Nodes', str(env.N)],
-            ['Regions', str(env.K)],
-            ['Load CV', f'{env.current_metrics.load_cv:.4f}'],
-            ['Total Coupling', f'{env.current_metrics.total_coupling:.4f}'],
-            ['Connectivity', f'{env.current_metrics.connectivity:.2f}']
+            ['Total Nodes', str(total_nodes)],
+            ['Regions', str(num_partitions)],
+            ['Load CV', f"{rl_metrics.get('load_cv', 0.0):.4f}"],
+            ['Total Coupling', f"{rl_metrics.get('total_coupling', 0.0):.4f}"],
+            ['Connectivity', f"{rl_metrics.get('connectivity', 0.0):.2f}"]
         ]
         
         fig.add_trace(
@@ -535,19 +552,26 @@ def plot_training_curves(history: Dict[str, List[float]], env_N: int = None, sav
 
 def run_basic_visualization(env, history):
     """向后兼容的基础可视化函数"""
+    if not PLOTLY_AVAILABLE:
+        return
     default_config = {'visualization': {'enabled': True, 'save_figures': True}}
     viz_manager = VisualizationManager(default_config)
     viz_manager.run_basic_visualization(env, history)
 
 def create_interactive_visualization(env: 'PowerGridPartitionEnv', 
-                                   comparison_df: pd.DataFrame) -> go.Figure:
+                                   comparison_df: pd.DataFrame):
     """向后兼容的交互式可视化函数"""
+    if not PLOTLY_AVAILABLE:
+        return None
     default_config = {'visualization': {'enabled': True, 'save_figures': True}}
     viz_manager = VisualizationManager(default_config)
     return viz_manager.create_interactive_visualization(env, comparison_df)
 
 def run_interactive_visualization(env, comparison_df):
     """向后兼容的交互式可视化函数"""
+    if not PLOTLY_AVAILABLE:
+        print("⚠️ Plotly不可用，跳过交互式可视化。")
+        return
     default_config = {'visualization': {'enabled': True, 'save_figures': True}}
     viz_manager = VisualizationManager(default_config)
     viz_manager.run_interactive_visualization(env, comparison_df)

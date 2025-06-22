@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 from .baseline import BasePartitioner, set_baseline_seed
 
 if TYPE_CHECKING:
-    from env import PowerGridPartitionEnv
+    from ..src.rl.environment import PowerGridPartitioningEnv
 
 
 class KMeansPartitioner(BasePartitioner):
@@ -17,7 +17,7 @@ class KMeansPartitioner(BasePartitioner):
     def __init__(self, seed: int = 42):
         super().__init__(seed)
     
-    def partition(self, env: 'PowerGridPartitionEnv') -> np.ndarray:
+    def partition(self, env: 'PowerGridPartitioningEnv') -> np.ndarray:
         """执行K-means分区"""
         # 再次确保种子设置
         self._set_seed()
@@ -29,7 +29,10 @@ class KMeansPartitioner(BasePartitioner):
         
         try:
             # 确保使用CPU版本的嵌入，避免CUDA内存问题（已更新以兼容新环境API）
-            embeddings = env.node_embeddings.detach().cpu().numpy().copy()
+            if not hasattr(env, 'state_manager') or not hasattr(env.state_manager, 'node_embeddings'):
+                 raise AttributeError("'env.state_manager.node_embeddings' not found.")
+
+            embeddings = env.state_manager.node_embeddings.detach().cpu().numpy().copy()
 
             # 检查和清理数据
             if np.any(np.isnan(embeddings)) or np.any(np.isinf(embeddings)):

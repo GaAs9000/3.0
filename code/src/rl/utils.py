@@ -185,7 +185,7 @@ class MetisInitializer:
             # PyMetis 返回 0-based 标签，转换为 1-based
             partition_tensor = torch.tensor(partition, device=self.device) + 1
             
-            print(f"✅ PyMetis 初始化分区成功：切边数 = {n_cuts}")
+            # print(f"✅ PyMetis 初始化分区成功：切边数 = {n_cuts}")
             return partition_tensor
             
         except Exception as e:
@@ -242,7 +242,7 @@ class MetisInitializer:
         Returns:
             修复后的分区标签
         """
-        print("🔧 检查并修复分区连通性...")
+        # print("🔧 检查并修复分区连通性...")
         labels_np = partition_labels.cpu().numpy()
 
         # 构建NetworkX图
@@ -275,7 +275,7 @@ class MetisInitializer:
 
                 # 检查连通性
                 if not nx.is_connected(subgraph):
-                    print(f"⚠️ 分区 {partition_id} 不连通，正在修复... (第{repair_iterations}次尝试)")
+                    # print(f"⚠️ 分区 {partition_id} 不连通，正在修复... (第{repair_iterations}次尝试)")
                     needs_repair = True
 
                     # 获取连通分量，按大小排序
@@ -302,9 +302,9 @@ class MetisInitializer:
                                 pass
 
         if repair_iterations >= max_repair_iterations:
-            print(f"⚠️ 连通性修复达到最大迭代次数({max_repair_iterations})，可能仍有不连通的分区")
-        else:
-            print("✅ 分区连通性修复完成")
+            warnings.warn(f"连通性修复达到最大迭代次数({max_repair_iterations})，可能仍有不连通的分区")
+        # else:
+            # print("✅ 分区连通性修复完成")
             
         return torch.from_numpy(repaired_labels).to(self.device)
 
@@ -312,7 +312,7 @@ class MetisInitializer:
         """
         【新增】识别分区边界，并将边界节点置为"未分区"(0)，为RL Agent创造动作空间。
         """
-        print("🔎 识别边界节点并创造初始动作空间...")
+        # print("🔎 识别边界节点并创造初始动作空间...")
         labels_np = partition_labels.cpu().numpy()
         boundary_nodes = set()
 
@@ -336,7 +336,7 @@ class MetisInitializer:
         final_labels_np = labels_np.copy()
         final_labels_np[nodes_to_unassign] = 0
 
-        print(f"✅ 成功将 {len(nodes_to_unassign)} 个边界节点置为'未分区'状态。")
+        # print(f"✅ 成功将 {len(nodes_to_unassign)} 个边界节点置为'未分区'状态。")
 
         return torch.from_numpy(final_labels_np).to(self.device)
 

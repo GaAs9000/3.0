@@ -10,10 +10,10 @@ from .random_partition import RandomPartitioner
 from .evaluator import evaluate_partition_method
 
 if TYPE_CHECKING:
-    from env import PowerGridPartitionEnv
+    from ..src.rl.environment import PowerGridPartitioningEnv
 
 
-def compare_methods(env: 'PowerGridPartitionEnv', agent, seed: int = 42) -> pd.DataFrame:
+def compare_methods(env: 'PowerGridPartitioningEnv', agent, seed: int = 42) -> pd.DataFrame:
     """
     比较不同分区方法
     """

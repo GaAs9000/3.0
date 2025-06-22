@@ -122,8 +122,6 @@ class PowerGridPartitioningEnv:
         返回:
             enhanced_embeddings: 增强的节点嵌入 H' = concat(H, H_attn)
         """
-        print("🔧 生成增强的静态节点特征嵌入 H'...")
-
         # 步骤1：计算每个节点的聚合注意力分数
         node_attention_scores = self._aggregate_attention_to_nodes(attention_weights)
 
@@ -132,7 +130,7 @@ class PowerGridPartitioningEnv:
 
         for node_type, embeddings in node_embeddings.items():
             # 获取该节点类型的注意力分数
-            if node_type in node_attention_scores:
+            if node_type in node_attention_scores and node_attention_scores[node_type] is not None:
                 attention_features = node_attention_scores[node_type]
 
                 # 检查数值稳定性
@@ -153,8 +151,6 @@ class PowerGridPartitioningEnv:
                     enhanced_emb = torch.nan_to_num(enhanced_emb, nan=0.0, posinf=1.0, neginf=-1.0)
 
                 enhanced_embeddings[node_type] = enhanced_emb
-
-                print(f"  ✅ {node_type}: {embeddings.shape} + {attention_features.shape} → {enhanced_emb.shape}")
             else:
                 # 如果没有注意力权重，使用原始嵌入
                 # 仍然检查数值稳定性
@@ -163,9 +159,7 @@ class PowerGridPartitioningEnv:
                     embeddings = torch.nan_to_num(embeddings, nan=0.0, posinf=1.0, neginf=-1.0)
 
                 enhanced_embeddings[node_type] = embeddings
-                print(f"  ⚠️ {node_type}: 无注意力权重，使用原始嵌入 {embeddings.shape}")
 
-        print(f"✅ 增强嵌入生成完成")
         return enhanced_embeddings
 
     def _aggregate_attention_to_nodes(self,
@@ -182,8 +176,6 @@ class PowerGridPartitioningEnv:
         返回:
             node_attention_scores: 每个节点类型的注意力分数 [num_nodes, 1]
         """
-        print("  🔍 聚合边级注意力权重到节点级特征...")
-
         # 初始化节点注意力分数累积器
         node_attention_accumulator = {}
         node_degree_counter = {}
@@ -196,6 +188,7 @@ class PowerGridPartitioningEnv:
             node_degree_counter[node_type] = torch.zeros(num_nodes, device=self.device)
 
         # 处理每种边类型
+        has_attention = False
         for edge_type, edge_index in self.hetero_data.edge_index_dict.items():
             src_type, relation, dst_type = edge_type
             
@@ -208,6 +201,7 @@ class PowerGridPartitioningEnv:
             if attn_weights is None:
                 continue
             
+            has_attention = True
             # 处理维度和多头注意力（维度不匹配时返回None）
             processed_weights = self._process_attention_weights(
                 attn_weights, edge_index, edge_type
@@ -222,7 +216,9 @@ class PowerGridPartitioningEnv:
             node_attention_accumulator[dst_type].index_add_(0, dst_nodes, processed_weights)
             node_degree_counter[dst_type].index_add_(0, dst_nodes, torch.ones_like(processed_weights))
 
-            print(f"    �� {edge_type}: {len(processed_weights)} 条边的注意力权重已聚合")
+        # 如果没有任何注意力权重，直接返回
+        if not has_attention:
+            return {node_type: None for node_type in self.hetero_data.x_dict.keys()}
 
         # 计算平均注意力分数（避免除零）
         node_attention_scores = {}
@@ -237,8 +233,6 @@ class PowerGridPartitioningEnv:
 
             # 转换为列向量 [num_nodes, 1]
             node_attention_scores[node_type] = avg_attention.unsqueeze(1)
-
-            print(f"    ✅ {node_type}: 平均注意力分数计算完成 {node_attention_scores[node_type].shape}")
 
         return node_attention_scores
 
@@ -279,12 +273,12 @@ class PowerGridPartitioningEnv:
                     break
 
         if found_weights is None:
-            print(f"    ⚠️ 未找到边类型 {edge_type_key} 的注意力权重")
-            print(f"       可用的注意力权重键: {list(attention_weights.keys())}")
+            # print(f"    ⚠️ 未找到边类型 {edge_type_key} 的注意力权重")
+            # print(f"       可用的注意力权重键: {list(attention_weights.keys())}")
             return None
 
         attn_weights = found_weights.to(self.device)
-        print(f"    🔍 边类型 {edge_type} 使用注意力权重键: {used_key}")
+        # print(f"    🔍 边类型 {edge_type} 使用注意力权重键: {used_key}")
         return attn_weights
 
     def _process_attention_weights(self, 

@@ -3,10 +3,10 @@ import numpy as np
 from typing import Dict, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from env import PowerGridPartitionEnv
+    from ..src.rl.environment import PowerGridPartitioningEnv
 
 
-def evaluate_partition_method(env: 'PowerGridPartitionEnv', partition: np.ndarray) -> Dict[str, float]:
+def evaluate_partition_method(env: 'PowerGridPartitioningEnv', partition: np.ndarray) -> Dict[str, float]:
     """
     评估分区方案（已更新以兼容新的环境API）
 
