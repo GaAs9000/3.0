@@ -357,13 +357,29 @@ class PPOAgent:
             node_logits, partition_logits = self.actor(
                 node_embeddings, region_embeddings, boundary_nodes, action_mask
             )
-            
+
             value = self.critic(node_embeddings, region_embeddings, boundary_nodes)
-            
+
             if len(boundary_nodes) == 0:
                 # 没有有效动作
                 return None, 0.0, value.item()
-            
+
+            # 检查输入数据的有效性
+            if torch.isnan(node_embeddings).any():
+                print(f"❌ 检测到NaN在node_embeddings中")
+                return None, 0.0, value.item()
+            if torch.isnan(region_embeddings).any():
+                print(f"❌ 检测到NaN在region_embeddings中")
+                return None, 0.0, value.item()
+            if torch.isnan(node_logits).any():
+                print(f"❌ 检测到NaN在node_logits中: {node_logits}")
+                print(f"   node_embeddings范围: [{node_embeddings.min():.4f}, {node_embeddings.max():.4f}]")
+                print(f"   region_embeddings范围: [{region_embeddings.min():.4f}, {region_embeddings.max():.4f}]")
+                return None, 0.0, value.item()
+            if torch.isnan(partition_logits).any():
+                print(f"❌ 检测到NaN在partition_logits中")
+                return None, 0.0, value.item()
+
             # 采样动作
             if training:
                 # 从分布中采样

@@ -112,39 +112,31 @@ class MetisInitializer:
         从异构图构建邻接列表 (修复版本)
         """
         self.adjacency_list = [[] for _ in range(self.total_nodes)]
-        
-        # 创建全局索引映射
-        self._create_global_index_mapping()
-        
+
         # 遍历所有边类型，构建邻接关系
         for edge_type in self.hetero_data.edge_types:
             edge_index = self.hetero_data[edge_type].edge_index
-            
+
             # 解析边类型元组 (src_node_type, relation, dst_node_type)
             src_node_type, relation, dst_node_type = edge_type
-            
-            # 获取源节点和目标节点类型的全局索引映射
-            src_global_ids = self.hetero_data[src_node_type].global_ids
-            dst_global_ids = self.hetero_data[dst_node_type].global_ids
-            
+
             # 添加边到邻接列表
             for i in range(edge_index.shape[1]):
                 src_local = edge_index[0, i].item()
                 dst_local = edge_index[1, i].item()
-                
+
                 # 转换为全局索引
-                if src_local < len(src_global_ids) and dst_local < len(dst_global_ids):
-                    src_global = src_global_ids[src_local].item()
-                    dst_global = dst_global_ids[dst_local].item()
-                    
-                    # 检查全局索引有效性
-                    if 0 <= src_global < self.total_nodes and 0 <= dst_global < self.total_nodes:
-                        # 添加双向连接（无向图）
-                        if dst_global not in self.adjacency_list[src_global]:
-                            self.adjacency_list[src_global].append(dst_global)
-                        if src_global not in self.adjacency_list[dst_global]:
-                            self.adjacency_list[dst_global].append(src_global)
-        
+                src_global = self._local_to_global(torch.tensor([src_local], device=self.device), src_node_type)[0].item()
+                dst_global = self._local_to_global(torch.tensor([dst_local], device=self.device), dst_node_type)[0].item()
+
+                # 检查全局索引有效性
+                if 0 <= src_global < self.total_nodes and 0 <= dst_global < self.total_nodes:
+                    # 添加双向连接（无向图）
+                    if dst_global not in self.adjacency_list[src_global]:
+                        self.adjacency_list[src_global].append(dst_global)
+                    if src_global not in self.adjacency_list[dst_global]:
+                        self.adjacency_list[dst_global].append(src_global)
+
         # 打印调试信息
         edge_count = sum(len(neighbors) for neighbors in self.adjacency_list) // 2
         non_isolated = sum(1 for neighbors in self.adjacency_list if len(neighbors) > 0)
