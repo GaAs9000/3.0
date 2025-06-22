@@ -120,22 +120,22 @@ class MetisInitializer:
             # 解析边类型元组 (src_node_type, relation, dst_node_type)
             src_node_type, relation, dst_node_type = edge_type
 
-            # 添加边到邻接列表
-            for i in range(edge_index.shape[1]):
-                src_local = edge_index[0, i].item()
-                dst_local = edge_index[1, i].item()
+            # 使用已有的映射方法转换为全局索引
+            src_global = self._local_to_global(edge_index[0], src_node_type)
+            dst_global = self._local_to_global(edge_index[1], dst_node_type)
 
-                # 转换为全局索引
-                src_global = self._local_to_global(torch.tensor([src_local], device=self.device), src_node_type)[0].item()
-                dst_global = self._local_to_global(torch.tensor([dst_local], device=self.device), dst_node_type)[0].item()
+            # 添加边到邻接列表
+            for src, dst in zip(src_global, dst_global):
+                src_idx = src.item()
+                dst_idx = dst.item()
 
                 # 检查全局索引有效性
-                if 0 <= src_global < self.total_nodes and 0 <= dst_global < self.total_nodes:
+                if 0 <= src_idx < self.total_nodes and 0 <= dst_idx < self.total_nodes:
                     # 添加双向连接（无向图）
-                    if dst_global not in self.adjacency_list[src_global]:
-                        self.adjacency_list[src_global].append(dst_global)
-                    if src_global not in self.adjacency_list[dst_global]:
-                        self.adjacency_list[dst_global].append(src_global)
+                    if dst_idx not in self.adjacency_list[src_idx]:
+                        self.adjacency_list[src_idx].append(dst_idx)
+                    if src_idx not in self.adjacency_list[dst_idx]:
+                        self.adjacency_list[dst_idx].append(src_idx)
 
         # 打印调试信息
         edge_count = sum(len(neighbors) for neighbors in self.adjacency_list) // 2

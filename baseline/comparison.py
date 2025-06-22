@@ -25,25 +25,23 @@ def compare_methods(env: 'PowerGridPartitionEnv', agent, seed: int = 42) -> pd.D
     try:
         # 1. RL方法
         print("\n🤖 评估RL方法...")
-        env.reset()
-        
+        obs_dict, _ = env.reset()
+
         # 使用训练好的智能体进行分区
-        state = env.get_state()
+        state = obs_dict
         done = False
-        
+
         while not done:
-            valid_actions = env.get_valid_actions()
-            if not valid_actions:
+            # 使用智能体选择动作（智能体内部会处理动作掩码）
+            action, _, _ = agent.select_action(state, training=False)
+            if action is None:
                 break
-            
-            action_value = agent.select_action(state, valid_actions, training=False)
-            if action_value is None:
-                break
-            
-            action, _ = action_value
-            state, _, done, _ = env.step(action)
+
+            next_obs, _, terminated, truncated, _ = env.step(action)
+            done = terminated or truncated
+            state = next_obs
         
-        rl_metrics = evaluate_partition_method(env, env.z.cpu().numpy())
+        rl_metrics = evaluate_partition_method(env, env.state_manager.current_partition.cpu().numpy())
         rl_metrics['method'] = 'RL (PPO)'
         results.append(rl_metrics)
         

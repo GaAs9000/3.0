@@ -87,6 +87,7 @@ agent:
   value_coef: 0.5       # 价值损失系数
   hidden_dim: 256       # 网络隐藏层维度
   dropout: 0.1          # 网络dropout概率
+  max_grad_norm: 0.5    # 最大梯度范数（用于梯度裁剪，防止梯度爆炸）
 
 # ==================== 并行训练配置 ====================
 parallel_training:

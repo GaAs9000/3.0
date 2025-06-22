@@ -939,7 +939,8 @@ class UnifiedTrainingSystem:
             k_epochs=agent_config['k_epochs'],
             entropy_coef=agent_config['entropy_coef'],
             value_coef=agent_config['value_coef'],
-            device=self.device
+            device=self.device,
+            max_grad_norm=agent_config.get('max_grad_norm', None)
         )
         
         print(f"✅ 智能体创建完成")
@@ -1158,7 +1159,8 @@ class UnifiedTrainingSystem:
                 k_epochs=agent_config['k_epochs'],
                 entropy_coef=agent_config['entropy_coef'],
                 value_coef=agent_config['value_coef'],
-                device=self.device
+                device=self.device,
+                max_grad_norm=agent_config.get('max_grad_norm', None)
             )
 
             # 训练

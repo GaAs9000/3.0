@@ -272,10 +272,11 @@ class PPOAgent:
                  k_epochs: int = 4,
                  entropy_coef: float = 0.01,
                  value_coef: float = 0.5,
-                 device: torch.device = None):
+                 device: torch.device = None,
+                 max_grad_norm: float = None):
         """
         初始化PPO智能体
-        
+
         Args:
             node_embedding_dim: 节点嵌入维度
             region_embedding_dim: 区域嵌入维度
@@ -288,6 +289,7 @@ class PPOAgent:
             entropy_coef: 熵系数
             value_coef: 价值损失系数
             device: 计算设备
+            max_grad_norm: 最大梯度范数（用于梯度裁剪）
         """
         self.device = device or torch.device('cpu')
         self.num_partitions = num_partitions
@@ -296,6 +298,7 @@ class PPOAgent:
         self.k_epochs = k_epochs
         self.entropy_coef = entropy_coef
         self.value_coef = value_coef
+        self.max_grad_norm = max_grad_norm
         
         # 网络
         self.actor = ActorNetwork(
@@ -357,29 +360,13 @@ class PPOAgent:
             node_logits, partition_logits = self.actor(
                 node_embeddings, region_embeddings, boundary_nodes, action_mask
             )
-
+            
             value = self.critic(node_embeddings, region_embeddings, boundary_nodes)
-
+            
             if len(boundary_nodes) == 0:
                 # 没有有效动作
                 return None, 0.0, value.item()
-
-            # 检查输入数据的有效性
-            if torch.isnan(node_embeddings).any():
-                print(f"❌ 检测到NaN在node_embeddings中")
-                return None, 0.0, value.item()
-            if torch.isnan(region_embeddings).any():
-                print(f"❌ 检测到NaN在region_embeddings中")
-                return None, 0.0, value.item()
-            if torch.isnan(node_logits).any():
-                print(f"❌ 检测到NaN在node_logits中: {node_logits}")
-                print(f"   node_embeddings范围: [{node_embeddings.min():.4f}, {node_embeddings.max():.4f}]")
-                print(f"   region_embeddings范围: [{region_embeddings.min():.4f}, {region_embeddings.max():.4f}]")
-                return None, 0.0, value.item()
-            if torch.isnan(partition_logits).any():
-                print(f"❌ 检测到NaN在partition_logits中")
-                return None, 0.0, value.item()
-
+            
             # 采样动作
             if training:
                 # 从分布中采样
@@ -547,8 +534,14 @@ class PPOAgent:
             self.actor_optimizer.zero_grad()
             self.critic_optimizer.zero_grad()
             total_loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 0.5)
-            torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 0.5)
+
+            # ---------------- 梯度裁剪 ----------------
+            if self.max_grad_norm is not None:
+                # ① Actor ② Critic 都要裁剪，防止任何一侧爆梯度
+                torch.nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
+                torch.nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
+            # ------------------------------------------------
+
             self.actor_optimizer.step()
             self.critic_optimizer.step()
             
