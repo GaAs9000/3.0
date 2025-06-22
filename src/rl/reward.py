@@ -86,21 +86,42 @@ class RewardFunction:
         
         self.all_node_features = torch.cat(all_features, dim=0)
         
-        # 根据data_processing.py中的特征顺序提取物理量
-        # 特征顺序: ['Pd', 'Qd', 'Gs', 'Bs', 'Vm', 'Va', 'Vmax', 'Vmin', 'degree']
-        self.node_loads = self.all_node_features[:, 0]  # Pd (有功负载)
-        self.node_reactive_loads = self.all_node_features[:, 1]  # Qd (无功负载)
+        # 使用特征映射获取特征索引，避免硬编码
+        node_type = list(self.hetero_data.x_dict.keys())[0]  # 获取第一个节点类型
+        feature_map = getattr(self.hetero_data[node_type], 'feature_index_map', {})
         
-        # 如果有发电机数据（在特征扩展后）
-        # 特征扩展后: [..., 'Pg', 'Qg', 'Pg_max', 'Pg_min', 'is_gen']
-        if self.all_node_features.shape[1] > 9:
-            self.node_generation = self.all_node_features[:, 9]  # Pg
-            self.node_reactive_generation = self.all_node_features[:, 10]  # Qg
-            self.is_generator = self.all_node_features[:, 13] > 0.5  # is_gen
+        if self.debug_mode:
+            print(f"📊 特征映射信息: {feature_map}")
+            print(f"📊 节点特征维度: {self.all_node_features.shape}")
+        
+        # 基础负载特征 - 使用安全的索引访问
+        pd_idx = feature_map.get('Pd', 0)
+        qd_idx = feature_map.get('Qd', 1)
+        self.node_loads = self.all_node_features[:, pd_idx]     # Pd (有功负载)
+        self.node_reactive_loads = self.all_node_features[:, qd_idx]  # Qd (无功负载)
+        
+        # 发电机特征 - 安全访问
+        pg_idx = feature_map.get('Pg', -1)
+        qg_idx = feature_map.get('Qg', -1)
+        is_gen_idx = feature_map.get('is_gen', -1)
+        
+        if (pg_idx >= 0 and qg_idx >= 0 and is_gen_idx >= 0 and 
+            pg_idx < self.all_node_features.shape[1] and 
+            qg_idx < self.all_node_features.shape[1] and 
+            is_gen_idx < self.all_node_features.shape[1]):
+            self.node_generation = self.all_node_features[:, pg_idx]         # Pg
+            self.node_reactive_generation = self.all_node_features[:, qg_idx]  # Qg
+            self.is_generator = self.all_node_features[:, is_gen_idx] > 0.5    # is_gen
         else:
+            # 如果没有发电机特征或特征索引无效，使用默认值
             self.node_generation = torch.zeros_like(self.node_loads)
             self.node_reactive_generation = torch.zeros_like(self.node_loads)
             self.is_generator = torch.zeros(self.total_nodes, dtype=torch.bool, device=self.device)
+            
+            if self.debug_mode:
+                print(f"⚠️ 警告：发电机特征不可用，使用默认值")
+                print(f"   - Pg索引: {pg_idx}, Qg索引: {qg_idx}, is_gen索引: {is_gen_idx}")
+                print(f"   - 特征维度: {self.all_node_features.shape[1]}")
         
         if self.debug_mode:
             print(f"\n📊 物理数据提取:")
@@ -124,18 +145,30 @@ class RewardFunction:
             
             self.edges.append(global_edges)
             
-            # 根据边特征顺序提取电气参数
-            # 特征顺序: ['r', 'x', 'b', '|z|', 'y', 'rateA', 'angle_diff', 'is_transformer', 'status']
-            if edge_attr.shape[1] >= 5:
-                resistance = edge_attr[:, 0]  # r
-                reactance = edge_attr[:, 1]   # x
-                admittance = edge_attr[:, 4]  # y
+            # 使用边特征映射获取电气参数
+            edge_feature_map = getattr(self.hetero_data[edge_type], 'edge_feature_index_map', {})
+            
+            # 安全地获取电气参数特征索引
+            r_idx = edge_feature_map.get('r', 0)
+            x_idx = edge_feature_map.get('x', 1)
+            y_idx = edge_feature_map.get('y', 4)
+            
+            if (edge_attr.shape[1] > max(r_idx, x_idx, y_idx) and
+                r_idx >= 0 and x_idx >= 0 and y_idx >= 0):
+                resistance = edge_attr[:, r_idx]  # r
+                reactance = edge_attr[:, x_idx]   # x
+                admittance = edge_attr[:, y_idx]  # y
             else:
                 # 默认值
                 num_edges = edge_index.shape[1]
                 resistance = torch.ones(num_edges, device=self.device) * 0.01
                 reactance = torch.ones(num_edges, device=self.device) * 0.1
                 admittance = 1.0 / torch.sqrt(resistance**2 + reactance**2)
+                
+                if self.debug_mode:
+                    print(f"⚠️ 警告：边特征访问异常，使用默认电气参数")
+                    print(f"   - 边特征维度: {edge_attr.shape[1]}")
+                    print(f"   - r索引: {r_idx}, x索引: {x_idx}, y索引: {y_idx}")
             
             self.edge_resistances.append(resistance)
             self.edge_reactances.append(reactance)

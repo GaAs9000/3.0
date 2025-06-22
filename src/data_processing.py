@@ -11,17 +11,18 @@ from pathlib import Path
 
 class PowerGridDataProcessor:
     """
-    电网数据处理
+    电网数据处理 - 简化异构图版本
     
-    1. 全面升级以支持 PyTorch Geometric 的 HeteroData 格式
-    2. 为节点（母线）和边（支路）定义了物理类型
-    3. 重构了数据创建流程，以反映电网的异构性
-    4. 支持哈希缓存机制
+    核心改进：
+    1. 统一节点类型为'bus'，将物理类型(PQ/PV/Slack)转换为独热编码特征
+    2. 统一边关系为('bus', 'connects', 'bus')，将物理类型(线路/变压器)转换为边特征
+    3. 支持GNN权重共享和高效学习
+    4. 保持哈希缓存机制
     
     主要功能：
     1. MATPOWER格式数据清洗和特征提取
-    2. 构建PyTorch Geometric异构图数据
-    3. 区分不同类型的电力设备和连接
+    2. 构建简化的PyTorch Geometric异构图数据
+    3. 将物理类型信息特征化而非拓扑化
     """
     
     def __init__(self, normalize: bool = True, cache_dir: str = 'cache'):
@@ -37,18 +38,18 @@ class PowerGridDataProcessor:
 
     def graph_from_mpc(self, mpc: Dict) -> HeteroData:
         """
-        将MATPOWER格式数据转换为PyTorch Geometric的异构图数据 (HeteroData)
+        将MATPOWER格式数据转换为简化的PyTorch Geometric异构图数据 (HeteroData)
         
         参数:
             mpc: MATPOWER格式的电网数据字典
             
         返回:
-            data: PyTorch Geometric HeteroData对象
+            data: 简化的PyTorch Geometric HeteroData对象
         """
-        # 1. 计算数据哈希用于缓存 (文件名中加入后缀以区分新旧版本)
+        # 1. 计算数据哈希用于缓存 (文件名中加入v3后缀以区分新版本)
         raw_bytes = pickle.dumps((mpc["bus"].tolist(), mpc["branch"].tolist()))
         case_hash = hashlib.md5(raw_bytes).hexdigest()[:8]
-        cache_file = f"{self.cache_dir}/{case_hash}_hetero.pt"
+        cache_file = f"{self.cache_dir}/{case_hash}_hetero_v3.pt"
         
         # 2. 尝试从缓存加载（带进程锁保护）
         lock_file = cache_file + ".lock"
@@ -62,15 +63,15 @@ class PowerGridDataProcessor:
                     wait_count += 1
                 
                 if os.path.exists(cache_file):
-                    print(f"📂 从缓存加载异构图: {cache_file}")
+                    print(f"📂 从缓存加载简化异构图: {cache_file}")
                     return torch.load(cache_file, map_location="cpu", weights_only=False)
             except Exception as e:
                 print(f"⚠️ 缓存加载失败: {e}，重新构建...")
         
-        # 3. 首次构建异构图数据
-        print(f"🔨 首次构建异构图数据...")
-        baseMVA, df_nodes, df_edges, df_edge_features = self.process_matpower_data(mpc)
-        data = self.create_pyg_hetero_data(df_nodes, df_edges, df_edge_features)
+        # 3. 首次构建简化异构图数据
+        print(f"🔨 首次构建简化异构图数据...")
+        baseMVA, df_nodes, df_edges, df_edge_features = self._process_matpower_data(mpc)
+        data = self._create_simplified_hetero_data(df_nodes, df_edges, df_edge_features)
         
         # 4. 保存到缓存（带进程锁保护）
         try:
@@ -79,7 +80,7 @@ class PowerGridDataProcessor:
                 f.write(str(os.getpid()))
             
             torch.save(data, cache_file, pickle_protocol=pickle.DEFAULT_PROTOCOL)
-            print(f"💾 已缓存异构图到: {cache_file}")
+            print(f"💾 已缓存简化异构图到: {cache_file}")
             
             # 删除锁文件
             if os.path.exists(lock_file):
@@ -91,16 +92,16 @@ class PowerGridDataProcessor:
         
         return data   
     
-    def process_matpower_data(self, mpc: Dict) -> Tuple[float, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    def _process_matpower_data(self, mpc: Dict) -> Tuple[float, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         """
-        处理MATPOWER格式数据，为构建异构图准备包含类型信息的DataFrame
+        处理MATPOWER格式数据，为构建简化异构图准备包含类型信息的DataFrame
         
         参数:
             mpc: MATPOWER格式的电网数据字典
             
         返回:
             baseMVA: 基准功率(MVA)
-            df_nodes: 包含类型信息的节点特征DataFrame
+            df_nodes: 包含bus_type信息的节点特征DataFrame
             df_edges: 边索引DataFrame
             df_edge_features: 包含类型信息的边特征DataFrame
         """
@@ -128,8 +129,8 @@ class PowerGridDataProcessor:
             node_features = self._normalize_features(node_features, 'node')
             edge_features = self._normalize_features(edge_features, 'edge')
             
-        # 6. 创建包含类型信息的DataFrame
-        # 定义节点特征列名 (移除了旧的one-hot类型列)
+        # 6. 创建包含bus_type信息的DataFrame，保留原始数值类型用于独热编码
+        # 定义节点特征列名
         node_columns = ['Pd', 'Qd', 'Gs', 'Bs', 'Vm', 'Va', 'Vmax', 'Vmin', 'degree']
         if 'gen' in mpc:
             node_columns.extend(['Pg', 'Qg', 'Pg_max', 'Pg_min', 'is_gen'])
@@ -137,23 +138,112 @@ class PowerGridDataProcessor:
         # 使用0-based的母线索引作为DataFrame的索引
         df_nodes = pd.DataFrame(node_features, columns=node_columns, index=bus[:,0].astype(int)-1)
         
-        # 添加节点类型列
+        # 添加bus_type列（保留数值1,2,3用于独热编码）
         bus_types_raw = bus[:, 1].astype(int)
-        df_nodes['type'] = [self.BUS_TYPE_MAP.get(bt, 'pq') for bt in bus_types_raw] # 默认为pq类型
+        df_nodes['bus_type'] = bus_types_raw
 
         # 定义边特征列名
         df_edge_features = pd.DataFrame(
             edge_features,
             columns=['r', 'x', 'b', '|z|', 'y', 'rateA', 'angle_diff', 'is_transformer', 'status']
         )
-        # 添加边类型列
-        is_transformer_int = df_edge_features['is_transformer'].astype(int)
-        df_edge_features['type'] = [self.BRANCH_TYPE_MAP.get(bt, 'line') for bt in is_transformer_int]
         
         # 创建边索引DataFrame
         df_edges = pd.DataFrame(edge_index, columns=['from_bus', 'to_bus'])
         
         return baseMVA, df_nodes, df_edges, df_edge_features
+
+    def _create_simplified_hetero_data(self, df_nodes: pd.DataFrame, df_edges: pd.DataFrame, 
+                                     df_edge_features: pd.DataFrame) -> HeteroData:
+        """
+        创建简化的异构图数据结构
+        
+        关键特性：
+        1. 统一节点类型为'bus'
+        2. 将bus_type转换为独热编码特征
+        3. 统一边关系为('bus', 'connects', 'bus')
+        4. 将is_transformer作为边特征保留
+        
+        参数:
+            df_nodes: 包含bus_type信息的节点特征DataFrame
+            df_edges: 边索引DataFrame
+            df_edge_features: 边特征DataFrame
+            
+        返回:
+            data: 简化的PyTorch Geometric HeteroData对象
+        """
+        data = HeteroData()
+        
+        # --- 1. 处理节点：统一类型 + 独热编码 ---
+        print(f"🔍 节点类型分布: {df_nodes['bus_type'].value_counts().to_dict()}")
+        
+        # 创建bus_type的独热编码
+        bus_type_dummies = pd.get_dummies(df_nodes['bus_type'], prefix='type')
+        
+        # 确保包含所有可能的类型（type_1, type_2, type_3）
+        for bus_type in [1, 2, 3]:
+            col_name = f'type_{bus_type}'
+            if col_name not in bus_type_dummies.columns:
+                bus_type_dummies[col_name] = 0
+        
+        # 按照列名排序确保一致性
+        bus_type_dummies = bus_type_dummies.reindex(sorted(bus_type_dummies.columns), axis=1)
+        
+        # 获取原始数值特征（去除bus_type列）
+        original_features = df_nodes.drop('bus_type', axis=1)
+        
+        # 合并原始特征和独热编码类型特征
+        combined_features = pd.concat([original_features, bus_type_dummies], axis=1)
+        
+        # 创建特征名称到索引的映射，供下游代码使用
+        feature_names = combined_features.columns.tolist()
+        feature_index_map = {name: idx for idx, name in enumerate(feature_names)}
+        
+        # 创建统一的'bus'节点类型
+        data['bus'].x = torch.tensor(combined_features.values.astype(np.float32), dtype=torch.float32)
+        data['bus'].global_ids = torch.tensor(df_nodes.index.tolist(), dtype=torch.long)
+        
+        # 存储特征映射信息供下游使用
+        data['bus'].feature_names = feature_names
+        data['bus'].feature_index_map = feature_index_map
+        
+        print(f"  📍 bus: {len(df_nodes)} 个节点，特征维度: {combined_features.shape[1]}")
+        print(f"    - 原始数值特征: {original_features.shape[1]}")
+        print(f"    - 独热编码类型特征: {bus_type_dummies.shape[1]}")
+        print(f"    - 特征顺序: {feature_names}")
+        
+        # --- 2. 处理边：统一关系类型 ---
+        print(f"🔗 边类型分布: is_transformer = {df_edge_features['is_transformer'].value_counts().to_dict()}")
+        
+        # 构建边索引张量
+        edge_index = torch.tensor(df_edges[['from_bus', 'to_bus']].values.T, dtype=torch.long)
+        
+        # 构建边特征张量（已包含is_transformer特征）
+        edge_attr = torch.tensor(df_edge_features.values.astype(np.float32), dtype=torch.float32)
+        
+        # 创建边特征映射
+        edge_feature_names = df_edge_features.columns.tolist()
+        edge_feature_index_map = {name: idx for idx, name in enumerate(edge_feature_names)}
+        
+        # 创建统一的边关系
+        data['bus', 'connects', 'bus'].edge_index = edge_index
+        data['bus', 'connects', 'bus'].edge_attr = edge_attr
+        data['bus', 'connects', 'bus'].edge_feature_names = edge_feature_names
+        data['bus', 'connects', 'bus'].edge_feature_index_map = edge_feature_index_map
+        
+        print(f"  🔗 ('bus', 'connects', 'bus'): {edge_index.shape[1]} 条边，特征维度: {edge_attr.shape[1]}")
+        print(f"    - 边特征顺序: {edge_feature_names}")
+        
+        # --- 3. 创建无向图 ---
+        try:
+            from torch_geometric.transforms import ToUndirected
+            data = ToUndirected()(data)
+            print("✅ 成功创建无向简化异构图")
+            print(f"  🔗 无向化后边数: {data['bus', 'connects', 'bus'].edge_index.shape[1]}")
+        except Exception as e:
+            print(f"⚠️ 警告：无法使用ToUndirected转换: {e}")
+
+        return data
 
     def _extract_node_features(self, bus: np.ndarray, branch: np.ndarray, baseMVA: float) -> np.ndarray:
         """
@@ -242,8 +332,21 @@ class PowerGridDataProcessor:
         angle_diff = angle_max - angle_min
         
         # 5. 变压器标识和运行状态
+        # 检查多个可能的变压器指标
         tap_ratio = branch[:, 8]
-        is_transformer = ((tap_ratio != 0) & (tap_ratio != 1)).astype(float)
+        phase_shift = branch[:, 9] if branch.shape[1] > 9 else np.zeros(len(branch))
+        
+        # 变压器识别：tap_ratio != 1 或 phase_shift != 0 或 显式变压器标记
+        is_transformer_tap = (tap_ratio != 1.0).astype(float)
+        is_transformer_phase = (phase_shift != 0.0).astype(float)
+        
+        # 如果有显式的变压器标记列（column[9]），使用它
+        if branch.shape[1] > 9:
+            is_transformer_explicit = branch[:, 9].astype(float)
+            is_transformer = np.maximum(np.maximum(is_transformer_tap, is_transformer_phase), is_transformer_explicit)
+        else:
+            is_transformer = np.maximum(is_transformer_tap, is_transformer_phase)
+            
         status = branch[:, 10].astype(float) if branch.shape[1] > 10 else np.ones(len(branch))
         
         # 6. 边索引 (转换为0-based)
@@ -325,139 +428,28 @@ class PowerGridDataProcessor:
             return scaler.fit_transform(features)
         else:
             return getattr(self, scaler_attr).transform(features)
+
+    # 向后兼容方法
+    def process_matpower_data(self, mpc: Dict) -> Tuple[float, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        """
+        向后兼容的方法，现在调用私有的_process_matpower_data方法
+        """
+        print("⚠️ 提示：process_matpower_data现在使用简化异构图实现")
+        return self._process_matpower_data(mpc)
     
     def create_pyg_hetero_data(self, df_nodes: pd.DataFrame, df_edges: pd.DataFrame, 
                                df_edge_features: pd.DataFrame) -> HeteroData:
         """
-        根据包含类型信息的DataFrame创建PyTorch Geometric的HeteroData对象
-        这是本次升级的核心功能
-        
-        参数:
-            df_nodes: 包含类型信息的节点特征DataFrame
-            df_edges: 边索引DataFrame
-            df_edge_features: 包含类型信息的边特征DataFrame
-            
-        返回:
-            data: PyTorch Geometric HeteroData对象
-            
-        关键步骤:
-            1. 为每种节点类型创建独立的特征张量和索引映射
-            2. 为每种边类型创建连接关系
-            3. 处理全局索引到局部索引的转换
-            4. 创建无向图结构
+        向后兼容的方法，现在调用简化的异构图创建方法
         """
-        data = HeteroData()
-        
-        # --- 1. 处理节点：为每种节点类型创建独立的数据结构 ---
-        # 这是最关键的步骤：维护全局ID到各类型局部ID的映射关系
-        global_to_local_maps = {}
-        
-        print(f"🔍 发现节点类型: {df_nodes['type'].unique()}")
-        
-        for node_type, group in df_nodes.groupby('type'):
-            # 节点类型键，例如 'bus_pq', 'bus_pv', 'bus_slack'
-            node_type_key = f'bus_{node_type}'
-            
-            # 获取该类型节点的全局ID列表 (0-based索引)
-            type_global_indices = group.index.tolist()
-            
-            # 创建全局ID到该类型局部ID的映射
-            global_to_local_maps[node_type_key] = {
-                global_id: local_id for local_id, global_id in enumerate(type_global_indices)
-            }
-            
-            # 提取特征 (去除类型列)
-            feature_cols = [col for col in group.columns if col != 'type']
-            data[node_type_key].x = torch.tensor(group[feature_cols].values, dtype=torch.float32)
-            
-            # 存储全局ID，方便未来追溯和调试
-            data[node_type_key].global_ids = torch.tensor(type_global_indices, dtype=torch.long)
-            
-            print(f"  📍 {node_type_key}: {len(type_global_indices)} 个节点")
+        print("⚠️ 提示：create_pyg_hetero_data现在使用简化异构图实现")
+        return self._create_simplified_hetero_data(df_nodes, df_edges, df_edge_features)
 
-        # --- 2. 处理边：创建异构图的连接关系 ---
-        # 合并边信息，方便处理
-        full_edge_df = pd.concat([df_edges, df_edge_features], axis=1)
-        
-        print(f"🔗 发现边类型: {df_edge_features['type'].unique()}")
-        
-        # 用于统计关系类型
-        relation_stats = {}
-        
-        for _, row in full_edge_df.iterrows():
-            src_global, dst_global = int(row['from_bus']), int(row['to_bus'])
-            
-            # 安全地获取节点类型，如果节点ID不存在则跳过 (处理不一致的数据)
-            try:
-                src_type_name = df_nodes.loc[src_global, 'type']
-                dst_type_name = df_nodes.loc[dst_global, 'type']
-            except KeyError:
-                print(f"⚠️ 警告：跳过不存在的节点连接 {src_global}-{dst_global}")
-                continue
-
-            src_type_key = f'bus_{src_type_name}'
-            dst_type_key = f'bus_{dst_type_name}'
-            edge_type = row['type']  # 'line' or 'transformer'
-
-            # 构建关系元组，例如 ('bus_pq', 'connects_line', 'bus_pv')
-            # 为了规范化，我们将节点类型按字母顺序排序，以创建唯一的关系键
-            sorted_node_keys = sorted([src_type_key, dst_type_key])
-            relation_tuple = (sorted_node_keys[0], f'connects_{edge_type}', sorted_node_keys[1])
-            
-            # 统计关系类型
-            if relation_tuple not in relation_stats:
-                relation_stats[relation_tuple] = 0
-            relation_stats[relation_tuple] += 1
-            
-            # 从全局ID转换为相应类型的局部ID
-            try:
-                src_local = global_to_local_maps[src_type_key][src_global]
-                dst_local = global_to_local_maps[dst_type_key][dst_global]
-            except KeyError:
-                print(f"⚠️ 警告：无法找到节点的局部索引映射")
-                continue
-            
-            # 提取边特征 (去除类型列)
-            edge_feature_cols = [col for col in df_edge_features.columns if col != 'type']
-            edge_attr_values = row[edge_feature_cols].values.astype(np.float32)
-            edge_attr = torch.tensor(edge_attr_values, dtype=torch.float32).unsqueeze(0)
-
-            # 在data对象中初始化该关系类型的存储
-            if relation_tuple not in data:
-                data[relation_tuple].edge_index = torch.empty((2, 0), dtype=torch.long)
-                data[relation_tuple].edge_attr = torch.empty((0, len(edge_feature_cols)), dtype=torch.float32)
-            
-            # 添加边 (注意：根据排序后的元组，决定src和dst哪个在前)
-            if src_type_key == sorted_node_keys[0]:
-                edge_pair = torch.tensor([[src_local], [dst_local]], dtype=torch.long)
-            else:
-                edge_pair = torch.tensor([[dst_local], [src_local]], dtype=torch.long)
-
-            data[relation_tuple].edge_index = torch.cat([data[relation_tuple].edge_index, edge_pair], dim=1)
-            data[relation_tuple].edge_attr = torch.cat([data[relation_tuple].edge_attr, edge_attr], dim=0)
-
-        # 打印关系统计信息
-        print("🌐 异构图关系统计:")
-        for relation, count in relation_stats.items():
-            print(f"  🔗 {relation}: {count} 条边")
-
-        # --- 3. 创建无向图 ---
-        # PyG的ToUndirected可以方便地为异构图创建反向边
-        try:
-            from torch_geometric.transforms import ToUndirected
-            data = ToUndirected()(data)
-            print("✅ 成功创建无向异构图")
-        except Exception as e:
-            print(f"⚠️ 警告：无法使用ToUndirected转换，使用当前的有向图: {e}")
-
-        return data
-
-    # 为了向后兼容，保留原来的create_pyg_data方法
     def create_pyg_data(self, df_nodes: pd.DataFrame, df_edges: pd.DataFrame, 
                        df_edge_features: pd.DataFrame):
         """
-        向后兼容的方法，现在重定向到异构图创建
+        向后兼容的方法，现在重定向到简化异构图创建
         """
-        print("⚠️ 警告：create_pyg_data已弃用，请使用create_pyg_hetero_data")
-        return self.create_pyg_hetero_data(df_nodes, df_edges, df_edge_features)
+        print("⚠️ 提示：create_pyg_data现在使用简化异构图实现")
+        return self._create_simplified_hetero_data(df_nodes, df_edges, df_edge_features)
 
