@@ -134,13 +134,34 @@ class PowerGridPartitioningEnv:
             # 获取该节点类型的注意力分数
             if node_type in node_attention_scores:
                 attention_features = node_attention_scores[node_type]
+
+                # 检查数值稳定性
+                if torch.isnan(embeddings).any() or torch.isinf(embeddings).any():
+                    print(f"  ⚠️ {node_type}: 检测到原始嵌入中的NaN/Inf值")
+                    embeddings = torch.nan_to_num(embeddings, nan=0.0, posinf=1.0, neginf=-1.0)
+
+                if torch.isnan(attention_features).any() or torch.isinf(attention_features).any():
+                    print(f"  ⚠️ {node_type}: 检测到注意力特征中的NaN/Inf值")
+                    attention_features = torch.nan_to_num(attention_features, nan=0.0, posinf=1.0, neginf=-1.0)
+
                 # 连接原始嵌入和注意力特征: H' = concat(H, H_attn)
                 enhanced_emb = torch.cat([embeddings, attention_features], dim=1)
+
+                # 检查连接后的嵌入是否有极值
+                if torch.isnan(enhanced_emb).any() or torch.isinf(enhanced_emb).any():
+                    print(f"  ⚠️ {node_type}: 检测到增强嵌入中的NaN/Inf值，进行清理")
+                    enhanced_emb = torch.nan_to_num(enhanced_emb, nan=0.0, posinf=1.0, neginf=-1.0)
+
                 enhanced_embeddings[node_type] = enhanced_emb
 
                 print(f"  ✅ {node_type}: {embeddings.shape} + {attention_features.shape} → {enhanced_emb.shape}")
             else:
                 # 如果没有注意力权重，使用原始嵌入
+                # 仍然检查数值稳定性
+                if torch.isnan(embeddings).any() or torch.isinf(embeddings).any():
+                    print(f"  ⚠️ {node_type}: 检测到原始嵌入中的NaN/Inf值")
+                    embeddings = torch.nan_to_num(embeddings, nan=0.0, posinf=1.0, neginf=-1.0)
+
                 enhanced_embeddings[node_type] = embeddings
                 print(f"  ⚠️ {node_type}: 无注意力权重，使用原始嵌入 {embeddings.shape}")
 

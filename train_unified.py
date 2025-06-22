@@ -28,8 +28,15 @@ import matplotlib.pyplot as plt
 # 添加src到路径
 sys.path.append(str(Path(__file__).parent / 'src'))
 
-# 禁用警告
-warnings.filterwarnings('ignore')
+# --- 新增：全局 NaN/Inf 异常检测开关 ---
+# 使 autograd 在反向传播中遇到 NaN 时提供更详细的堆栈跟踪
+torch.autograd.set_detect_anomaly(True)
+
+# 将特定的运行时警告 (RuntimeWarning) 升级为错误，使其能被 try-except 捕获
+warnings.filterwarnings("error", message=".*NaN.*", category=RuntimeWarning)
+
+# 禁用其他警告
+warnings.filterwarnings('ignore', category=UserWarning)
 
 # 导入电力系统数据加载函数
 try:
@@ -509,14 +516,52 @@ class UnifiedTrainer:
 
             # 更新智能体并记录训练指标
             if episode % update_interval == 0:
-                training_stats = self.agent.update()
-                if training_stats:
-                    self.logger.log_training_step(
-                        episode,
-                        training_stats.get('actor_loss'),
-                        training_stats.get('critic_loss'),
-                        training_stats.get('entropy')
-                    )
+                try:
+                    # --- 使用 try-except 包裹 agent.update() ---
+                    training_stats = self.agent.update()
+                    if training_stats:
+                        self.logger.log_training_step(
+                            episode,
+                            training_stats.get('actor_loss'),
+                            training_stats.get('critic_loss'),
+                            training_stats.get('entropy')
+                        )
+
+                except RuntimeError as e:
+                    if "[NaNGuard]" in str(e) or "NaN" in str(e):
+                        print(f"\n❌ [NaN Dumper] 捕获到致命错误: {e}")
+                        
+                        dump_dir = "diagnostics"
+                        os.makedirs(dump_dir, exist_ok=True)
+                        dump_path = os.path.join(dump_dir, f"nan_dump_episode_{episode}.pt")
+                        
+                        print(f"  ... 正在保存诊断信息到: {dump_path}")
+
+                        # 收集触发异常的批量数据
+                        batch_data = {
+                            'states': self.agent.memory.states,
+                            'actions': self.agent.memory.actions,
+                            'logprobs': self.agent.memory.logprobs,
+                            'rewards': self.agent.memory.rewards,
+                            'is_terminals': self.agent.memory.is_terminals,
+                        }
+
+                        torch.save({
+                            "error_message": str(e),
+                            "episode": episode,
+                            "actor_state_dict": self.agent.actor.state_dict(),
+                            "critic_state_dict": self.agent.critic.state_dict(),
+                            "actor_optimizer_state_dict": self.agent.actor_optimizer.state_dict(),
+                            "critic_optimizer_state_dict": self.agent.critic_optimizer.state_dict(),
+                            "triggering_batch": batch_data,
+                        }, dump_path)
+                        
+                        print("  ... 保存完成。正在中断训练。")
+                        # 重新抛出异常，以正常退出训练循环
+                        raise e
+                    else:
+                        # 如果是其他运行时错误，则直接抛出
+                        raise
 
             # 保存中间结果
             if episode % self.logger.metrics_save_interval == 0 and episode > 0:
@@ -674,8 +719,8 @@ class UnifiedTrainingSystem:
             },
             'agent': {
                 'type': 'ppo',  # ppo, sb3_ppo
-                'lr_actor': 3e-4,
-                'lr_critic': 1e-3,
+                'lr_actor': 3e-5,  # 降低10倍用于数值稳定
+                'lr_critic': 1e-4,  # 降低10倍用于数值稳定
                 'gamma': 0.99,
                 'eps_clip': 0.2,
                 'k_epochs': 4,

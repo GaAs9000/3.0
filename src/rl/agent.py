@@ -14,6 +14,68 @@ from typing import Dict, List, Tuple, Optional, Any
 from collections import deque
 import copy
 
+
+def _check_tensor(t: torch.Tensor, tag: str):
+    """检查张量是否包含 NaN/Inf。"""
+    if not torch.isfinite(t).all():
+        raise RuntimeError(f"[NaNGuard] 输入检查失败: {tag} 包含 NaN 或 Inf。")
+
+
+def _install_nan_hooks(model: torch.nn.Module, name: str = "network"):
+    """为模型的关键层安装前向钩子以检测 NaN/Inf 输出。"""
+    def _forward_hook(module, inputs, output):
+        if isinstance(output, torch.Tensor) and not torch.isfinite(output).all():
+            raise RuntimeError(
+                f"[NaNGuard] 前向传播检测到异常: {name}.{module.__class__.__name__} 的输出包含 NaN 或 Inf。"
+            )
+    
+    for module in model.modules():
+        if isinstance(module, (torch.nn.Linear, torch.nn.LayerNorm)):
+            module.register_forward_hook(_forward_hook)
+
+
+def masked_softmax(logits: torch.Tensor, mask: torch.Tensor, dim: int = -1, epsilon: float = 1e-12):
+    """
+    数值稳定的掩码softmax函数
+    
+    Args:
+        logits: 输入logits
+        mask: 布尔掩码，True表示有效位置
+        dim: softmax的维度
+        epsilon: 防止除零的小常数
+        
+    Returns:
+        稳定的概率分布
+    """
+    # 1) 把无效位置填成一个"很大的负数"，而不是 -inf
+    masked_logits = logits.masked_fill(~mask, -1e9)
+    
+    # 2) 先做 softmax
+    probs = torch.softmax(masked_logits, dim=dim)
+    
+    # 3) 最后把无效动作的概率显式归零，避免梯度
+    probs = probs * mask.float()
+    
+    # 4) 防止全 0 行 —— 给极小 ε 再 renormalize
+    probs_sum = probs.sum(dim=dim, keepdim=True).clamp(min=epsilon)
+    probs = probs / probs_sum
+    
+    return probs
+
+
+def safe_log_prob(probs: torch.Tensor, epsilon: float = 1e-12):
+    """
+    安全的对数概率计算
+    
+    Args:
+        probs: 概率分布
+        epsilon: 防止log(0)的小常数
+        
+    Returns:
+        安全的对数概率
+    """
+    return torch.log(probs.clamp(min=epsilon))
+
 try:
     from ..gat import HeteroGraphEncoder
 except ImportError:
@@ -87,6 +149,9 @@ class ActorNetwork(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, region_embedding_dim)
         )
+
+        # 初始化网络权重
+        self._init_weights()
         
     def forward(self, 
                 node_embeddings: torch.Tensor,
@@ -122,12 +187,22 @@ class ActorNetwork(nn.Module):
         # 每个边界节点的分区选择logits
         partition_logits = self.partition_selector(combined_features)  # [num_boundary, num_partitions]
         
-        # 将动作掩码应用于分区logits
+        # 将动作掩码应用于分区logits（使用数值稳定的方法）
         if len(boundary_nodes) > 0:
             boundary_mask = action_mask[boundary_nodes]  # [num_boundary, num_partitions]
-            partition_logits = partition_logits.masked_fill(~boundary_mask, float('-inf'))
+            # 使用-1e9代替-inf，避免NaN/Inf问题
+            partition_logits = partition_logits.masked_fill(~boundary_mask, -1e9)
         
         return node_logits, partition_logits
+
+    def _init_weights(self):
+        """初始化网络权重以提高数值稳定性"""
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                # 使用Xavier初始化
+                nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0.0)
 
 
 class CriticNetwork(nn.Module):
@@ -178,6 +253,9 @@ class CriticNetwork(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(hidden_dim // 2, 1)
         )
+
+        # 初始化网络权重
+        self._init_weights()
         
     def forward(self,
                 node_embeddings: torch.Tensor,
@@ -212,6 +290,15 @@ class CriticNetwork(nn.Module):
         value = self.value_head(combined_features)
         
         return value.squeeze(-1)
+
+    def _init_weights(self):
+        """初始化网络权重以提高数值稳定性"""
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                # 使用Xavier初始化
+                nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0.0)
 
 
 class PPOMemory:
@@ -323,6 +410,10 @@ class PPOAgent:
             'entropy': deque(maxlen=100)
         }
         
+        # --- 新增：为 Actor 和 Critic 安装 NaN 检测钩子 ---
+        _install_nan_hooks(self.actor, name="Actor")
+        _install_nan_hooks(self.critic, name="Critic")
+        
     def select_action(self, state: Dict[str, torch.Tensor], training: bool = True) -> Tuple[Tuple[int, int], float, float]:
         """
         使用当前策略选择动作
@@ -367,19 +458,47 @@ class PPOAgent:
                 # 没有有效动作
                 return None, 0.0, value.item()
             
-            # 采样动作
+            # 采样动作（使用数值稳定的方法）
             if training:
-                # 从分布中采样
-                node_probs = F.softmax(node_logits, dim=0)
+                # 检查并处理NaN/Inf值
+                if torch.isnan(node_logits).any() or torch.isinf(node_logits).any():
+                    print(f"⚠️ 检测到node_logits中的NaN/Inf值: {node_logits}")
+                    # 使用均匀分布作为回退
+                    node_probs = torch.ones_like(node_logits) / len(node_logits)
+                else:
+                    # 使用数值稳定的softmax
+                    node_logits_clipped = torch.clamp(node_logits, min=-20, max=20)
+                    node_probs = F.softmax(node_logits_clipped, dim=0)
+
+                # 确保概率有效
+                node_probs = node_probs.clamp(min=1e-12)
+                node_probs = node_probs / node_probs.sum()
+
                 node_dist = torch.distributions.Categorical(node_probs)
                 node_action = node_dist.sample()
+
+                # 对分区logits进行相同的处理
+                partition_logits_selected = partition_logits[node_action]
                 
-                partition_probs = F.softmax(partition_logits[node_action], dim=0)
+                if torch.isnan(partition_logits_selected).any() or torch.isinf(partition_logits_selected).any():
+                    print(f"⚠️ 检测到partition_logits中的NaN/Inf值: {partition_logits_selected}")
+                    partition_probs = torch.ones_like(partition_logits_selected) / len(partition_logits_selected)
+                else:
+                    # 使用数值稳定的softmax
+                    partition_logits_clipped = torch.clamp(partition_logits_selected, min=-20, max=20)
+                    partition_probs = F.softmax(partition_logits_clipped, dim=0)
+
+                # 确保概率有效
+                partition_probs = partition_probs.clamp(min=1e-12)
+                partition_probs = partition_probs / partition_probs.sum()
+
                 partition_dist = torch.distributions.Categorical(partition_probs)
                 partition_action = partition_dist.sample()
-                
-                # 计算对数概率
-                log_prob = node_dist.log_prob(node_action) + partition_dist.log_prob(partition_action)
+
+                # 计算安全的对数概率
+                node_log_prob = safe_log_prob(node_probs)[node_action]
+                partition_log_prob = safe_log_prob(partition_probs)[partition_action]
+                log_prob = node_log_prob + partition_log_prob
             else:
                 # 贪心选择
                 node_action = torch.argmax(node_logits)
@@ -407,6 +526,29 @@ class PPOAgent:
         """
         if len(self.memory.states) == 0:
             return {}
+        
+        # --- 新增：在学习开始前检查输入和权重的健康状况 ---
+        try:
+            # 检查作为输入的旧状态
+            old_states = [state for state in self.memory.states]
+            if old_states:
+                # 检查第一个状态的node_embeddings
+                first_state = old_states[0]
+                if 'node_embeddings' in first_state:
+                    _check_tensor(first_state['node_embeddings'], "memory.states.node_embeddings (输入到网络)")
+                if 'region_embeddings' in first_state:
+                    _check_tensor(first_state['region_embeddings'], "memory.states.region_embeddings (输入到网络)")
+
+            # 检查 Actor 和 Critic 的权重
+            for name, param in self.actor.named_parameters():
+                _check_tensor(param.data, f"Actor.{name} (权重)")
+            for name, param in self.critic.named_parameters():
+                _check_tensor(param.data, f"Critic.{name} (权重)")
+        except RuntimeError as e:
+            # 附加上下文信息后重新抛出异常
+            print("❌ 在 PPO update() 的入口检查中发现 NaN/Inf。这表明问题在进入学习步骤之前就已存在。")
+            raise e
+        # --- 检查结束 ---
             
         # 获取批次
         states, actions, rewards, old_log_probs, old_values, dones = self.memory.get_batch()
@@ -442,22 +584,36 @@ class PPOAgent:
         """使用GAE计算优势"""
         advantages = torch.zeros_like(rewards)
         returns = torch.zeros_like(rewards)
-        
+
         gae = 0
         for t in reversed(range(len(rewards))):
             if t == len(rewards) - 1:
                 next_value = 0
             else:
                 next_value = values[t + 1]
-                
+
             delta = rewards[t] + self.gamma * next_value * (~dones[t]).float() - values[t]
             gae = delta + self.gamma * 0.95 * (~dones[t]).float() * gae
             advantages[t] = gae
             returns[t] = advantages[t] + values[t]
-            
-        # 标准化优势
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-        
+
+        # 🔧 修复3: 安全的回报健康检查
+        returns = torch.nan_to_num(returns, nan=0.0, posinf=0.0, neginf=0.0)
+        if torch.isnan(returns).any():
+            raise RuntimeError("NaN in returns – check reward pipeline")
+
+        # 🔧 修复1: 安全标准化优势
+        def safe_standardize(t, eps=1e-6):
+            mean = t.mean()
+            std = t.std()
+            if torch.isnan(std) or std < eps:
+                # 如果方差过小或已损坏，只做去均值
+                return t - mean
+            return (t - mean) / (std + eps)
+
+        advantages = safe_standardize(advantages)
+        advantages = torch.nan_to_num(advantages, nan=0.0, posinf=0.0, neginf=0.0)
+
         return advantages, returns
         
     def _ppo_epoch(self, states, actions, old_log_probs, advantages, returns):
@@ -508,14 +664,35 @@ class PPOAgent:
                 
             node_pos = node_pos[0]
             
-            node_probs = F.softmax(node_logits, dim=0)
-            partition_probs = F.softmax(partition_logits[node_pos], dim=0)
+            # 添加数值稳定性检查
+            if torch.isnan(node_logits).any() or torch.isinf(node_logits).any():
+                print(f"⚠️ PPO更新中检测到node_logits的NaN/Inf值")
+                node_logits_clipped = torch.zeros_like(node_logits)
+            else:
+                node_logits_clipped = torch.clamp(node_logits, min=-20, max=20)
+
+            partition_logits_selected = partition_logits[node_pos]
+            if torch.isnan(partition_logits_selected).any() or torch.isinf(partition_logits_selected).any():
+                print(f"⚠️ PPO更新中检测到partition_logits的NaN/Inf值")
+                partition_logits_clipped = torch.zeros_like(partition_logits_selected)
+            else:
+                partition_logits_clipped = torch.clamp(partition_logits_selected, min=-20, max=20)
+
+            # 使用数值稳定的概率计算
+            node_probs = F.softmax(node_logits_clipped, dim=0).clamp(min=1e-12)
+            partition_probs = F.softmax(partition_logits_clipped, dim=0).clamp(min=1e-12)
             
-            new_log_prob = (torch.log(node_probs[node_pos] + 1e-8) + 
-                           torch.log(partition_probs[partition_idx - 1] + 1e-8))
+            # 安全的对数概率计算
+            node_log_prob = safe_log_prob(node_probs)[node_pos]
+            partition_log_prob = safe_log_prob(partition_probs)[partition_idx - 1]
+            new_log_prob = node_log_prob + partition_log_prob
             
-            # PPO损失
-            ratio = torch.exp(new_log_prob - old_log_prob)
+            # 🔧 修复2: ratio = exp(logπ_new – logπ_old) 双重保护
+            log_prob_diff = torch.clamp(new_log_prob - old_log_prob, min=-20, max=20)
+            ratio = torch.exp(log_prob_diff)
+            # 防守式替换所有异常
+            ratio = torch.nan_to_num(ratio, nan=1.0, posinf=1.0, neginf=0.0)
+
             surr1 = ratio * advantage
             surr2 = torch.clamp(ratio, 1 - self.eps_clip, 1 + self.eps_clip) * advantage
             actor_loss = -torch.min(surr1, surr2)
@@ -523,9 +700,9 @@ class PPOAgent:
             # 评论家损失
             critic_loss = F.mse_loss(value, return_val)
             
-            # 熵
-            entropy = -(node_probs * torch.log(node_probs + 1e-8)).sum()
-            entropy += -(partition_probs * torch.log(partition_probs + 1e-8)).sum()
+            # 熵计算（数值稳定）
+            entropy = -(node_probs * safe_log_prob(node_probs)).sum()
+            entropy += -(partition_probs * safe_log_prob(partition_probs)).sum()
             
             # 总损失
             total_loss = actor_loss + self.value_coef * critic_loss - self.entropy_coef * entropy
@@ -535,12 +712,24 @@ class PPOAgent:
             self.critic_optimizer.zero_grad()
             total_loss.backward()
 
-            # ---------------- 梯度裁剪 ----------------
+            # 🔧 修复4: 梯度裁剪一次性覆盖全部可训练参数
             if self.max_grad_norm is not None:
-                # ① Actor ② Critic 都要裁剪，防止任何一侧爆梯度
-                torch.nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
-                torch.nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
-            # ------------------------------------------------
+                all_params = list(self.actor.parameters()) + list(self.critic.parameters())
+                grad_norm = torch.nn.utils.clip_grad_norm_(all_params, self.max_grad_norm)
+                # 可选：打印梯度范数用于调试
+                if hasattr(self, '_debug_grad_norm') and self._debug_grad_norm:
+                    print(f"📊 梯度范数: {grad_norm:.4f}")
+            else:
+                # 即使不裁剪，也计算梯度范数用于监控
+                all_params = list(self.actor.parameters()) + list(self.critic.parameters())
+                total_norm = 0
+                for p in all_params:
+                    if p.grad is not None:
+                        param_norm = p.grad.data.norm(2)
+                        total_norm += param_norm.item() ** 2
+                grad_norm = total_norm ** (1. / 2)
+                if hasattr(self, '_debug_grad_norm') and self._debug_grad_norm:
+                    print(f"📊 梯度范数(未裁剪): {grad_norm:.4f}")
 
             self.actor_optimizer.step()
             self.critic_optimizer.step()
@@ -554,6 +743,10 @@ class PPOAgent:
             'critic_loss': total_critic_loss / len(states),
             'entropy': total_entropy / len(states)
         }
+
+    def enable_gradient_norm_debug(self, enable: bool = True):
+        """启用/禁用梯度范数调试打印"""
+        self._debug_grad_norm = enable
         
     def save(self, filepath: str):
         """保存智能体状态"""

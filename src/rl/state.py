@@ -266,15 +266,21 @@ class StateManager:
     def get_observation(self) -> Dict[str, torch.Tensor]:
         """
         获取RL智能体的当前状态观察
-        
+
         Returns:
             包含状态组件的字典
         """
         # 将区域嵌入作为张量
-        num_partitions = len(self.region_embeddings)
-        region_embedding_tensor = torch.stack([
-            self.region_embeddings[i+1] for i in range(num_partitions)
-        ], dim=0)
+        # 注意：region_embeddings的键是实际的分区ID，不一定是连续的1,2,3...
+        # 因为某些分区可能在边界节点设置为0后变为空分区
+        if self.region_embeddings:
+            partition_ids = sorted(self.region_embeddings.keys())
+            region_embedding_tensor = torch.stack([
+                self.region_embeddings[pid] for pid in partition_ids
+            ], dim=0)
+        else:
+            # 如果没有区域嵌入，创建空张量
+            region_embedding_tensor = torch.empty(0, 2 * self.embedding_dim, device=self.device)
         
         # 边界节点特征
         if len(self.boundary_nodes) > 0:
