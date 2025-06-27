@@ -157,7 +157,7 @@ class RewardFunction:
         if total_admittance == 0:
             return torch.tensor(1.0, device=self.device)
 
-        # 【核心修复】使用更简单的线性映射，奖励与跨区耦合度成反比
+        # 使用线性映射，奖励与跨区耦合度成反比
         normalized_coupling = cross_partition_admittance / total_admittance
         reward = 1.0 - normalized_coupling
 
