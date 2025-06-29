@@ -144,7 +144,7 @@ python main.py --mode quick
 python main.py --mode parallel
 
 # 验证增强奖励系统
-python -c "from code.src.rl.ab_testing import create_standard_ab_test; framework = create_standard_ab_test(); framework.run_all_experiments()"
+python train.py --config enhanced_rewards_training --episodes 100
 ```
 
 这些命令验证了整个系统的端到端功能。

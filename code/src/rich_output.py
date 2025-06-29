@@ -358,10 +358,10 @@ def print_evaluation_summary(results: Dict[str, Any]):
         table.add_column("项目", style="cyan")
         table.add_column("结果", style="green")
         
-        if 'ab_testing' in results and results['ab_testing']['success']:
-            ab_summary = results['ab_testing'].get('summary', {})
-            table.add_row("A/B测试", f"最佳方法: {ab_summary.get('best_method', 'N/A')}")
-            table.add_row("最佳分数", f"{ab_summary.get('best_score', 0):.4f}")
+        if 'baseline_comparison' in results and results['baseline_comparison']['success']:
+            baseline_summary = results['baseline_comparison'].get('summary', {})
+            table.add_row("基线对比", f"最佳方法: {baseline_summary.get('best_method', 'N/A')}")
+            table.add_row("最佳分数", f"{baseline_summary.get('best_score', 0):.4f}")
         
         if 'report_path' in results:
             table.add_row("报告路径", str(results['report_path']))

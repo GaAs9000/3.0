@@ -278,12 +278,7 @@ visualization:
     colorscale: YlOrRd
     text_font_size: 10
 
-  # 奖励组件可视化
-  reward_analysis:
-    enabled: true
-    plot_components: true
-    moving_average_window: 50
-    save_component_plots: true
+
 
 # ==================== 预设配置 ====================
 # 完整训练配置

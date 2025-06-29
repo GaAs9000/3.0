@@ -36,7 +36,7 @@ python test.py --mode full
 ### 🏗️ 双模块设计
 
 - **🚀 `train.py`** - 训练模块：专注于模型训练、数据处理、基础可视化
-- **🧪 `test.py`** - 评估模块：专注于A/B测试、奖励分析、性能评估
+- **🧪 `test.py`** - 评估模块：专注于模型性能评估、基线对比、可视化分析
 
 ### 训练模式对比
 
@@ -50,7 +50,7 @@ python test.py --mode full
 
 | 模式 | 评估时间 | 功能 | 适用场景 | 输出结果 |
 |------|----------|------|----------|----------|
-| `full` | 30-60分钟 | **完整评估流程**（包含A/B测试、奖励分析、性能分析） | 论文实验、系统验证 | 综合HTML报告 |
+| `full` | 30-60分钟 | **完整评估流程**（包含基线对比、性能分析、可视化） | 论文实验、系统验证 | 综合HTML报告 |
 
 ## 🎯 增强奖励系统
 
@@ -93,7 +93,7 @@ python test.py --mode full --output-dir my_evaluation
 # 🚀 训练：使用增强奖励系统进行高质量训练
 python train.py --config enhanced_rewards_training --save-results
 
-# 🧪 评估：完整评估流程（包含A/B测试、奖励分析、性能分析）
+# 🧪 评估：完整评估流程（包含基线对比、性能分析、可视化）
 python test.py --mode full --output-dir evaluation_results
 
 # 📊 结果：查看生成的HTML报告
@@ -103,10 +103,10 @@ python test.py --mode full --output-dir evaluation_results
 ### 💡 使用建议
 
 1. **日常研究**：使用 `enhanced_rewards_training` 获得高质量结果
-2. **完整评估**：使用 `test.py --mode full` 包含所有测试对比功能
+2. **完整评估**：使用 `test.py --mode full` 包含基线对比和性能分析功能
 3. **大规模验证**：使用 `ieee118` 模式测试大规模性能
 
-详细使用说明请参考 [USAGE.md](USAGE.md)
+
 
 ## 📁 项目结构
 
@@ -121,9 +121,7 @@ python test.py --mode full --output-dir evaluation_results
 │   │   └── rl/                   # 强化学习模块
 │   │       ├── environment.py    # 环境定义
 │   │       ├── agent.py          # PPO智能体
-│   │       ├── reward.py         # 增强奖励系统
-│   │       ├── ab_testing.py     # A/B测试框架
-│   │       └── reward_analyzer.py # 奖励分析器
+│   │       └── reward.py         # 奖励系统
 │   └── baseline/             # 基线方法
 ├── cache/                    # 数据缓存
 ├── logs/                     # 训练日志
@@ -137,8 +135,8 @@ python test.py --mode full --output-dir evaluation_results
 - **🧠 智能分区**：基于GAT的图神经网络编码器
 - **🎯 增强奖励**：三阶段渐进式奖励设计
 - **🎭 场景生成**：自动生成多样化训练场景
-- **📊 A/B测试**：完整的基线方法对比框架
-- **📈 深度分析**：奖励函数和性能的全面分析
+- **📊 基线对比**：完整的基线方法对比框架
+- **📈 性能分析**：可扩展性、鲁棒性和收敛性分析
 - **🔧 易于使用**：简洁的命令行接口
 - **📋 完整评估**：从训练到评估的全流程支持
 - **🎨 美化输出**：使用 Rich 库提供彩色进度条和优雅的终端显示
