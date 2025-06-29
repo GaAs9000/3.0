@@ -62,12 +62,20 @@ class PowerGridPartitioningEnv:
         self.state_manager = StateManager(hetero_data, enhanced_embeddings, device, config)
         self.action_space = ActionSpace(hetero_data, num_partitions, device)
 
-        # 【新增】增强奖励函数支持
-        # 支持两种奖励模式：增量奖励（默认）和增强奖励函数
-        self.use_enhanced_rewards = reward_weights.get('use_enhanced_rewards', False) if reward_weights else False
+        # 【新增】奖励函数支持
+        # 支持三种奖励模式：legacy（原有）、enhanced（增强）、dual_layer（双层）
+        self.reward_mode = reward_weights.get('reward_mode', 'legacy') if reward_weights else 'legacy'
 
-        if self.use_enhanced_rewards:
-            # 使用新的增强奖励函数
+        if self.reward_mode == 'dual_layer':
+            # 使用新的双层奖励函数
+            from .reward import DualLayerRewardFunction
+            self.reward_function = DualLayerRewardFunction(
+                hetero_data,
+                config={'reward_weights': reward_weights, 'thresholds': reward_weights.get('thresholds', {})},
+                device=device
+            )
+        elif self.reward_mode == 'enhanced':
+            # 使用增强奖励函数
             from .reward import EnhancedRewardFunction
             enhanced_config = reward_weights.get('enhanced_config', {})
             self.reward_function = EnhancedRewardFunction(
@@ -359,6 +367,10 @@ class PowerGridPartitioningEnv:
         self.episode_history = []
         self.is_terminated = False
         self.is_truncated = False
+
+        # 重置奖励函数状态
+        if self.reward_mode == 'dual_layer' and self.reward_function is not None:
+            self.reward_function.reset_episode()
         
         # 获取初始观察
         observation = self.state_manager.get_observation()
@@ -528,9 +540,24 @@ class PowerGridPartitioningEnv:
         # 3. 计算新状态的指标
         current_metrics = self.evaluator.evaluate_partition(self.state_manager.current_partition)
         
-        # 4. 【核心】计算奖励 - 支持两种模式
-        if self.use_enhanced_rewards and self.reward_function is not None:
-            # 使用新的增强奖励函数
+        # 4. 【核心】计算奖励 - 支持三种模式
+        if self.reward_mode == 'dual_layer' and self.reward_function is not None:
+            # 使用新的双层奖励函数 - 仅计算即时奖励
+            reward = self.reward_function.compute_incremental_reward(
+                self.state_manager.current_partition,
+                action
+            )
+            # 获取当前指标用于调试
+            current_reward_metrics = self.reward_function.get_current_metrics(
+                self.state_manager.current_partition
+            )
+            self.last_reward_components = {
+                'incremental_reward': reward,
+                'current_metrics': current_reward_metrics,
+                'reward_mode': 'dual_layer'
+            }
+        elif self.reward_mode == 'enhanced' and self.reward_function is not None:
+            # 使用增强奖励函数
             reward, reward_components = self.reward_function.compute_reward(
                 self.state_manager.current_partition,
                 self.state_manager.get_boundary_nodes(),
@@ -539,10 +566,15 @@ class PowerGridPartitioningEnv:
             )
             # 存储奖励组件用于调试和分析
             self.last_reward_components = reward_components
+            self.last_reward_components['reward_mode'] = 'enhanced'
         else:
             # 使用原有的增量奖励机制
             reward = self._compute_improvement_reward(current_metrics, self.previous_metrics)
-            self.last_reward_components = None
+            self.last_reward_components = {
+                'improvement_reward': reward,
+                'current_metrics': current_metrics,
+                'reward_mode': 'legacy'
+            }
         
         # 5. 【关键】更新"上一步"的指标，为下一次计算做准备
         self.previous_metrics = current_metrics
@@ -553,15 +585,27 @@ class PowerGridPartitioningEnv:
         
         # 7. 【核心改进】区分结束类型，应用终局奖励
         if terminated or truncated:
-            final_bonus, termination_type = self._apply_final_bonus(terminated, truncated)
-            reward += final_bonus
-            
-            # 记录终局奖励详情
-            if hasattr(self, 'final_bonus_components'):
-                info_bonus = self.final_bonus_components
+            if self.reward_mode == 'dual_layer' and self.reward_function is not None:
+                # 使用双层奖励函数计算终局奖励
+                termination_type = self._determine_termination_type(terminated, truncated)
+                final_reward, final_components = self.reward_function.compute_final_reward(
+                    self.state_manager.current_partition,
+                    termination_type
+                )
+                reward += final_reward
+                info_bonus = final_components
                 info_bonus['termination_type'] = termination_type
             else:
-                info_bonus = {'termination_type': termination_type, 'final_bonus': final_bonus}
+                # 使用原有的终局奖励逻辑
+                final_bonus, termination_type = self._apply_final_bonus(terminated, truncated)
+                reward += final_bonus
+
+                # 记录终局奖励详情
+                if hasattr(self, 'final_bonus_components'):
+                    info_bonus = self.final_bonus_components
+                    info_bonus['termination_type'] = termination_type
+                else:
+                    info_bonus = {'termination_type': termination_type, 'final_bonus': final_bonus}
         else:
             info_bonus = {}
         
@@ -623,6 +667,27 @@ class PowerGridPartitioningEnv:
                 return timeout_penalty, termination_type
         
         return 0.0, 'unknown'
+
+    def _determine_termination_type(self, terminated: bool, truncated: bool) -> str:
+        """
+        确定终止类型，用于双层奖励函数
+
+        Returns:
+            'natural': 自然完成（所有节点分配完成）
+            'timeout': 超时结束
+            'stuck': 提前卡住（无有效动作但未完成）
+        """
+        if terminated:
+            # 检查是否所有节点都被分配
+            unassigned_count = (self.state_manager.current_partition == 0).sum().item()
+            if unassigned_count == 0:
+                return 'natural'
+            else:
+                return 'stuck'
+        elif truncated:
+            return 'timeout'
+        else:
+            return 'unknown'
         
     def _check_termination(self) -> Tuple[bool, bool]:
         """

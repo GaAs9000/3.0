@@ -57,13 +57,42 @@ environment:
   
   # 奖励组件权重
   reward_weights:
-    # 基础奖励权重
+    # 奖励模式选择: 'legacy' (原有), 'enhanced' (增强), 'dual_layer' (双层)
+    reward_mode: legacy
+
+    # 基础奖励权重（legacy模式）
     load_balance: 0.4           # 负载平衡权重
     electrical_decoupling: 0.4  # 电气解耦权重
     power_balance: 0.2         # 功率平衡权重
 
-    # 增强奖励系统配置
-    use_enhanced_rewards: false  # 是否启用增强奖励系统
+    # 双层奖励系统配置（dual_layer模式）
+    dual_layer_config:
+      # 即时奖励权重
+      balance_weight: 1.0       # 负载平衡改善权重
+      decoupling_weight: 1.0    # 电气解耦改善权重
+      power_weight: 1.0         # 功率平衡改善权重
+
+      # 终局奖励权重
+      final_balance_weight: 0.4    # 终局负载平衡权重
+      final_decoupling_weight: 0.4 # 终局电气解耦权重
+      final_power_weight: 0.2      # 终局功率平衡权重
+
+    # 质量阈值配置（dual_layer模式）
+    thresholds:
+      # 负载平衡阈值
+      excellent_cv: 0.1         # 卓越CV阈值
+      good_cv: 0.2             # 良好CV阈值
+
+      # 电气解耦阈值
+      excellent_coupling: 0.3   # 卓越耦合比率阈值
+      good_coupling: 0.5       # 良好耦合比率阈值
+
+      # 功率平衡阈值
+      excellent_power: 10.0     # 卓越功率不平衡阈值(%)
+      good_power: 50.0         # 良好功率不平衡阈值(%)
+
+    # 增强奖励系统配置（enhanced模式）
+    use_enhanced_rewards: false  # 是否启用增强奖励系统（向后兼容）
 
     enhanced_config:
       # 第一阶段：稠密奖励
@@ -325,8 +354,42 @@ ieee118_training:
       node_size_scale: 300
       font_size: 6
 
-# ==================== 增强奖励预设配置 ====================
-# 增强奖励训练配置（推荐）
+# ==================== 奖励系统预设配置 ====================
+
+# 双层奖励训练配置（推荐）
+dual_layer_training:
+  training:
+    mode: dual_layer
+    num_episodes: 1200
+    success_criteria:
+      load_cv_threshold: 0.2      # 双层奖励应该能达到更好效果
+      connectivity_threshold: 0.9
+    convergence:
+      window_size: 15             # 适应双层奖励的收敛特性
+  environment:
+    reward_weights:
+      reward_mode: dual_layer
+      dual_layer_config:
+        # 即时奖励权重 - 平衡三个指标
+        balance_weight: 1.0
+        decoupling_weight: 1.0
+        power_weight: 1.0
+        # 终局奖励权重 - 强调负载平衡和解耦
+        final_balance_weight: 0.5
+        final_decoupling_weight: 0.4
+        final_power_weight: 0.1
+      thresholds:
+        # 更严格的质量标准
+        excellent_cv: 0.08
+        good_cv: 0.15
+        excellent_coupling: 0.25
+        good_coupling: 0.4
+        excellent_power: 8.0
+        good_power: 30.0
+  scenario_generation:
+    enabled: true               # 启用场景生成
+
+# 增强奖励训练配置（向后兼容）
 enhanced_rewards_training:
   training:
     mode: enhanced_rewards
