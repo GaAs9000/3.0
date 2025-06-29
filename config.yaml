@@ -177,13 +177,20 @@ scenario_generation:
     mean_scale: 1.0          # 平均缩放
     std_scale: 0.1           # 标准差缩放
 
+# ==================== 并行训练配置 ====================
+parallel_training:
+  enabled: false        # 是否启用并行训练
+  num_cpus: 12          # 并行CPU数量
+  total_timesteps: 5000000  # 总训练时间步
+  scenario_generation: true  # 是否启用场景生成
+
 # ==================== 课程学习配置 ====================
 curriculum:
   enabled: false        # 是否启用课程学习
   start_partitions: 2   # 起始分区数
   end_partitions: 5     # 结束分区数
   episodes_per_stage: 200  # 每阶段回合数
-  
+
   # 课程学习策略
   strategy: linear      # 学习策略 (linear, exponential, adaptive)
   success_threshold: 0.8  # 进入下一阶段的成功率阈值
@@ -195,7 +202,7 @@ evaluation:
   baseline_methods:     # 基线方法列表
     - spectral
     - kmeans
-  
+
   # 评估指标
   metrics_to_track:
     - episode_reward
@@ -408,6 +415,9 @@ enhanced_rewards_training:
       load_balance: 0.3           # 稍微降低基础权重，为稠密奖励让出空间
       electrical_decoupling: 0.3
       power_balance: 0.2
+  scenario_generation:
+    enabled: true               # 启用场景生成
+    perturb_prob: 0.8           # 提高扰动概率以增强鲁棒性
   logging:
     console_log_interval: 5
     metrics_save_interval: 25
@@ -423,6 +433,8 @@ stage1_dense_rewards:
         enable_exploration_bonus: false
         enable_potential_shaping: false
         enable_adaptive_weights: false
+  scenario_generation:
+    enabled: true               # 启用场景生成
 
 # 第二阶段测试配置：启用稠密奖励 + 探索
 stage2_smart_exploration:
@@ -434,6 +446,8 @@ stage2_smart_exploration:
         enable_exploration_bonus: true
         enable_potential_shaping: true
         enable_adaptive_weights: false
+  scenario_generation:
+    enabled: true               # 启用场景生成
 
 # 第三阶段测试配置：启用所有功能
 stage3_adaptive_physics:
@@ -446,6 +460,8 @@ stage3_adaptive_physics:
         enable_potential_shaping: true
         enable_adaptive_weights: true
         episode_count: 0  # 将在训练过程中动态更新
+  scenario_generation:
+    enabled: true               # 启用场景生成
 
 # ==================== 超参数搜索范围 ====================
 hyperparameter_ranges:

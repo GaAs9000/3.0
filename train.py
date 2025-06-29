@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-电力网络分区强化学习统一训练系统
+电力网络分区强化学习训练模块
 
-整合了所有训练模式：
-- 标准训练 (IEEE 14, 30, 57节点)
-- 大规模训练 (IEEE 118节点)
-- 并行训练支持
-- 场景生成训练
-- 课程学习训练
-- 基线方法对比
+专注于模型训练功能：
+- 配置加载和验证
+- 数据处理和环境创建
+- 模型训练和优化
+- 基础可视化和结果保存
+- 训练监控和日志记录
 """
 
 import torch
@@ -25,19 +24,16 @@ from typing import Dict, List, Tuple, Optional, Any
 from collections import deque
 import matplotlib.pyplot as plt
 from tqdm import tqdm
-import wandb # 导入wandb
+import wandb
 
-# 添加src到路径
-sys.path.append(str(Path(__file__).parent / 'src'))
+# 添加code/src到路径
+sys.path.append(str(Path(__file__).parent / 'code' / 'src'))
+# 添加code到路径以便导入baseline
+sys.path.append(str(Path(__file__).parent / 'code'))
 
-# --- 新增：全局 NaN/Inf 异常检测开关 ---
-# 使 autograd 在反向传播中遇到 NaN 时提供更详细的堆栈跟踪
+# --- 全局 NaN/Inf 异常检测开关 ---
 torch.autograd.set_detect_anomaly(True)
-
-# 将特定的运行时警告 (RuntimeWarning) 升级为错误，使其能被 try-except 捕获
 warnings.filterwarnings("error", message=".*NaN.*", category=RuntimeWarning)
-
-# 禁用其他警告
 warnings.filterwarnings('ignore', category=UserWarning)
 
 # 导入电力系统数据加载函数
@@ -54,12 +50,12 @@ except ImportError:
     _pandapower_available = False
     print("⚠️ 警告: pandapower未安装，无法加载IEEE标准测试系统")
 
-# 动态导入检查
+
 def check_dependencies():
     """检查可选依赖"""
     deps = {
         'stable_baselines3': False,
-        'tensorboard': False,
+        'use_tensorboard': False,
         'plotly': False,
         'networkx': False
     }
@@ -72,7 +68,7 @@ def check_dependencies():
 
     try:
         from torch.utils.tensorboard import SummaryWriter
-        deps['tensorboard'] = True
+        deps['use_tensorboard'] = True
     except ImportError:
         pass
 
@@ -329,9 +325,9 @@ class TrainingLogger:
         self.metrics_save_interval = log_config.get('metrics_save_interval', 100)
 
         self.progress_bar = tqdm(total=total_episodes, desc="🚀 训练进度")
-        
+
         # 设置TensorBoard
-        self.use_tensorboard = log_config.get('tensorboard', False)
+        self.use_tensorboard = log_config.get('use_tensorboard', False)
         self.tensorboard_writer = self._setup_tensorboard() if self.use_tensorboard else None
 
         # 设置Weights & Biases
@@ -360,17 +356,23 @@ class TrainingLogger:
             from torch.utils.tensorboard import SummaryWriter
             log_dir = self.config['logging']['log_dir']
             timestamp = time.strftime('%Y%m%d_%H%M%S')
-            self.tensorboard_writer = SummaryWriter(f"{log_dir}/training_{timestamp}")
+            tensorboard_writer = SummaryWriter(f"{log_dir}/training_{timestamp}")
             print(f"📊 TensorBoard日志目录: {log_dir}/training_{timestamp}")
+            return tensorboard_writer
         except ImportError:
             print("⚠️ TensorBoard不可用，跳过TensorBoard日志")
             self.use_tensorboard = False
+            return None
+        except Exception as e:
+            print(f"⚠️ TensorBoard初始化失败: {e}")
+            self.use_tensorboard = False
+            return None
 
     def log_episode(self, episode: int, reward: float, length: int, info: Dict = None):
         """记录单个回合"""
         self.episode_rewards.append(reward)
         self.episode_lengths.append(length)
-        
+
         if reward > self.best_reward:
             self.best_reward = reward
 
@@ -398,7 +400,10 @@ class TrainingLogger:
                 for key, value in info.items():
                     if isinstance(value, (int, float)):
                         self.tensorboard_writer.add_scalar(f'Episode/{key}', value, episode)
-        
+            # 定期刷新以确保数据写入
+            if episode % 10 == 0:
+                self.tensorboard_writer.flush()
+
         # W&B日志
         if self.use_wandb:
             log_data = {'Episode/Reward': reward, 'Episode/Length': length}
@@ -425,7 +430,11 @@ class TrainingLogger:
             self.entropies.append(entropy)
             if self.use_tensorboard and self.tensorboard_writer:
                 self.tensorboard_writer.add_scalar('Training/Entropy', entropy, episode)
-        
+
+        # 刷新TensorBoard数据
+        if self.use_tensorboard and self.tensorboard_writer:
+            self.tensorboard_writer.flush()
+
         # W&B日志
         if self.use_wandb:
             log_data = {}
@@ -475,10 +484,11 @@ class TrainingLogger:
 class UnifiedTrainer:
     """统一训练器"""
 
-    def __init__(self, agent, env, config):
+    def __init__(self, agent, env, config, gym_env=None):
         self.agent = agent
         self.env = env
         self.config = config
+        self.gym_env = gym_env  # 场景生成环境包装器（如果使用）
         # 处理设备配置
         device_config = config['system']['device']
         if device_config == 'auto':
@@ -490,13 +500,21 @@ class UnifiedTrainer:
     def train(self, num_episodes: int, max_steps_per_episode: int, update_interval: int = 10):
         """训练智能体"""
         self.logger = TrainingLogger(self.config, num_episodes)
-        
+
         print(f"📊 监控信息:")
         print(f"   - TensorBoard: {'✅' if self.logger.use_tensorboard else '❌'}")
         print(f"   - 指标保存间隔: {self.logger.metrics_save_interval} 回合")
 
         for episode in range(num_episodes):
-            state, _ = self.env.reset()  # 解包元组
+            # 如果使用场景生成环境，需要重置Gym环境以生成新场景
+            if self.gym_env is not None:
+                obs_array, info = self.gym_env.reset()
+                # 更新内部环境引用（因为每次重置都会创建新的内部环境）
+                self.env = self.gym_env.internal_env
+                state, _ = self.env.reset()  # 重置内部环境状态
+            else:
+                state, _ = self.env.reset()  # 标准环境重置
+
             episode_reward = 0
             episode_length = 0
             episode_info = {}
@@ -545,11 +563,11 @@ class UnifiedTrainer:
                 except RuntimeError as e:
                     if "[NaNGuard]" in str(e) or "NaN" in str(e):
                         print(f"\n❌ [NaN Dumper] 捕获到致命错误: {e}")
-                        
+
                         dump_dir = "diagnostics"
                         os.makedirs(dump_dir, exist_ok=True)
                         dump_path = os.path.join(dump_dir, f"nan_dump_episode_{episode}.pt")
-                        
+
                         print(f"  ... 正在保存诊断信息到: {dump_path}")
 
                         # 收集触发异常的批量数据
@@ -570,7 +588,7 @@ class UnifiedTrainer:
                             "critic_optimizer_state_dict": self.agent.critic_optimizer.state_dict(),
                             "triggering_batch": batch_data,
                         }, dump_path)
-                        
+
                         print("  ... 保存完成。正在中断训练。")
                         # 重新抛出异常，以正常退出训练循环
                         raise e
@@ -651,7 +669,7 @@ class UnifiedTrainer:
     def run_final_visualization(self):
         """运行最终可视化"""
         try:
-            from code.src.visualization import VisualizationManager
+            from visualization import VisualizationManager
             viz = VisualizationManager(self.config)
             viz.visualize_partition(self.env, title="Final Partition")
             print("✅ 可视化完成")
@@ -665,34 +683,65 @@ class UnifiedTrainer:
 
 
 class UnifiedTrainingSystem:
-    """统一训练系统 - 整合所有训练模式"""
-    
+    """统一训练系统 - 专注于训练功能"""
+
     def __init__(self, config_path: Optional[str] = None):
         """初始化统一训练系统"""
         self.deps = check_dependencies()
         self.config = self._load_config(config_path)
         self.device = self._setup_device()
         self.setup_directories()
-        
+
     def _load_config(self, config_path: Optional[str]) -> Dict[str, Any]:
         """加载配置文件"""
-        # 如果没有指定配置文件，尝试使用默认的 config_unified.yaml
+        # 如果没有指定配置文件，尝试使用默认的 config.yaml
         if not config_path:
             default_config_path = 'config.yaml'
             if os.path.exists(default_config_path):
                 config_path = default_config_path
                 print(f"📄 使用默认配置文件: {config_path}")
-        
+
+        # 检查是否是文件路径
         if config_path and os.path.exists(config_path):
             with open(config_path, 'r', encoding='utf-8') as f:
                 config = yaml.safe_load(f)
                 print(f"✅ 配置文件加载成功: {config_path}")
                 print(f"📊 案例名称: {config['data']['case_name']}")
                 return config
+
+        # 检查是否是预设配置名称
+        elif config_path and os.path.exists('config.yaml'):
+            with open('config.yaml', 'r', encoding='utf-8') as f:
+                base_config = yaml.safe_load(f)
+
+                # 检查是否存在预设配置
+                if config_path in base_config:
+                    print(f"✅ 使用预设配置: {config_path}")
+                    preset_config = base_config[config_path]
+
+                    # 深度合并预设配置到基础配置
+                    merged_config = self._deep_merge_config(base_config, preset_config)
+                    print(f"📊 案例名称: {merged_config['data']['case_name']}")
+                    return merged_config
+                else:
+                    print(f"⚠️ 未找到预设配置 '{config_path}'，使用默认配置")
+                    return base_config
         else:
             print("⚠️ 未找到配置文件，使用默认配置")
             return self._create_default_config()
-    
+
+    def _deep_merge_config(self, base_config: Dict[str, Any], preset_config: Dict[str, Any]) -> Dict[str, Any]:
+        """深度合并配置字典"""
+        result = base_config.copy()
+
+        for key, value in preset_config.items():
+            if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+                result[key] = self._deep_merge_config(result[key], value)
+            else:
+                result[key] = value
+
+        return result
+
     def _create_default_config(self) -> Dict[str, Any]:
         """创建默认配置"""
         return {
@@ -750,7 +799,7 @@ class UnifiedTrainingSystem:
                 'scenario_generation': True
             },
             'scenario_generation': {
-                'enabled': False,
+                'enabled': True,  # 默认启用场景生成
                 'perturb_prob': 0.8,
                 'perturb_types': ['n-1', 'load_gen_fluctuation', 'both', 'none'],
                 'scale_range': [0.8, 1.2]
@@ -780,7 +829,7 @@ class UnifiedTrainingSystem:
                 'metrics_save_interval': 50
             }
         }
-    
+
     def _setup_device(self) -> torch.device:
         """设置计算设备"""
         device_config = self.config['system'].get('device', 'auto')
@@ -788,27 +837,27 @@ class UnifiedTrainingSystem:
             device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         else:
             device = torch.device(device_config)
-        
+
         print(f"🔧 使用设备: {device}")
         return device
-    
+
     def setup_directories(self):
         """创建必要的目录"""
         dirs = [
             self.config['data']['cache_dir'],
-            self.config['logging']['log_dir'], 
+            self.config['logging']['log_dir'],
             self.config['logging']['checkpoint_dir'],
             self.config['visualization']['figures_dir'],
             'models', 'output', 'experiments'
         ]
-        
+
         for dir_path in dirs:
             Path(dir_path).mkdir(parents=True, exist_ok=True)
-    
+
     def get_training_configs(self) -> Dict[str, Dict[str, Any]]:
         """获取不同训练模式的配置"""
         base_config = self.config.copy()
-        
+
         configs = {
             'quick': {
                 **base_config,
@@ -880,22 +929,22 @@ class UnifiedTrainingSystem:
                 }
             }
         }
-        
+
         return configs
-    
+
     def run_training(self, mode: str = 'standard', **kwargs) -> Dict[str, Any]:
         """运行训练"""
         print(f"\n🚀 开始{mode.upper()}模式训练")
         print("=" * 60)
-        
+
         # 获取模式配置
         configs = self.get_training_configs()
         if mode not in configs:
             print(f"⚠️ 未知训练模式: {mode}，使用标准模式")
             mode = 'standard'
-        
+
         config = configs[mode]
-        
+
         # 应用命令行参数覆盖
         for key, value in kwargs.items():
             if '.' in key:
@@ -909,11 +958,11 @@ class UnifiedTrainingSystem:
                 current[keys[-1]] = value
             else:
                 config[key] = value
-        
+
         # 设置随机种子
         torch.manual_seed(config['system']['seed'])
         np.random.seed(config['system']['seed'])
-        
+
         try:
             if mode == 'parallel' or config['parallel_training']['enabled']:
                 return self._run_parallel_training(config)
@@ -921,22 +970,22 @@ class UnifiedTrainingSystem:
                 return self._run_curriculum_training(config)
             else:
                 return self._run_standard_training(config)
-                
+
         except Exception as e:
             print(f"❌ 训练失败: {str(e)}")
             import traceback
             traceback.print_exc()
             return {'success': False, 'error': str(e)}
-    
+
     def _run_standard_training(self, config: Dict[str, Any]) -> Dict[str, Any]:
         """运行标准训练"""
         print("📊 标准训练模式")
 
         # 导入必要模块
-        from code.src.data_processing import PowerGridDataProcessor
-        from code.src.gat import create_hetero_graph_encoder
-        from code.src.rl.environment import PowerGridPartitioningEnv
-        from code.src.rl.agent import PPOAgent
+        from data_processing import PowerGridDataProcessor
+        from gat import create_hetero_graph_encoder
+        from rl.environment import PowerGridPartitioningEnv
+        from rl.agent import PPOAgent
 
         # 1. 数据处理
         print("\n1️⃣ 数据处理...")
@@ -947,10 +996,10 @@ class UnifiedTrainingSystem:
 
         # 加载数据
         mpc = load_power_grid_data(config['data']['case_name'])
-        
+
         hetero_data = processor.graph_from_mpc(mpc).to(self.device)
         print(f"✅ 数据加载完成: {hetero_data}")
-        
+
         # 2. GAT编码器
         print("\n2️⃣ GAT编码器...")
         gat_config = config['gat']
@@ -961,33 +1010,66 @@ class UnifiedTrainingSystem:
             heads=gat_config['heads'],
             output_dim=gat_config['output_dim']
         ).to(self.device)
-        
+
         with torch.no_grad():
             node_embeddings, attention_weights = encoder.encode_nodes_with_attention(hetero_data)
-        
+
         print(f"✅ 编码器初始化完成")
-        
-        # 3. 环境
+
+        # 3. 环境（支持场景生成）
         print("\n3️⃣ 强化学习环境...")
         env_config = config['environment']
-        env = PowerGridPartitioningEnv(
-            hetero_data=hetero_data,
-            node_embeddings=node_embeddings,
-            num_partitions=env_config['num_partitions'],
-            reward_weights=env_config['reward_weights'],
-            max_steps=env_config['max_steps'],
-            device=self.device,
-            attention_weights=attention_weights
-        )
-        
-        print(f"✅ 环境创建完成: {env.total_nodes}节点, {env.num_partitions}分区")
-        
+        scenario_config = config.get('scenario_generation', {})
+        use_scenario_generation = scenario_config.get('enabled', True)  # 默认启用场景生成
+
+        if use_scenario_generation:
+            print("🎭 启用场景生成功能...")
+            # 使用支持场景生成的Gym环境包装器
+            try:
+                from rl.gym_wrapper import PowerGridPartitionGymEnv
+
+                # 确保设备配置正确传递
+                config_copy = config.copy()
+                config_copy['system']['device'] = str(self.device)  # 转换为字符串
+
+                gym_env = PowerGridPartitionGymEnv(
+                    base_case_data=mpc,
+                    config=config_copy,
+                    use_scenario_generator=True,
+                    scenario_seed=config['system']['seed']
+                )
+
+                # 重置环境以获取初始状态
+                obs_array, info = gym_env.reset()
+                env = gym_env.internal_env  # 获取内部的PowerGridPartitioningEnv
+
+                print(f"✅ 场景生成环境创建完成: {env.total_nodes}节点, {env.num_partitions}分区")
+
+            except ImportError as e:
+                print(f"⚠️ 场景生成模块导入失败: {e}")
+                print("🔄 回退到标准环境...")
+                use_scenario_generation = False
+
+        if not use_scenario_generation:
+            print("📊 使用标准环境（无场景生成）...")
+            env = PowerGridPartitioningEnv(
+                hetero_data=hetero_data,
+                node_embeddings=node_embeddings,
+                num_partitions=env_config['num_partitions'],
+                reward_weights=env_config['reward_weights'],
+                max_steps=env_config['max_steps'],
+                device=self.device,
+                attention_weights=attention_weights
+            )
+
+            print(f"✅ 标准环境创建完成: {env.total_nodes}节点, {env.num_partitions}分区")
+
         # 4. 智能体
         print("\n4️⃣ PPO智能体...")
         agent_config = config['agent']
         node_embedding_dim = env.state_manager.embedding_dim
         region_embedding_dim = node_embedding_dim * 2
-        
+
         agent = PPOAgent(
             node_embedding_dim=node_embedding_dim,
             region_embedding_dim=region_embedding_dim,
@@ -1005,48 +1087,50 @@ class UnifiedTrainingSystem:
             actor_scheduler_config=agent_config.get('actor_scheduler', {}),
             critic_scheduler_config=agent_config.get('critic_scheduler', {})
         )
-        
+
         print(f"✅ 智能体创建完成")
-        
+
         # 5. 训练
         print("\n5️⃣ 开始训练...")
-        trainer = UnifiedTrainer(agent=agent, env=env, config=config)
-        
+        # 如果使用了场景生成，传递gym_env给训练器
+        gym_env_ref = gym_env if use_scenario_generation and 'gym_env' in locals() else None
+        trainer = UnifiedTrainer(agent=agent, env=env, config=config, gym_env=gym_env_ref)
+
         training_config = config['training']
         history = trainer.train(
             num_episodes=training_config['num_episodes'],
             max_steps_per_episode=training_config['max_steps_per_episode'],
             update_interval=training_config['update_interval']
         )
-        
+
         # 6. 评估
         print("\n6️⃣ 评估...")
         eval_stats = trainer.evaluate()
-        
+
         # 7. 基线对比
         baseline_results = None
         if config['evaluation']['include_baselines']:
             print("\n7️⃣ 基线方法对比...")
             try:
-                from code.baseline import run_baseline_comparison
+                from baseline import run_baseline_comparison
                 baseline_results = run_baseline_comparison(env, agent, seed=42)
                 print("✅ 基线对比完成")
             except Exception as e:
                 print(f"⚠️ 基线对比失败: {e}")
-        
+
         # 8. 可视化
         if config['visualization']['enabled']:
             print("\n8️⃣ 生成可视化...")
             try:
                 trainer.run_final_visualization()
                 if baseline_results is not None and config['visualization']['interactive']:
-                    from code.src.visualization import run_interactive_visualization
+                    from visualization import run_interactive_visualization
                     run_interactive_visualization(env, baseline_results)
             except Exception as e:
                 print(f"⚠️ 可视化失败: {e}")
-        
+
         trainer.close()
-        
+
         return {
             'success': True,
             'mode': 'standard',
@@ -1056,15 +1140,15 @@ class UnifiedTrainingSystem:
             'baseline_results': baseline_results,
             'best_reward': trainer.logger.best_reward
         }
-    
+
     def _run_parallel_training(self, config: Dict[str, Any]) -> Dict[str, Any]:
         """运行并行训练"""
         print("🌐 并行训练模式")
-        
+
         if not self.deps['stable_baselines3']:
             print("❌ 并行训练需要stable-baselines3，请安装：pip install stable-baselines3")
             return {'success': False, 'error': 'Missing stable-baselines3'}
-        
+
         try:
             # 检查是否有gym和stable_baselines3
             try:
@@ -1078,8 +1162,8 @@ class UnifiedTrainingSystem:
                 # 使用Stable-Baselines3的并行训练
                 return self._run_sb3_parallel_training(config)
             else:
-                # 使用高级并行训练
-                return self._run_advanced_parallel_training(config)
+                print("⚠️ 缺少stable-baselines3，跳过并行训练")
+                return {'success': False, 'error': 'Missing stable-baselines3'}
 
         except Exception as e:
             print(f"❌ 并行训练失败: {str(e)}")
@@ -1089,10 +1173,10 @@ class UnifiedTrainingSystem:
 
     def _run_sb3_parallel_training(self, config: Dict[str, Any]) -> Dict[str, Any]:
         """使用Stable-Baselines3的并行训练"""
-        from code.src.data_processing import PowerGridDataProcessor
-        from code.src.rl.gym_wrapper import make_parallel_env
+        from data_processing import PowerGridDataProcessor
+        from rl.gym_wrapper import make_parallel_env
         from stable_baselines3 import PPO
-        
+
         # 【修复】在创建并行环境前，将主进程中已解析好的设备名称更新到配置字典中
         # 避免子进程收到 "auto" 字符串导致 torch.device() 报错
         config['system']['device'] = str(self.device)
@@ -1144,352 +1228,152 @@ class UnifiedTrainingSystem:
             'config': config
         }
 
-    def _run_advanced_parallel_training(self, config: Dict[str, Any]) -> Dict[str, Any]:
-        """完整的并行训练实现（支持多种并行策略）"""
-        print("\n🚀 启动高级并行训练系统")
-
-        # 确保设备配置正确传递
-        config['system']['device'] = str(self.device)
-
-        parallel_config = config.get('parallel', {})
-        num_workers = parallel_config.get('num_workers', 4)
-        episodes_per_worker = parallel_config.get('episodes_per_worker', 50)
-        parallel_strategy = parallel_config.get('strategy', 'independent')  # independent, shared_experience, parameter_server
-
-        print(f"🔄 并行策略: {parallel_strategy}")
-        print(f"👥 工作进程数: {num_workers}")
-        print(f"📊 每进程回合数: {episodes_per_worker}")
-
-        if parallel_strategy == 'independent':
-            return self._run_independent_parallel_training(config, num_workers, episodes_per_worker)
-        elif parallel_strategy == 'shared_experience':
-            return self._run_shared_experience_training(config, num_workers, episodes_per_worker)
-        elif parallel_strategy == 'parameter_server':
-            return self._run_parameter_server_training(config, num_workers, episodes_per_worker)
-        else:
-            raise ValueError(f"不支持的并行策略: {parallel_strategy}")
-
-    def _run_independent_parallel_training(self, config: Dict[str, Any], num_workers: int, episodes_per_worker: int) -> Dict[str, Any]:
-        """独立并行训练：每个进程独立训练"""
-        import multiprocessing as mp
-        from concurrent.futures import ProcessPoolExecutor, as_completed
-
-        print("🔄 使用独立并行训练策略")
-
-        # 准备工作进程参数
-        worker_args = []
-        for worker_id in range(num_workers):
-            worker_config = config.copy()
-            worker_config['training']['num_episodes'] = episodes_per_worker
-            worker_config['worker_id'] = worker_id
-            worker_config['logging']['console_log_interval'] = max(10, episodes_per_worker // 5)
-            # 为每个worker设置不同的随机种子
-            worker_config['system']['seed'] = config['system']['seed'] + worker_id
-            worker_args.append((worker_config, worker_id))
-
-        # 执行并行训练
-        results = []
-        with ProcessPoolExecutor(max_workers=num_workers) as executor:
-            # 提交所有工作任务
-            future_to_worker = {
-                executor.submit(self._run_worker_training_with_validation, args): worker_id
-                for args, worker_id in worker_args
-            }
-
-            # 收集结果
-            completed_workers = 0
-            for future in as_completed(future_to_worker):
-                worker_id = future_to_worker[future]
-                try:
-                    result = future.result()
-                    results.append(result)
-                    completed_workers += 1
-                    print(f"✅ 工作进程 {worker_id} 完成 ({completed_workers}/{num_workers})")
-                except Exception as e:
-                    print(f"❌ 工作进程 {worker_id} 失败: {str(e)}")
-                    results.append({
-                        'success': False,
-                        'worker_id': worker_id,
-                        'error': str(e),
-                        'history': {'episode_rewards': [], 'episode_lengths': []},
-                        'best_reward': -float('inf'),
-                        'final_metrics': {}
-                    })
-
-        return self._aggregate_parallel_results(results, config, 'independent')
-
-    def _run_worker_training_with_validation(self, args) -> Dict[str, Any]:
-        """带验证的工作进程训练"""
-        worker_config, worker_id = args
-
-        try:
-            # 设置工作进程的随机种子
-            torch.manual_seed(worker_config['system']['seed'])
-            np.random.seed(worker_config['system']['seed'])
-
-            # 运行标准训练
-            result = self._run_standard_training(worker_config)
-
-            # 添加工作进程信息
-            result['worker_id'] = worker_id
-            result['worker_seed'] = worker_config['system']['seed']
-
-            return result
-
-        except Exception as e:
-            return {
-                'success': False,
-                'worker_id': worker_id,
-                'error': str(e),
-                'history': {'episode_rewards': [], 'episode_lengths': []},
-                'best_reward': -float('inf'),
-                'final_metrics': {}
-            }
-
-    def _aggregate_parallel_results(self, results: list, config: Dict[str, Any], strategy: str) -> Dict[str, Any]:
-        """聚合并行训练结果"""
-        print(f"\n📊 聚合并行训练结果 (策略: {strategy})")
-
-        successful_workers = [r for r in results if r.get('success', False)]
-        print(f"✅ 成功: {len(successful_workers)}/{len(results)} 个工作进程")
-
-        if not successful_workers:
-            return {
-                'success': False,
-                'mode': f'parallel_{strategy}',
-                'error': '所有工作进程都失败了',
-                'worker_results': results
-            }
-
-        # 计算汇总统计
-        total_episodes = sum(len(r.get('history', {}).get('episode_rewards', [])) for r in successful_workers)
-        best_reward = max(r.get('best_reward', -float('inf')) for r in successful_workers)
-        avg_reward = np.mean([r.get('best_reward', 0) for r in successful_workers])
-
-        # 选择最佳工作进程的结果
-        best_worker = max(successful_workers, key=lambda x: x.get('best_reward', -float('inf')))
-
-        print(f"🏆 最佳工作进程: {best_worker.get('worker_id', 'unknown')}")
-        print(f"📈 最佳奖励: {best_reward:.3f}")
-        print(f"📊 平均奖励: {avg_reward:.3f}")
-
-        return {
-            'success': True,
-            'mode': f'parallel_{strategy}',
-            'config': config,
-            'total_episodes': total_episodes,
-            'best_reward': best_reward,
-            'avg_reward': avg_reward,
-            'best_worker_result': best_worker,
-            'worker_results': results,
-            'successful_workers': len(successful_workers),
-            'total_workers': len(results)
-        }
-    
     def _run_curriculum_training(self, config: Dict[str, Any]) -> Dict[str, Any]:
         """运行课程学习训练"""
         print("📚 课程学习训练模式")
-        
+
         curriculum_config = config['curriculum']
         start_partitions = curriculum_config['start_partitions']
         end_partitions = curriculum_config['end_partitions']
         episodes_per_stage = curriculum_config['episodes_per_stage']
-        
+
         results = []
-        
+
         for num_partitions in range(start_partitions, end_partitions + 1):
             print(f"\n📖 课程阶段: {num_partitions}个分区")
-            
+
             # 更新配置
             stage_config = config.copy()
             stage_config['environment']['num_partitions'] = num_partitions
             stage_config['training']['num_episodes'] = episodes_per_stage
-            
+
             # 运行该阶段的训练
             stage_result = self._run_standard_training(stage_config)
             results.append(stage_result)
-            
+
             if not stage_result['success']:
                 break
-        
+
         return {
             'success': all(r['success'] for r in results),
             'mode': 'curriculum',
             'config': config,
             'stage_results': results
         }
-    
 
-    
-    def create_training_report(self, results: Dict[str, Any]) -> str:
-        """生成训练报告"""
-        report_lines = [
-            f"# 电力网络分区训练报告",
-            f"",
-            f"## 系统信息",
-            f"- 训练模式: {results.get('mode', 'unknown')}",
-            f"- 设备: {self.device}",
-            f"- 时间: {time.strftime('%Y-%m-%d %H:%M:%S')}",
-            f"",
-            f"## 配置信息"
-        ]
-        
-        if 'config' in results:
-            config = results['config']
-            report_lines.extend([
-                f"- 案例: {config['data']['case_name']}",
-                f"- 分区数: {config['environment']['num_partitions']}",
-                f"- 训练回合: {config['training']['num_episodes']}",
-                f"- 最大步数: {config['training']['max_steps_per_episode']}"
-            ])
-        
-        if 'eval_stats' in results:
-            eval_stats = results['eval_stats']
-            report_lines.extend([
-                f"",
-                f"## 评估结果",
-                f"- 平均奖励: {eval_stats.get('mean_reward', 0):.4f}",
-                f"- 成功率: {eval_stats.get('success_rate', 0):.4f}",
-                f"- 平均负载CV: {eval_stats.get('mean_load_cv', 0):.4f}"
-            ])
-        
-        if 'baseline_results' in results and results['baseline_results'] is not None:
-            report_lines.extend([
-                f"",
-                f"## 基线方法对比",
-                f"基线方法对比结果已保存"
-            ])
-        
-        return "\n".join(report_lines)
-    
     def save_results(self, results: Dict[str, Any], output_dir: str = 'experiments'):
         """保存训练结果"""
-        output_path = Path(output_dir)
-        output_path.mkdir(parents=True, exist_ok=True)
-        
         timestamp = time.strftime('%Y%m%d_%H%M%S')
-        mode = results.get('mode', 'unknown')
-        
-        # 保存结果JSON
-        results_file = output_path / f"{mode}_results_{timestamp}.json"
-        
-        # 清理不能序列化的对象
-        clean_results = {}
-        for key, value in results.items():
-            if key in ['history', 'eval_stats', 'config']:
-                clean_results[key] = value
-            elif key == 'baseline_results' and value is not None:
-                clean_results[key] = value.to_dict() if hasattr(value, 'to_dict') else str(value)
-            elif isinstance(value, (str, int, float, bool, type(None))):
-                clean_results[key] = value
-        
-        with open(results_file, 'w', encoding='utf-8') as f:
-            json.dump(clean_results, f, indent=2, ensure_ascii=False)
-        
-        # 保存训练报告
-        report = self.create_training_report(results)
-        report_file = output_path / f"{mode}_report_{timestamp}.md"
-        with open(report_file, 'w', encoding='utf-8') as f:
-            f.write(report)
-        
-        print(f"✅ 结果已保存到: {output_path}")
-        print(f"   - 结果文件: {results_file.name}")
-        print(f"   - 报告文件: {report_file.name}")
+        exp_dir = Path(output_dir) / f"training_{timestamp}"
+        exp_dir.mkdir(parents=True, exist_ok=True)
+
+        # 保存结果
+        results_file = exp_dir / "results.json"
+        with open(results_file, 'w') as f:
+            # 过滤不能序列化的对象
+            serializable_results = {}
+            for key, value in results.items():
+                if key not in ['env', 'agent', 'trainer']:
+                    try:
+                        json.dumps(value)
+                        serializable_results[key] = value
+                    except (TypeError, ValueError):
+                        serializable_results[key] = str(value)
+
+            json.dump(serializable_results, f, indent=2)
+
+        print(f"💾 训练结果已保存到: {exp_dir}")
+        return exp_dir
 
 
 def main():
     """主函数"""
-    parser = argparse.ArgumentParser(description='电力网络分区统一训练系统')
-    
-    # 基本参数
-    parser.add_argument('--config', type=str, help='配置文件路径')
+    parser = argparse.ArgumentParser(description='电力网络分区强化学习训练系统')
+
+    # 基础参数
+    parser.add_argument('--config', type=str, default=None,
+                       help='配置文件路径或预设配置名称')
     parser.add_argument('--mode', type=str, default='standard',
                        choices=['quick', 'standard', 'full', 'ieee118', 'parallel', 'curriculum'],
                        help='训练模式')
-    
+
     # 训练参数
-    parser.add_argument('--case', type=str, help='电网案例名称')
     parser.add_argument('--episodes', type=int, help='训练回合数')
+    parser.add_argument('--case', type=str, help='电网案例名称')
     parser.add_argument('--partitions', type=int, help='分区数量')
-    parser.add_argument('--device', type=str, help='计算设备')
-    
-    # 功能开关
-    parser.add_argument('--no-baselines', action='store_true', help='跳过基线方法对比')
-    parser.add_argument('--no-viz', action='store_true', help='跳过可视化')
+    parser.add_argument('--lr', type=float, help='学习率')
+    parser.add_argument('--workers', type=int, help='并行工作进程数')
+
+    # 输出参数
     parser.add_argument('--save-results', action='store_true', help='保存训练结果')
-    
-    # 特殊模式
-    parser.add_argument('--list-configs', action='store_true', help='列出所有可用配置')
+    parser.add_argument('--output-dir', type=str, default='experiments', help='输出目录')
+
+    # 系统参数
+    parser.add_argument('--device', type=str, choices=['cpu', 'cuda', 'auto'], help='计算设备')
+    parser.add_argument('--seed', type=int, help='随机种子')
     parser.add_argument('--check-deps', action='store_true', help='检查依赖')
-    
+
     args = parser.parse_args()
-    
+
     # 检查依赖
     if args.check_deps:
         deps = check_dependencies()
-        print("📋 依赖检查结果:")
+        print("📦 依赖检查结果:")
         for dep, available in deps.items():
             status = "✅" if available else "❌"
-            print(f"  {status} {dep}")
+            print(f"   - {dep}: {status}")
         return
-    
-    # 初始化系统
-    system = UnifiedTrainingSystem(args.config)
-    
-    # 列出配置
-    if args.list_configs:
-        configs = system.get_training_configs()
-        print("📋 可用训练配置:")
-        for name in configs.keys():
-            print(f"  - {name}")
-        return
-    
-    # 构建参数覆盖
-    overrides = {}
-    if args.case:
-        overrides['data.case_name'] = args.case
-    if args.episodes:
-        overrides['training.num_episodes'] = args.episodes
-    if args.partitions:
-        overrides['environment.num_partitions'] = args.partitions
-    if args.device:
-        overrides['system.device'] = args.device
-    if args.no_baselines:
-        overrides['evaluation.include_baselines'] = False
-    if args.no_viz:
-        overrides['visualization.enabled'] = False
-    
-    # 运行训练
-    print("\n🎯 电力网络分区统一训练系统启动")
-    print("=" * 60)
-    
-    start_time = time.time()
-    
-    results = system.run_training(args.mode, **overrides)
-    
-    elapsed_time = time.time() - start_time
-    
-    # 结果汇总
-    print("\n📊 训练完成总结")
-    print("=" * 60)
-    print(f"模式: {args.mode}")
-    print(f"耗时: {elapsed_time/3600:.2f} 小时")
-    print(f"状态: {'✅ 成功' if results.get('success', False) else '❌ 失败'}")
-    
-    if results.get('success', False):
-        if 'best_reward' in results:
-            print(f"最佳奖励: {results['best_reward']:.4f}")
-        if 'eval_stats' in results:
-            print(f"最终成功率: {results['eval_stats'].get('success_rate', 0):.4f}")
-    else:
-        print(f"错误: {results.get('error', 'Unknown error')}")
-    
-    # 保存结果
-    if args.save_results and results.get('success', False):
-        system.save_results(results)
-    
-    print("\n🎉 统一训练系统运行完成！")
+
+    # 创建训练系统
+    try:
+        system = UnifiedTrainingSystem(config_path=args.config)
+
+        # 准备训练参数
+        train_kwargs = {}
+        if args.episodes:
+            train_kwargs['training.num_episodes'] = args.episodes
+        if args.case:
+            train_kwargs['data.case_name'] = args.case
+        if args.partitions:
+            train_kwargs['environment.num_partitions'] = args.partitions
+        if args.lr:
+            train_kwargs['agent.lr_actor'] = args.lr
+            train_kwargs['agent.lr_critic'] = args.lr * 2
+        if args.workers:
+            train_kwargs['parallel_training.num_cpus'] = args.workers
+        if args.device:
+            train_kwargs['system.device'] = args.device
+        if args.seed:
+            train_kwargs['system.seed'] = args.seed
+
+        # 运行训练
+        results = system.run_training(mode=args.mode, **train_kwargs)
+
+        # 保存结果
+        if args.save_results and results.get('success', False):
+            system.save_results(results, args.output_dir)
+
+        # 输出结果摘要
+        if results.get('success', False):
+            print(f"\n🎉 训练成功完成!")
+            if 'best_reward' in results:
+                print(f"🏆 最佳奖励: {results['best_reward']:.4f}")
+            if 'eval_stats' in results:
+                eval_stats = results['eval_stats']
+                print(f"📊 评估结果: 平均奖励 {eval_stats.get('avg_reward', 0):.4f}, "
+                      f"成功率 {eval_stats.get('success_rate', 0):.3f}")
+        else:
+            print(f"\n❌ 训练失败: {results.get('error', '未知错误')}")
+            return 1
+
+    except Exception as e:
+        print(f"❌ 系统错误: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return 1
+
+    return 0
 
 
 if __name__ == "__main__":
-    main() 
+    exit(main())

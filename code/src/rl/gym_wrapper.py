@@ -128,9 +128,14 @@ class PowerGridPartitionGymEnv(gym.Env):
         self.current_hetero_data = self.processor.graph_from_mpc(current_case).to(self.device)
         
         # 使用GAT编码器生成节点嵌入
+        # 过滤掉不支持的参数
+        gat_config = self.config['gat'].copy()
+        supported_params = ['hidden_channels', 'gnn_layers', 'heads', 'output_dim', 'dropout']
+        filtered_gat_config = {k: v for k, v in gat_config.items() if k in supported_params}
+
         encoder = create_hetero_graph_encoder(
-            self.current_hetero_data, 
-            **self.config['gat']
+            self.current_hetero_data,
+            **filtered_gat_config
         ).to(self.device)
         
         with torch.no_grad():
