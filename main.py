@@ -25,6 +25,7 @@ from typing import Dict, List, Tuple, Optional, Any
 from collections import deque
 import matplotlib.pyplot as plt
 from tqdm import tqdm
+import wandb # 导入wandb
 
 # 添加src到路径
 sys.path.append(str(Path(__file__).parent / 'src'))
@@ -308,11 +309,12 @@ def convert_pandapower_to_matpower(net) -> Dict:
 
 
 class TrainingLogger:
-    """增强的训练日志记录器"""
+    """训练日志记录器 - 现在支持TensorBoard和W&B"""
 
     def __init__(self, config: Dict[str, Any], total_episodes: int):
+        """初始化日志记录器"""
         self.config = config
-        self.best_reward = -float('inf')
+        self.start_time = time.time()
         self.episode_rewards = []
         self.episode_lengths = []
         self.actor_losses = []
@@ -321,27 +323,42 @@ class TrainingLogger:
         self.success_rates = []
         self.load_cvs = []
         self.coupling_edges = []
+        self.best_reward = -float('inf')
 
-        # 日志配置
-        self.log_config = config.get('logging', {})
-        self.metrics_save_interval = self.log_config.get('metrics_save_interval', 50)
+        log_config = config.get('logging', {})
+        self.metrics_save_interval = log_config.get('metrics_save_interval', 100)
 
-        # TensorBoard设置
-        self.use_tensorboard = self.log_config.get('use_tensorboard', False)
-        self.tensorboard_writer = None
-        if self.use_tensorboard:
-            self._setup_tensorboard()
+        self.progress_bar = tqdm(total=total_episodes, desc="🚀 训练进度")
+        
+        # 设置TensorBoard
+        self.use_tensorboard = log_config.get('tensorboard', False)
+        self.tensorboard_writer = self._setup_tensorboard() if self.use_tensorboard else None
 
-        # TQDM 进度条
-        self.progress_bar = tqdm(total=total_episodes, desc="🚀 训练进度",
-                                 bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}]")
-        self.start_time = time.time()
+        # 设置Weights & Biases
+        wandb_config = config.get('wandb', {})
+        self.use_wandb = wandb_config.get('enabled', False)
+        if self.use_wandb:
+            self._setup_wandb(wandb_config)
+
+    def _setup_wandb(self, wandb_config: Dict[str, Any]):
+        """初始化Weights & Biases"""
+        try:
+            wandb.init(
+                project=wandb_config.get('project', 'power-grid-partitioning'),
+                entity=wandb_config.get('entity'), # entity可以为None
+                config=self.config, # 记录所有超参数
+                reinit=True
+            )
+            print(f"   - W&B: ✅ (项目: {wandb.run.project}, 名称: {wandb.run.name})")
+        except Exception as e:
+            print(f"   - W&B: ❌ 初始化失败: {e}")
+            self.use_wandb = False
 
     def _setup_tensorboard(self):
         """设置TensorBoard"""
         try:
             from torch.utils.tensorboard import SummaryWriter
-            log_dir = self.log_config.get('log_dir', 'logs')
+            log_dir = self.config['logging']['log_dir']
             timestamp = time.strftime('%Y%m%d_%H%M%S')
             self.tensorboard_writer = SummaryWriter(f"{log_dir}/training_{timestamp}")
             print(f"📊 TensorBoard日志目录: {log_dir}/training_{timestamp}")
@@ -381,6 +398,15 @@ class TrainingLogger:
                 for key, value in info.items():
                     if isinstance(value, (int, float)):
                         self.tensorboard_writer.add_scalar(f'Episode/{key}', value, episode)
+        
+        # W&B日志
+        if self.use_wandb:
+            log_data = {'Episode/Reward': reward, 'Episode/Length': length}
+            if info:
+                for key, value in info.items():
+                    if isinstance(value, (int, float)):
+                        log_data[f'Episode/{key}'] = value
+            wandb.log(log_data, step=episode)
 
     def log_training_step(self, episode: int, actor_loss: float = None,
                          critic_loss: float = None, entropy: float = None):
@@ -399,6 +425,18 @@ class TrainingLogger:
             self.entropies.append(entropy)
             if self.use_tensorboard and self.tensorboard_writer:
                 self.tensorboard_writer.add_scalar('Training/Entropy', entropy, episode)
+        
+        # W&B日志
+        if self.use_wandb:
+            log_data = {}
+            if actor_loss is not None:
+                log_data['Training/ActorLoss'] = actor_loss
+            if critic_loss is not None:
+                log_data['Training/CriticLoss'] = critic_loss
+            if entropy is not None:
+                log_data['Training/Entropy'] = entropy
+            if log_data:
+                wandb.log(log_data, step=episode)
 
     def get_statistics(self) -> Dict[str, Any]:
         """获取训练统计信息"""
@@ -430,6 +468,8 @@ class TrainingLogger:
         self.progress_bar.close()
         if self.tensorboard_writer:
             self.tensorboard_writer.close()
+        if self.use_wandb:
+            wandb.finish()
 
 
 class UnifiedTrainer:
@@ -1038,8 +1078,8 @@ class UnifiedTrainingSystem:
                 # 使用Stable-Baselines3的并行训练
                 return self._run_sb3_parallel_training(config)
             else:
-                # 使用简化的多进程训练
-                return self._run_simple_parallel_training(config)
+                # 使用高级并行训练
+                return self._run_advanced_parallel_training(config)
 
         except Exception as e:
             print(f"❌ 并行训练失败: {str(e)}")
@@ -1104,116 +1144,146 @@ class UnifiedTrainingSystem:
             'config': config
         }
 
-    def _run_simple_parallel_training(self, config: Dict[str, Any]) -> Dict[str, Any]:
-        """简化的并行训练（不依赖gym和stable-baselines3）"""
-        print("\n⚠️ 使用简化的并行训练模式（无gym/stable-baselines3）")
-        
-        # 【修复】确保设备配置正确传递给子进程
+    def _run_advanced_parallel_training(self, config: Dict[str, Any]) -> Dict[str, Any]:
+        """完整的并行训练实现（支持多种并行策略）"""
+        print("\n🚀 启动高级并行训练系统")
+
+        # 确保设备配置正确传递
         config['system']['device'] = str(self.device)
-        print(f"🔧 简化并行训练设备配置已更新: {config['system']['device']}")
 
-        # 导入必要模块
-        from code.src.data_processing import PowerGridDataProcessor
-        from code.src.gat import create_hetero_graph_encoder
-        from code.src.rl.environment import PowerGridPartitioningEnv
-        from code.src.rl.agent import PPOAgent
+        parallel_config = config.get('parallel', {})
+        num_workers = parallel_config.get('num_workers', 4)
+        episodes_per_worker = parallel_config.get('episodes_per_worker', 50)
+        parallel_strategy = parallel_config.get('strategy', 'independent')  # independent, shared_experience, parameter_server
+
+        print(f"🔄 并行策略: {parallel_strategy}")
+        print(f"👥 工作进程数: {num_workers}")
+        print(f"📊 每进程回合数: {episodes_per_worker}")
+
+        if parallel_strategy == 'independent':
+            return self._run_independent_parallel_training(config, num_workers, episodes_per_worker)
+        elif parallel_strategy == 'shared_experience':
+            return self._run_shared_experience_training(config, num_workers, episodes_per_worker)
+        elif parallel_strategy == 'parameter_server':
+            return self._run_parameter_server_training(config, num_workers, episodes_per_worker)
+        else:
+            raise ValueError(f"不支持的并行策略: {parallel_strategy}")
+
+    def _run_independent_parallel_training(self, config: Dict[str, Any], num_workers: int, episodes_per_worker: int) -> Dict[str, Any]:
+        """独立并行训练：每个进程独立训练"""
         import multiprocessing as mp
+        from concurrent.futures import ProcessPoolExecutor, as_completed
 
-        # 1. 数据处理
-        print("\n1️⃣ 数据处理...")
-        processor = PowerGridDataProcessor(
-            normalize=config['data']['normalize'],
-            cache_dir=config['data']['cache_dir']
-        )
+        print("🔄 使用独立并行训练策略")
 
-        # 加载数据
-        mpc = load_power_grid_data(config['data']['case_name'])
-        hetero_data = processor.graph_from_mpc(mpc).to(self.device)
-
-        # 2. GAT编码器
-        print("\n2️⃣ GAT编码器...")
-        gat_config = config['gat']
-        encoder = create_hetero_graph_encoder(
-            hetero_data,
-            hidden_channels=gat_config['hidden_channels'],
-            gnn_layers=gat_config['gnn_layers'],
-            heads=gat_config['heads'],
-            output_dim=gat_config['output_dim']
-        ).to(self.device)
-
-        with torch.no_grad():
-            node_embeddings, attention_weights = encoder.encode_nodes_with_attention(hetero_data)
-
-        # 3. 运行多个训练实例
-        print("\n3️⃣ 开始简化并行训练...")
-        parallel_config = config['parallel_training']
-        num_workers = min(parallel_config['num_cpus'], 4)  # 限制工作进程数
-
-        # 每个工作进程的训练回合数
-        episodes_per_worker = config['training']['num_episodes'] // num_workers
-
-        results = []
+        # 准备工作进程参数
+        worker_args = []
         for worker_id in range(num_workers):
-            print(f"🔄 启动工作进程 {worker_id + 1}/{num_workers}")
+            worker_config = config.copy()
+            worker_config['training']['num_episodes'] = episodes_per_worker
+            worker_config['worker_id'] = worker_id
+            worker_config['logging']['console_log_interval'] = max(10, episodes_per_worker // 5)
+            # 为每个worker设置不同的随机种子
+            worker_config['system']['seed'] = config['system']['seed'] + worker_id
+            worker_args.append((worker_config, worker_id))
 
-            # 创建环境和智能体
-            env = PowerGridPartitioningEnv(
-                hetero_data=hetero_data,
-                node_embeddings=node_embeddings,
-                num_partitions=config['environment']['num_partitions'],
-                reward_weights=config['environment']['reward_weights'],
-                max_steps=config['environment']['max_steps'],
-                device=self.device,
-                attention_weights=attention_weights
-            )
+        # 执行并行训练
+        results = []
+        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+            # 提交所有工作任务
+            future_to_worker = {
+                executor.submit(self._run_worker_training_with_validation, args): worker_id
+                for args, worker_id in worker_args
+            }
 
-            agent_config = config['agent']
-            node_embedding_dim = env.state_manager.embedding_dim
-            region_embedding_dim = node_embedding_dim * 2
+            # 收集结果
+            completed_workers = 0
+            for future in as_completed(future_to_worker):
+                worker_id = future_to_worker[future]
+                try:
+                    result = future.result()
+                    results.append(result)
+                    completed_workers += 1
+                    print(f"✅ 工作进程 {worker_id} 完成 ({completed_workers}/{num_workers})")
+                except Exception as e:
+                    print(f"❌ 工作进程 {worker_id} 失败: {str(e)}")
+                    results.append({
+                        'success': False,
+                        'worker_id': worker_id,
+                        'error': str(e),
+                        'history': {'episode_rewards': [], 'episode_lengths': []},
+                        'best_reward': -float('inf'),
+                        'final_metrics': {}
+                    })
 
-            agent = PPOAgent(
-                node_embedding_dim=node_embedding_dim,
-                region_embedding_dim=region_embedding_dim,
-                num_partitions=env.num_partitions,
-                lr_actor=agent_config['lr_actor'],
-                lr_critic=agent_config['lr_critic'],
-                gamma=agent_config['gamma'],
-                eps_clip=agent_config['eps_clip'],
-                k_epochs=agent_config['k_epochs'],
-                entropy_coef=agent_config['entropy_coef'],
-                value_coef=agent_config['value_coef'],
-                device=self.device,
-                max_grad_norm=agent_config.get('max_grad_norm', None),
-                # 【修改】传递独立的调度器配置
-                actor_scheduler_config=agent_config.get('actor_scheduler', {}),
-                critic_scheduler_config=agent_config.get('critic_scheduler', {})
-            )
+        return self._aggregate_parallel_results(results, config, 'independent')
 
-            # 训练
-            trainer = UnifiedTrainer(agent=agent, env=env, config=config)
-            history = trainer.train(
-                num_episodes=episodes_per_worker,
-                max_steps_per_episode=config['training']['max_steps_per_episode'],
-                update_interval=config['training']['update_interval']
-            )
+    def _run_worker_training_with_validation(self, args) -> Dict[str, Any]:
+        """带验证的工作进程训练"""
+        worker_config, worker_id = args
 
-            results.append({
+        try:
+            # 设置工作进程的随机种子
+            torch.manual_seed(worker_config['system']['seed'])
+            np.random.seed(worker_config['system']['seed'])
+
+            # 运行标准训练
+            result = self._run_standard_training(worker_config)
+
+            # 添加工作进程信息
+            result['worker_id'] = worker_id
+            result['worker_seed'] = worker_config['system']['seed']
+
+            return result
+
+        except Exception as e:
+            return {
+                'success': False,
                 'worker_id': worker_id,
-                'history': history,
-                'best_reward': trainer.logger.best_reward
-            })
+                'error': str(e),
+                'history': {'episode_rewards': [], 'episode_lengths': []},
+                'best_reward': -float('inf'),
+                'final_metrics': {}
+            }
 
-        # 汇总结果
-        total_episodes = sum(len(r['history']['episode_rewards']) for r in results)
-        best_reward = max(r['best_reward'] for r in results)
+    def _aggregate_parallel_results(self, results: list, config: Dict[str, Any], strategy: str) -> Dict[str, Any]:
+        """聚合并行训练结果"""
+        print(f"\n📊 聚合并行训练结果 (策略: {strategy})")
+
+        successful_workers = [r for r in results if r.get('success', False)]
+        print(f"✅ 成功: {len(successful_workers)}/{len(results)} 个工作进程")
+
+        if not successful_workers:
+            return {
+                'success': False,
+                'mode': f'parallel_{strategy}',
+                'error': '所有工作进程都失败了',
+                'worker_results': results
+            }
+
+        # 计算汇总统计
+        total_episodes = sum(len(r.get('history', {}).get('episode_rewards', [])) for r in successful_workers)
+        best_reward = max(r.get('best_reward', -float('inf')) for r in successful_workers)
+        avg_reward = np.mean([r.get('best_reward', 0) for r in successful_workers])
+
+        # 选择最佳工作进程的结果
+        best_worker = max(successful_workers, key=lambda x: x.get('best_reward', -float('inf')))
+
+        print(f"🏆 最佳工作进程: {best_worker.get('worker_id', 'unknown')}")
+        print(f"📈 最佳奖励: {best_reward:.3f}")
+        print(f"📊 平均奖励: {avg_reward:.3f}")
 
         return {
             'success': True,
-            'mode': 'parallel_simple',
+            'mode': f'parallel_{strategy}',
             'config': config,
             'total_episodes': total_episodes,
             'best_reward': best_reward,
-            'worker_results': results
+            'avg_reward': avg_reward,
+            'best_worker_result': best_worker,
+            'worker_results': results,
+            'successful_workers': len(successful_workers),
+            'total_workers': len(results)
         }
     
     def _run_curriculum_training(self, config: Dict[str, Any]) -> Dict[str, Any]:
@@ -1249,23 +1319,7 @@ class UnifiedTrainingSystem:
             'stage_results': results
         }
     
-    def run_demo(self) -> Dict[str, Any]:
-        """运行完整系统演示"""
-        print("\n🎪 运行完整系统演示")
-        print("=" * 60)
 
-        try:
-            # 运行快速演示模式
-            demo_config = self.get_training_configs()['quick']
-            result = self._run_standard_training(demo_config)
-            return {
-                'success': result['success'],
-                'mode': 'demo',
-                'demo_result': result
-            }
-        except Exception as e:
-            print(f"❌ 演示失败: {str(e)}")
-            return {'success': False, 'error': str(e)}
     
     def create_training_report(self, results: Dict[str, Any]) -> str:
         """生成训练报告"""
@@ -1350,7 +1404,7 @@ def main():
     # 基本参数
     parser.add_argument('--config', type=str, help='配置文件路径')
     parser.add_argument('--mode', type=str, default='standard',
-                       choices=['quick', 'standard', 'full', 'ieee118', 'parallel', 'curriculum', 'demo'],
+                       choices=['quick', 'standard', 'full', 'ieee118', 'parallel', 'curriculum'],
                        help='训练模式')
     
     # 训练参数
@@ -1411,10 +1465,7 @@ def main():
     
     start_time = time.time()
     
-    if args.mode == 'demo':
-        results = system.run_demo()
-    else:
-        results = system.run_training(args.mode, **overrides)
+    results = system.run_training(args.mode, **overrides)
     
     elapsed_time = time.time() - start_time
     

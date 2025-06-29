@@ -58,12 +58,29 @@ class PowerGridPartitioningEnv:
         # 初始化核心组件
         self.state_manager = StateManager(hetero_data, enhanced_embeddings, device)
         self.action_space = ActionSpace(hetero_data, num_partitions, device)
-        # 【删除】对旧 RewardFunction 的初始化 - 改用增量奖励
-        # self.reward_function = RewardFunction(hetero_data, reward_weights, device)
+
+        # 【新增】增强奖励函数支持
+        # 支持两种奖励模式：增量奖励（默认）和增强奖励函数
+        self.use_enhanced_rewards = reward_weights.get('use_enhanced_rewards', False) if reward_weights else False
+
+        if self.use_enhanced_rewards:
+            # 使用新的增强奖励函数
+            from .reward import EnhancedRewardFunction
+            enhanced_config = reward_weights.get('enhanced_config', {})
+            self.reward_function = EnhancedRewardFunction(
+                hetero_data,
+                reward_weights,
+                device,
+                **enhanced_config
+            )
+        else:
+            # 保持原有的增量奖励机制
+            self.reward_function = None
+
         self.metis_initializer = MetisInitializer(hetero_data, device)
         self.evaluator = PartitionEvaluator(hetero_data, device)
-        
-        # 【新增】用于存储上一步的指标，实现增量奖励
+
+        # 【保留】用于存储上一步的指标，实现增量奖励
         self.previous_metrics = None
         
         # 环境状态
@@ -508,8 +525,21 @@ class PowerGridPartitioningEnv:
         # 3. 计算新状态的指标
         current_metrics = self.evaluator.evaluate_partition(self.state_manager.current_partition)
         
-        # 4. 【核心】调用增量奖励函数计算奖励
-        reward = self._compute_improvement_reward(current_metrics, self.previous_metrics)
+        # 4. 【核心】计算奖励 - 支持两种模式
+        if self.use_enhanced_rewards and self.reward_function is not None:
+            # 使用新的增强奖励函数
+            reward, reward_components = self.reward_function.compute_reward(
+                self.state_manager.current_partition,
+                self.state_manager.get_boundary_nodes(),
+                action,
+                return_components=True
+            )
+            # 存储奖励组件用于调试和分析
+            self.last_reward_components = reward_components
+        else:
+            # 使用原有的增量奖励机制
+            reward = self._compute_improvement_reward(current_metrics, self.previous_metrics)
+            self.last_reward_components = None
         
         # 5. 【关键】更新"上一步"的指标，为下一次计算做准备
         self.previous_metrics = current_metrics
@@ -539,8 +569,13 @@ class PowerGridPartitioningEnv:
             'step': self.current_step,
             'metrics': current_metrics,
             'reward': reward,
+            'reward_mode': 'enhanced' if self.use_enhanced_rewards else 'incremental',
             **info_bonus
         }
+
+        # 添加奖励组件信息（如果使用增强奖励）
+        if self.last_reward_components is not None:
+            info['reward_components'] = self.last_reward_components
         
         return observation, reward, terminated, truncated, info
     

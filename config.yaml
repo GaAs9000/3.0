@@ -28,24 +28,24 @@ data:
 # ==================== 训练模式配置 ====================
 training:
   # 基础训练参数
-  mode: standard              # 训练模式
+  mode: standard              # 训练模式 (standard, enhanced_rewards)
   num_episodes: 1000          # 总训练回合数
   max_steps_per_episode: 200  # 每回合最大步数
   update_interval: 10         # 智能体更新间隔（回合数）
   save_interval: 100          # 检查点保存间隔（回合数）
   eval_interval: 50           # 评估间隔（回合数）
-  
+
   # 成功判定标准
   success_criteria:
     load_cv_threshold: 0.3      # 负载变异系数阈值
     connectivity_threshold: 0.9  # 连通性阈值
     min_length_threshold: 10     # 最小回合长度
-  
+
   # 收敛检测
   convergence:
     window_size: 10      # 收敛检测窗口大小
     threshold: 0.01      # 收敛阈值
-  
+
   # 梯度裁剪
   gradient_clipping:
     max_norm: 0.5        # 梯度裁剪最大范数
@@ -57,9 +57,37 @@ environment:
   
   # 奖励组件权重
   reward_weights:
+    # 基础奖励权重
     load_balance: 0.4           # 负载平衡权重
     electrical_decoupling: 0.4  # 电气解耦权重
     power_balance: 0.2         # 功率平衡权重
+
+    # 增强奖励系统配置
+    use_enhanced_rewards: false  # 是否启用增强奖励系统
+
+    enhanced_config:
+      # 第一阶段：稠密奖励
+      enable_dense_rewards: true
+      # 第二阶段：探索奖励
+      enable_exploration_bonus: false
+      # 第二阶段：势函数塑造
+      enable_potential_shaping: false
+      # 第三阶段：自适应权重
+      enable_adaptive_weights: false
+      # 当前训练回合数（用于自适应权重）
+      episode_count: 0
+
+    # 第一阶段：稠密奖励权重
+    local_connectivity: 0.4        # 局部连通性：高权重，提供即时拓扑反馈
+    incremental_balance: 0.3       # 增量平衡：中等权重，引导负载平衡
+    boundary_compression: 0.3      # 边界压缩：中等权重，提供进度激励
+
+    # 第二阶段：探索与塑造权重
+    exploration_bonus: 0.1         # 探索奖励：低权重，避免过度探索
+    potential_shaping: 0.2         # 势函数塑造：中等权重，长期引导
+
+    # 第三阶段：物理约束权重
+    neighbor_consistency: 0.15     # 邻居一致性：中等权重，物理约束
 
 # ==================== GAT编码器配置 ====================
 gat:
@@ -94,12 +122,12 @@ agent:
   # =============================================================
   actor_scheduler:
     enabled: true
-    warmup_updates: 100      # 为Actor设置更长的预热期 (例如100次更新)
+    warmup_updates: 200      # 为Actor设置更长的预热期 (例如100次更新)
     total_training_updates: 1000 # 估算的总更新次数
 
   critic_scheduler:
     enabled: true
-    warmup_updates: 20       # 为Critic设置非常短的预热期 (例如20次更新)
+    warmup_updates: 50       # 为Critic设置非常短的预热期 (例如20次更新)
     total_training_updates: 1000 # 估算的总更新次数
 
 # ==================== 并行训练配置 ====================
@@ -131,7 +159,7 @@ parallel_training:
 # ==================== 场景生成配置 ====================
 scenario_generation:
   enabled: true        # 是否启用场景生成
-  perturb_prob: 0.8     # 应用扰动的概率
+  perturb_prob: 0.7     # 应用扰动的概率
   perturb_types:        # 允许的扰动类型
     - n-1               # N-1故障
     - load_gen_fluctuation  # 负荷/发电波动
@@ -203,6 +231,16 @@ logging:
     - entropies
     - explained_variance
     - approx_kl
+    # 增强奖励组件跟踪
+    - reward_components
+    - local_connectivity_rewards
+    - incremental_balance_rewards
+    - boundary_compression_rewards
+
+  wandb:
+    enabled: true
+    project: "power-grid-partitioning"
+    entity: null  # 在这里填入您的W&B用户名或团队名
 
 # ==================== 可视化配置 ====================
 visualization:
@@ -241,16 +279,23 @@ visualization:
     save_html: true
     template: plotly_white
     height: 800
-    
+
   # 颜色设置
   colors:
     palette_type: husl      # seaborn颜色方案
     unassigned_color: "#E0E0E0"
-    
+
   # 热图设置
   heatmap:
     colorscale: YlOrRd
     text_font_size: 10
+
+  # 奖励组件可视化
+  reward_analysis:
+    enabled: true
+    plot_components: true
+    moving_average_window: 50
+    save_component_plots: true
 
 # ==================== 预设配置 ====================
 # 快速训练配置
@@ -346,6 +391,62 @@ curriculum_config:
     strategy: linear
     success_threshold: 0.8
 
+# ==================== 增强奖励预设配置 ====================
+# 增强奖励训练配置
+enhanced_rewards_training:
+  training:
+    mode: enhanced_rewards
+    num_episodes: 1500
+    success_criteria:
+      load_cv_threshold: 0.25     # 提高标准，因为新奖励应该能达到更好效果
+      connectivity_threshold: 0.9
+    convergence:
+      window_size: 20             # 增加窗口大小以适应新奖励的波动
+  environment:
+    reward_weights:
+      use_enhanced_rewards: true
+      load_balance: 0.3           # 稍微降低基础权重，为稠密奖励让出空间
+      electrical_decoupling: 0.3
+      power_balance: 0.2
+  logging:
+    console_log_interval: 5
+    metrics_save_interval: 25
+    plot_save_interval: 50
+
+# 第一阶段测试配置：仅启用稠密奖励
+stage1_dense_rewards:
+  environment:
+    reward_weights:
+      use_enhanced_rewards: true
+      enhanced_config:
+        enable_dense_rewards: true
+        enable_exploration_bonus: false
+        enable_potential_shaping: false
+        enable_adaptive_weights: false
+
+# 第二阶段测试配置：启用稠密奖励 + 探索
+stage2_smart_exploration:
+  environment:
+    reward_weights:
+      use_enhanced_rewards: true
+      enhanced_config:
+        enable_dense_rewards: true
+        enable_exploration_bonus: true
+        enable_potential_shaping: true
+        enable_adaptive_weights: false
+
+# 第三阶段测试配置：启用所有功能
+stage3_adaptive_physics:
+  environment:
+    reward_weights:
+      use_enhanced_rewards: true
+      enhanced_config:
+        enable_dense_rewards: true
+        enable_exploration_bonus: true
+        enable_potential_shaping: true
+        enable_adaptive_weights: true
+        episode_count: 0  # 将在训练过程中动态更新
+
 # ==================== 超参数搜索范围 ====================
 hyperparameter_ranges:
   agent:
@@ -374,4 +475,11 @@ debug:
   verbose_logging: false
   save_intermediate_results: false
   profile_training: false
-  memory_monitoring: false 
+  memory_monitoring: false
+
+  # 奖励调试
+  reward_debugging:
+    enabled: false
+    log_reward_components: false
+    save_reward_breakdown: false
+    plot_reward_evolution: false

@@ -133,15 +133,21 @@ python train_unified.py --mode curriculum
 - 支持多种电力网络格式
 - 统一的训练入口
 
-## 🧪 测试
+## 🧪 验证
 
-运行集成测试：
+系统集成验证：
 ```bash
-python test/test_rl_integration.py
-python test/test_scenario_generator.py
+# 验证完整训练流水线
+python main.py --mode quick
+
+# 验证并行训练功能
+python main.py --mode parallel
+
+# 验证增强奖励系统
+python -c "from code.src.rl.ab_testing import create_standard_ab_test; framework = create_standard_ab_test(); framework.run_all_experiments()"
 ```
 
-这些测试验证了整个流水线的端到端功能。
+这些命令验证了整个系统的端到端功能。
 
 ## 🎛️ 场景生成
 
@@ -218,14 +224,14 @@ logging.basicConfig(level=logging.DEBUG)
 ### 系统检查
 
 ```bash
-# 检查依赖
-python train_unified.py --check-deps
+# 检查系统状态
+python main.py --mode quick --episodes 10
 
 # 查看可用配置
-python train_unified.py --list-configs
+python -c "import yaml; print(yaml.safe_load(open('config.yaml')))"
 
-# 运行系统演示
-python train_unified.py --mode demo
+# 运行快速验证
+python main.py --mode quick
 ```
 
 ## 🔌 扩展点
@@ -308,20 +314,20 @@ pip install metis  # 或使用conda install -c conda-forge metis
 ## 🎉 完整工作流程
 
 ```bash
-# 1. 检查系统
-python train_unified.py --check-deps
+# 1. 快速体验
+python main.py --mode quick
 
-# 2. 快速体验
-python train_unified.py --mode quick
+# 2. 标准训练
+python main.py --mode standard --case ieee30 --partitions 5
 
-# 3. 标准训练
-python train_unified.py --mode standard --case ieee30 --partitions 5
+# 3. 大规模训练
+python main.py --mode ieee118
 
-# 4. 大规模训练
-python train_unified.py --mode ieee118
+# 4. 并行训练
+python main.py --mode parallel
 
-# 5. 保存结果
-python train_unified.py --mode standard --save-results
+# 5. 课程学习
+python main.py --mode curriculum
 ```
 
 

@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from torch_geometric.nn import GATv2Conv, to_hetero, LayerNorm, global_mean_pool
 from torch_geometric.data import HeteroData
 from torch_geometric.utils import softmax
-from typing import Optional, List, Dict, Tuple, Union
+from typing import Optional, List, Dict, Tuple, Union, Any
 import numpy as np
 import warnings
 
@@ -547,57 +547,124 @@ def create_hetero_graph_encoder(data: HeteroData,
     return encoder
 
 
-def test_hetero_graph_encoder(data: HeteroData, device: torch.device):
+def validate_encoder_architecture(data: HeteroData,
+                                 hidden_channels: int = 64,
+                                 gnn_layers: int = 3,
+                                 heads: int = 8,
+                                 output_dim: int = 128,
+                                 device: torch.device = None) -> 'HeteroGraphEncoder':
     """
-    测试异构图编码器
+    验证并创建生产级异构图编码器
+
+    Args:
+        data: 异构图数据
+        hidden_channels: 隐藏层维度
+        gnn_layers: GNN层数
+        heads: 注意力头数
+        output_dim: 输出嵌入维度
+        device: 计算设备
+
+    Returns:
+        验证通过的编码器实例
+
+    Raises:
+        ValueError: 如果架构验证失败
+        RuntimeError: 如果前向传播失败
     """
-    print("\n🧠 测试异构Physics-Guided GATv2编码器...")
-    
+    if device is None:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    # 验证输入数据格式
+    if not isinstance(data, HeteroData):
+        raise ValueError("输入数据必须是HeteroData格式")
+
+    # 验证必要的节点类型和边类型
+    required_node_types = ['bus']
+    required_edge_types = [('bus', 'connects', 'bus')]
+
+    for node_type in required_node_types:
+        if node_type not in data.node_types:
+            raise ValueError(f"缺少必要的节点类型: {node_type}")
+
+    for edge_type in required_edge_types:
+        if edge_type not in data.edge_types:
+            raise ValueError(f"缺少必要的边类型: {edge_type}")
+
     # 创建编码器
-    encoder = create_hetero_graph_encoder(
-        data, 
-        hidden_channels=32, 
-        gnn_layers=2, 
-        heads=4, 
-        output_dim=64
-    )
-    encoder = encoder.to(device)
-    data = data.to(device)
-    
-    # 测试不同的前向传播模式
-    with torch.no_grad():
-        # 1. 仅提取节点嵌入
-        node_embeddings = encoder.encode_nodes(data)
-        
-        # 2. 提取图级别嵌入
-        graph_embedding = encoder.encode_graph(data)
-        
-        # 3. 完整前向传播（包含注意力权重）
-        node_emb, attention_weights, graph_emb = encoder(
-            data, 
-            return_attention_weights=True, 
-            return_graph_embedding=True
+    try:
+        encoder = create_hetero_graph_encoder(
+            data,
+            hidden_channels=hidden_channels,
+            gnn_layers=gnn_layers,
+            heads=heads,
+            output_dim=output_dim
         )
-    
-    print(f"✅ 异构图编码器测试成功！")
-    print(f"📊 编码器参数量: {sum(p.numel() for p in encoder.parameters()):,}")
-    print(f"📊 输出嵌入维度: {encoder.get_embedding_dim()}")
-    print(f"📊 节点类型数量: {len(node_embeddings)}")
-    
-    for node_type, embeddings in node_embeddings.items():
-        print(f"   - {node_type}: {embeddings.shape}")
-    
-    print(f"📊 图级别嵌入形状: {graph_embedding.shape}")
-    print(f"📊 注意力权重数量: {len(attention_weights)}")
-    
+        encoder = encoder.to(device)
+        data = data.to(device)
+    except Exception as e:
+        raise RuntimeError(f"编码器创建失败: {str(e)}")
+
+    # 验证前向传播
+    try:
+        with torch.no_grad():
+            # 验证节点嵌入提取
+            node_embeddings = encoder.encode_nodes(data)
+
+            # 验证图级别嵌入
+            graph_embedding = encoder.encode_graph(data)
+
+            # 验证完整前向传播
+            node_emb, attention_weights, graph_emb = encoder(
+                data,
+                return_attention_weights=True,
+                return_graph_embedding=True
+            )
+
+            # 验证输出维度
+            expected_dim = encoder.get_embedding_dim()
+            for node_type, embeddings in node_embeddings.items():
+                if embeddings.shape[-1] != expected_dim:
+                    raise ValueError(f"节点类型 {node_type} 的嵌入维度不匹配: "
+                                   f"期望 {expected_dim}, 实际 {embeddings.shape[-1]}")
+
+            if graph_embedding.shape[-1] != expected_dim:
+                raise ValueError(f"图级别嵌入维度不匹配: "
+                               f"期望 {expected_dim}, 实际 {graph_embedding.shape[-1]}")
+
+    except Exception as e:
+        raise RuntimeError(f"前向传播验证失败: {str(e)}")
+
     return encoder
 
 
-if __name__ == "__main__":
-    print("🔥 异构Physics-Guided GATv2图编码器 - 专注于表示学习！")
-    print("📖 使用说明：")
-    print("1. 使用 create_hetero_graph_encoder() 创建编码器")
-    print("2. 使用 encoder.encode_nodes() 提取节点嵌入")
-    print("3. 使用 encoder.encode_graph() 提取图级别嵌入")
-    print("4. 编码器专注于特征提取，不包含决策逻辑")
+def create_production_encoder(data: HeteroData, config: Dict[str, Any] = None) -> 'HeteroGraphEncoder':
+    """
+    创建生产级异构图编码器
+
+    Args:
+        data: 异构图数据
+        config: 编码器配置参数
+
+    Returns:
+        配置好的编码器实例
+    """
+    if config is None:
+        config = {
+            'hidden_channels': 64,
+            'gnn_layers': 3,
+            'heads': 8,
+            'output_dim': 128,
+            'dropout': 0.1,
+            'physics_enhanced': True,
+            'temperature': 1.0,
+            'physics_weight': 1.0
+        }
+
+    return validate_encoder_architecture(
+        data,
+        hidden_channels=config.get('hidden_channels', 64),
+        gnn_layers=config.get('gnn_layers', 3),
+        heads=config.get('heads', 8),
+        output_dim=config.get('output_dim', 128)
+    )
 
