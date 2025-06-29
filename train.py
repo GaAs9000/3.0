@@ -889,16 +889,25 @@ class UnifiedTrainingSystem:
         base_config = self.config.copy()
 
         configs = {
-            'quick': {
+            'enhanced_rewards': {
                 **base_config,
                 'training': {
                     **base_config['training'],
-                    'num_episodes': 100,
-                    'max_steps_per_episode': 50,
-                    'update_interval': 5
+                    'mode': 'enhanced_rewards',
+                    'num_episodes': 1500
+                },
+                'environment': {
+                    **base_config['environment'],
+                    'reward_weights': {
+                        **base_config['environment']['reward_weights'],
+                        'use_enhanced_rewards': True
+                    }
+                },
+                'scenario_generation': {
+                    **base_config['scenario_generation'],
+                    'enabled': True
                 }
             },
-            'standard': base_config,
             'full': {
                 **base_config,
                 'training': {
@@ -970,8 +979,8 @@ class UnifiedTrainingSystem:
         # 获取模式配置
         configs = self.get_training_configs()
         if mode not in configs:
-            print(f"⚠️ 未知训练模式: {mode}，使用标准模式")
-            mode = 'standard'
+            print(f"⚠️ 未知训练模式: {mode}，使用增强奖励模式")
+            mode = 'enhanced_rewards'
 
         config = configs[mode]
 
@@ -1324,8 +1333,8 @@ def main():
     # 基础参数
     parser.add_argument('--config', type=str, default=None,
                        help='配置文件路径或预设配置名称')
-    parser.add_argument('--mode', type=str, default='standard',
-                       choices=['quick', 'standard', 'full', 'ieee118', 'parallel', 'curriculum'],
+    parser.add_argument('--mode', type=str, default='enhanced_rewards',
+                       choices=['enhanced_rewards', 'full', 'ieee118', 'parallel', 'curriculum'],
                        help='训练模式')
 
     # 训练参数

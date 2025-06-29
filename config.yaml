@@ -1,5 +1,5 @@
 # 电力网络分区强化学习统一配置文件
-# 整合了所有训练模式的配置参数
+# 使用 YAML 锚点减少冗余，保留核心功能
 
 # ==================== 系统配置 ====================
 system:
@@ -118,7 +118,7 @@ agent:
   max_grad_norm: 0.5    # 最大梯度范数（用于梯度裁剪，防止梯度爆炸）
 
   # =============================================================
-  # 【修改】为Actor和Critic提供独立的预热与退火(余弦)调度策略
+  # 为Actor和Critic提供独立的预热与退火(余弦)调度策略
   # =============================================================
   actor_scheduler:
     enabled: true
@@ -131,16 +131,16 @@ agent:
     total_training_updates: 1000 # 估算的总更新次数
 
 # ==================== 并行训练配置 ====================
-parallel_training:
+parallel_training: &parallel_base
   enabled: false       # 是否启用并行训练
-  num_cpus: 12          # 并行环境数量
+  num_cpus: 20          # 并行环境数量
   total_timesteps: 5000000  # 总训练时间步
   scenario_generation: true # 是否使用场景生成
-  
+
   # Stable-Baselines3 PPO参数
   sb3_ppo_params:
     n_steps: 2048       # 每个环境的步数
-    batch_size: 64      # 批大小
+    batch_size: 128      # 批大小
     n_epochs: 10        # 优化轮数
     gae_lambda: 0.95    # GAE lambda
     clip_range: 0.2     # 裁剪范围
@@ -148,7 +148,7 @@ parallel_training:
     vf_coef: 0.5        # 价值函数系数
     max_grad_norm: 0.5  # 最大梯度范数
     learning_rate: 3.0e-4  # 学习率
-  
+
   # 网络架构
   policy_network:
     net_arch:
@@ -157,7 +157,7 @@ parallel_training:
     activation_fn: relu    # 激活函数
 
 # ==================== 场景生成配置 ====================
-scenario_generation:
+scenario_generation: &scenario_base
   enabled: true        # 是否启用场景生成
   perturb_prob: 0.7     # 应用扰动的概率
   perturb_types:        # 允许的扰动类型
@@ -166,33 +166,14 @@ scenario_generation:
     - both              # 同时应用两种扰动
     - none              # 无扰动
   scale_range: [0.8, 1.2]  # 负荷/发电缩放范围
-  
-  # N-1故障参数
-  n1_contingency:
-    line_outage_prob: 0.1    # 线路故障概率
-    gen_outage_prob: 0.05    # 发电机故障概率
-  
-  # 负荷波动参数  
-  load_fluctuation:
-    mean_scale: 1.0          # 平均缩放
-    std_scale: 0.1           # 标准差缩放
-
-# ==================== 并行训练配置 ====================
-parallel_training:
-  enabled: false        # 是否启用并行训练
-  num_cpus: 12          # 并行CPU数量
-  total_timesteps: 5000000  # 总训练时间步
-  scenario_generation: true  # 是否启用场景生成
 
 # ==================== 课程学习配置 ====================
-curriculum:
+curriculum: &curriculum_base
   enabled: false        # 是否启用课程学习
   start_partitions: 2   # 起始分区数
   end_partitions: 5     # 结束分区数
   episodes_per_stage: 200  # 每阶段回合数
-
-  # 课程学习策略
-  strategy: linear      # 学习策略 (linear, exponential, adaptive)
+  strategy: linear      # 学习策略
   success_threshold: 0.8  # 进入下一阶段的成功率阈值
 
 # ==================== 评估配置 ====================
@@ -305,18 +286,6 @@ visualization:
     save_component_plots: true
 
 # ==================== 预设配置 ====================
-# 快速训练配置
-quick_training:
-  training:
-    num_episodes: 100
-    max_steps_per_episode: 50
-    update_interval: 5
-    save_interval: 25
-    eval_interval: 20
-  logging:
-    console_log_interval: 5
-    metrics_save_interval: 20
-
 # 完整训练配置
 full_training:
   training:
@@ -361,45 +330,8 @@ ieee118_training:
       node_size_scale: 300
       font_size: 6
 
-# 大规模系统配置
-large_system:
-  gat:
-    hidden_channels: 128
-    gnn_layers: 4
-    heads: 8
-    output_dim: 256
-  agent:
-    lr_actor: 1.0e-4
-    lr_critic: 5.0e-4
-    hidden_dim: 512
-  environment:
-    max_steps: 500
-  training:
-    max_steps_per_episode: 500
-
-# 并行训练专用配置
-parallel_training_config:
-  parallel_training:
-    enabled: false        # 默认禁用，需要时手动启用
-    num_cpus: 12
-    total_timesteps: 5000000
-    scenario_generation: true
-  scenario_generation:
-    enabled: false        # 默认禁用，需要时手动启用
-    perturb_prob: 0.8
-
-# 课程学习专用配置
-curriculum_config:
-  curriculum:
-    enabled: true
-    start_partitions: 2
-    end_partitions: 5
-    episodes_per_stage: 200
-    strategy: linear
-    success_threshold: 0.8
-
 # ==================== 增强奖励预设配置 ====================
-# 增强奖励训练配置
+# 增强奖励训练配置（推荐）
 enhanced_rewards_training:
   training:
     mode: enhanced_rewards
@@ -423,67 +355,22 @@ enhanced_rewards_training:
     metrics_save_interval: 25
     plot_save_interval: 50
 
-# 第一阶段测试配置：仅启用稠密奖励
-stage1_dense_rewards:
-  environment:
-    reward_weights:
-      use_enhanced_rewards: true
-      enhanced_config:
-        enable_dense_rewards: true
-        enable_exploration_bonus: false
-        enable_potential_shaping: false
-        enable_adaptive_weights: false
+# 并行训练专用配置
+parallel_training_config:
+  parallel_training:
+    <<: *parallel_base
+    enabled: true
   scenario_generation:
-    enabled: true               # 启用场景生成
+    <<: *scenario_base
+    perturb_prob: 0.8
 
-# 第二阶段测试配置：启用稠密奖励 + 探索
-stage2_smart_exploration:
-  environment:
-    reward_weights:
-      use_enhanced_rewards: true
-      enhanced_config:
-        enable_dense_rewards: true
-        enable_exploration_bonus: true
-        enable_potential_shaping: true
-        enable_adaptive_weights: false
-  scenario_generation:
-    enabled: true               # 启用场景生成
+# 课程学习专用配置
+curriculum_config:
+  curriculum:
+    <<: *curriculum_base
+    enabled: true
 
-# 第三阶段测试配置：启用所有功能
-stage3_adaptive_physics:
-  environment:
-    reward_weights:
-      use_enhanced_rewards: true
-      enhanced_config:
-        enable_dense_rewards: true
-        enable_exploration_bonus: true
-        enable_potential_shaping: true
-        enable_adaptive_weights: true
-        episode_count: 0  # 将在训练过程中动态更新
-  scenario_generation:
-    enabled: true               # 启用场景生成
 
-# ==================== 超参数搜索范围 ====================
-hyperparameter_ranges:
-  agent:
-    lr_actor: [1.0e-5, 1.0e-3]
-    lr_critic: [1.0e-4, 1.0e-2]
-    gamma: [0.95, 0.999]
-    eps_clip: [0.1, 0.3]
-    entropy_coef: [0.001, 0.1]
-    hidden_dim: [128, 512]
-  
-  gat:
-    hidden_channels: [32, 128]
-    gnn_layers: [2, 5]
-    heads: [2, 8]
-    dropout: [0.0, 0.3]
-    
-  environment:
-    reward_weights:
-      load_balance: [0.2, 0.6]
-      electrical_decoupling: [0.2, 0.6]
-      power_balance: [0.1, 0.4]
 
 # ==================== 调试配置 ====================
 debug:

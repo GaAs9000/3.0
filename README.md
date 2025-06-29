@@ -14,12 +14,6 @@ pip install pandapower networkx plotly seaborn  # 可选依赖
 ### 立即开始训练
 
 ```bash
-# 快速测试（5分钟）
-python train.py --mode quick
-
-# 标准训练（30分钟）
-python train.py --mode standard
-
 # 增强奖励训练（推荐）
 python train.py --config enhanced_rewards_training
 
@@ -33,20 +27,8 @@ python train.py --mode ieee118
 ### 模型评估测试
 
 ```bash
-# 快速A/B测试对比
-python test.py --mode ab_test
-
-# 奖励函数深度分析
-python test.py --mode reward_analysis
-
-# 性能分析评估
-python test.py --mode performance
-
-# 完整评估流程（推荐）
+# 完整评估流程（包含所有测试对比）
 python test.py --mode full
-
-# 指定模型路径评估
-python test.py --mode full --model checkpoints/best_model.pth
 ```
 
 ## 📋 系统架构
@@ -60,35 +42,21 @@ python test.py --mode full --model checkpoints/best_model.pth
 
 | 模式 | 训练时间 | 回合数 | 适用场景 | 特色功能 |
 |------|----------|--------|----------|----------|
-| `quick` | 5分钟 | 100 | 功能验证、快速测试 | 轻量化配置 |
-| `standard` | 30分钟 | 1000 | 日常研究、算法验证 | 平衡性能与时间 |
 | `enhanced_rewards_training` | 45分钟 | 1500 | **推荐模式**、高质量训练 | 三阶段增强奖励 |
 | `full` | 2-4小时 | 5000 | 高质量结果、论文实验 | 完整训练流程 |
 | `ieee118` | 4-8小时 | 3000 | 大规模系统测试 | 并行+场景生成 |
 
-### 评估模式对比
+### 评估模式
 
 | 模式 | 评估时间 | 功能 | 适用场景 | 输出结果 |
 |------|----------|------|----------|----------|
-| `ab_test` | 10-20分钟 | A/B测试对比 | 方法对比、基线验证 | 对比图表、统计报告 |
-| `reward_analysis` | 5-10分钟 | 奖励函数分析 | 奖励设计优化 | 组件分析、相关性图 |
-| `performance` | 15-30分钟 | 性能分析 | 系统优化、扩展性测试 | 性能指标、可扩展性图 |
-| `full` | 30-60分钟 | **完整评估流程** | 论文实验、系统验证 | 综合HTML报告 |
+| `full` | 30-60分钟 | **完整评估流程**（包含A/B测试、奖励分析、性能分析） | 论文实验、系统验证 | 综合HTML报告 |
 
 ## 🎯 增强奖励系统
 
 ### 三阶段训练流程
 
 ```bash
-# 第一阶段：稠密奖励（解决稀疏奖励问题）
-python train.py --config stage1_dense_rewards
-
-# 第二阶段：智能探索（平衡探索与利用）
-python train.py --config stage2_smart_exploration
-
-# 第三阶段：自适应物理约束（融入领域知识）
-python train.py --config stage3_adaptive_physics
-
 # 完整三阶段训练（推荐）
 python train.py --config enhanced_rewards_training
 ```
@@ -103,60 +71,21 @@ python train.py --config enhanced_rewards_training
 
 ## 🔧 参数配置
 
-### 训练参数
-
 ```bash
 # 指定电力系统算例
-python train.py --mode standard --case ieee30 --partitions 5
+python train.py --config enhanced_rewards_training --case ieee30 --partitions 5
 
 # 调整训练参数
-python train.py --mode standard --episodes 2000 --lr 0.001
-
-# 启用并行训练
-python train.py --mode parallel --workers 8
+python train.py --mode full --episodes 3000 --lr 0.001
 
 # 保存训练结果
-python train.py --mode standard --save-results --output-dir my_experiment
-```
+python train.py --config enhanced_rewards_training --save-results
 
-### 评估参数
-
-```bash
-# 指定测试案例和回合数
-python test.py --mode full --case ieee30 --episodes 100
-
-# 指定模型路径进行评估
-python test.py --mode ab_test --model checkpoints/ieee30_model.pth
-
-# 自定义输出目录
+# 完整评估（包含所有测试对比）
 python test.py --mode full --output-dir my_evaluation
-
-# 生成简化报告（无可视化）
-python test.py --mode performance --no-viz --no-report
 ```
 
 ## 🔄 完整工作流程
-
-### 典型研究流程
-
-```bash
-# 1️⃣ 第一步：快速验证系统功能
-python train.py --mode quick --case ieee14
-python test.py --mode ab_test --case ieee14
-
-# 2️⃣ 第二步：标准训练获得基线模型
-python train.py --mode standard --case ieee30 --save-results
-
-# 3️⃣ 第三步：增强奖励训练优化性能
-python train.py --config enhanced_rewards_training --case ieee30 --save-results
-
-# 4️⃣ 第四步：完整评估对比分析
-python test.py --mode full --case ieee30 --model checkpoints/enhanced_model.pth
-
-# 5️⃣ 第五步：大规模系统验证
-python train.py --mode ieee118 --save-results
-python test.py --mode performance --case ieee118
-```
 
 ### 🎯 推荐的一站式命令
 
@@ -164,7 +93,7 @@ python test.py --mode performance --case ieee118
 # 🚀 训练：使用增强奖励系统进行高质量训练
 python train.py --config enhanced_rewards_training --save-results
 
-# 🧪 评估：完整评估流程生成综合报告
+# 🧪 评估：完整评估流程（包含A/B测试、奖励分析、性能分析）
 python test.py --mode full --output-dir evaluation_results
 
 # 📊 结果：查看生成的HTML报告
@@ -173,11 +102,11 @@ python test.py --mode full --output-dir evaluation_results
 
 ### 💡 使用建议
 
-1. **新手用户**：先运行 `quick` 模式熟悉系统
-2. **研究人员**：使用 `enhanced_rewards_training` + `full` 评估
-3. **工程应用**：使用 `ieee118` 模式测试大规模性能
-4. **方法对比**：重点使用 `ab_test` 模式进行基线对比
-5. **系统优化**：使用 `performance` 模式分析瓶颈
+1. **日常研究**：使用 `enhanced_rewards_training` 获得高质量结果
+2. **完整评估**：使用 `test.py --mode full` 包含所有测试对比功能
+3. **大规模验证**：使用 `ieee118` 模式测试大规模性能
+
+详细使用说明请参考 [USAGE.md](USAGE.md)
 
 ## 📁 项目结构
 
