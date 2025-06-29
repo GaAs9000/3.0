@@ -8,7 +8,7 @@ system:
   description: "电力网络分区强化学习统一训练系统"
   device: auto          # 设备选择 ('cpu', 'cuda', 或 'auto')
   seed: 42              # 随机种子
-  num_threads: 12        # CPU线程数
+  num_threads: 18        # CPU线程数
   warnings: ignore      # 警告处理方式
 
 # ==================== 数据配置 ====================
@@ -492,6 +492,17 @@ debug:
   save_intermediate_results: false
   profile_training: false
   memory_monitoring: false
+
+  # 训练输出控制 - 美化终端输出
+  training_output:
+    show_cache_loading: false      # 是否显示缓存加载信息
+    show_attention_collection: false  # 是否显示注意力权重收集信息
+    show_state_manager_details: false # 是否显示StateManager详细信息
+    show_metis_details: false     # 是否显示METIS分区详细信息
+    show_scenario_generation: false   # 是否显示场景生成信息
+    only_show_errors: true        # 只显示报错和进度条（推荐设置）
+    use_rich_output: true         # 使用 Rich 库美化输出
+    show_training_summary: true   # 显示训练摘要表格
 
   # 奖励调试
   reward_debugging:

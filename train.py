@@ -183,7 +183,8 @@ def load_from_pandapower(case_name: str) -> Dict:
 
     # 加载PandaPower网络
     net = case_mapping[case_name]()
-    print(f"✅ 成功加载 {case_name.upper()}: {len(net.bus)} 节点, {len(net.line)} 线路")
+    from rich_output import rich_success
+    rich_success(f"成功加载 {case_name.upper()}: {len(net.bus)} 节点, {len(net.line)} 线路")
 
     # 转换为MATPOWER格式
     mpc = convert_pandapower_to_matpower(net)
@@ -324,7 +325,17 @@ class TrainingLogger:
         log_config = config.get('logging', {})
         self.metrics_save_interval = log_config.get('metrics_save_interval', 100)
 
-        self.progress_bar = tqdm(total=total_episodes, desc="🚀 训练进度")
+        # 导入并设置 Rich 输出管理器
+        try:
+            from rich_output import set_output_manager, rich_progress
+            set_output_manager(config)
+            self.progress_bar = rich_progress("🚀 训练进度", total_episodes)
+            self.progress_bar.__enter__()  # 启动进度条
+            self.use_rich = True
+        except ImportError:
+            from tqdm import tqdm
+            self.progress_bar = tqdm(total=total_episodes, desc="🚀 训练进度")
+            self.use_rich = False
 
         # 设置TensorBoard
         self.use_tensorboard = log_config.get('use_tensorboard', False)
@@ -345,9 +356,11 @@ class TrainingLogger:
                 config=self.config, # 记录所有超参数
                 reinit=True
             )
-            print(f"   - W&B: ✅ (项目: {wandb.run.project}, 名称: {wandb.run.name})")
+            from rich_output import rich_success
+            rich_success(f"W&B: 项目: {wandb.run.project}, 名称: {wandb.run.name}")
         except Exception as e:
-            print(f"   - W&B: ❌ 初始化失败: {e}")
+            from rich_output import rich_error
+            rich_error(f"W&B: 初始化失败: {e}")
             self.use_wandb = False
 
     def _setup_tensorboard(self):
@@ -357,14 +370,17 @@ class TrainingLogger:
             log_dir = self.config['logging']['log_dir']
             timestamp = time.strftime('%Y%m%d_%H%M%S')
             tensorboard_writer = SummaryWriter(f"{log_dir}/training_{timestamp}")
-            print(f"📊 TensorBoard日志目录: {log_dir}/training_{timestamp}")
+            from rich_output import rich_info
+            rich_info(f"TensorBoard日志目录: {log_dir}/training_{timestamp}", show_always=True)
             return tensorboard_writer
         except ImportError:
-            print("⚠️ TensorBoard不可用，跳过TensorBoard日志")
+            from rich_output import rich_warning
+            rich_warning("TensorBoard不可用，跳过TensorBoard日志")
             self.use_tensorboard = False
             return None
         except Exception as e:
-            print(f"⚠️ TensorBoard初始化失败: {e}")
+            from rich_output import rich_warning
+            rich_warning(f"TensorBoard初始化失败: {e}")
             self.use_tensorboard = False
             return None
 
@@ -377,11 +393,14 @@ class TrainingLogger:
             self.best_reward = reward
 
         # 更新进度条
-        self.progress_bar.update(1)
-        self.progress_bar.set_postfix({
-            "奖励": f"{reward:.2f}",
-            "最佳": f"{self.best_reward:.2f}"
-        })
+        if self.use_rich:
+            self.progress_bar.update(1, 奖励=f"{reward:.2f}", 最佳=f"{self.best_reward:.2f}")
+        else:
+            self.progress_bar.update(1)
+            self.progress_bar.set_postfix({
+                "奖励": f"{reward:.2f}",
+                "最佳": f"{self.best_reward:.2f}"
+            })
 
         # 记录额外信息
         if info:
@@ -474,7 +493,10 @@ class TrainingLogger:
 
     def close(self):
         """关闭日志记录器"""
-        self.progress_bar.close()
+        if self.use_rich:
+            self.progress_bar.__exit__(None, None, None)
+        else:
+            self.progress_bar.close()
         if self.tensorboard_writer:
             self.tensorboard_writer.close()
         if self.use_wandb:
@@ -501,9 +523,10 @@ class UnifiedTrainer:
         """训练智能体"""
         self.logger = TrainingLogger(self.config, num_episodes)
 
-        print(f"📊 监控信息:")
-        print(f"   - TensorBoard: {'✅' if self.logger.use_tensorboard else '❌'}")
-        print(f"   - 指标保存间隔: {self.logger.metrics_save_interval} 回合")
+        from rich_output import rich_info
+        if not self.config.get('debug', {}).get('training_output', {}).get('only_show_errors', True):
+            rich_info(f"TensorBoard: {'已启用' if self.logger.use_tensorboard else '已禁用'}")
+            rich_info(f"指标保存间隔: {self.logger.metrics_save_interval} 回合")
 
         for episode in range(num_episodes):
             # 如果使用场景生成环境，需要重置Gym环境以生成新场景
@@ -670,11 +693,13 @@ class UnifiedTrainer:
         """运行最终可视化"""
         try:
             from visualization import VisualizationManager
+            from rich_output import rich_success
             viz = VisualizationManager(self.config)
             viz.visualize_partition(self.env, title="Final Partition")
-            print("✅ 可视化完成")
+            rich_success("可视化完成")
         except Exception as e:
-            print(f"⚠️ 可视化失败: {e}")
+            from rich_output import rich_warning
+            rich_warning(f"可视化失败: {e}")
 
     def close(self):
         """清理资源"""
@@ -699,14 +724,16 @@ class UnifiedTrainingSystem:
             default_config_path = 'config.yaml'
             if os.path.exists(default_config_path):
                 config_path = default_config_path
-                print(f"📄 使用默认配置文件: {config_path}")
+                from rich_output import rich_info
+                rich_info(f"使用默认配置文件: {config_path}")
 
         # 检查是否是文件路径
         if config_path and os.path.exists(config_path):
             with open(config_path, 'r', encoding='utf-8') as f:
                 config = yaml.safe_load(f)
-                print(f"✅ 配置文件加载成功: {config_path}")
-                print(f"📊 案例名称: {config['data']['case_name']}")
+                from rich_output import rich_success, rich_info
+                rich_success(f"配置文件加载成功: {config_path}")
+                rich_info(f"案例名称: {config['data']['case_name']}", show_always=True)
                 return config
 
         # 检查是否是预设配置名称
@@ -716,18 +743,21 @@ class UnifiedTrainingSystem:
 
                 # 检查是否存在预设配置
                 if config_path in base_config:
-                    print(f"✅ 使用预设配置: {config_path}")
+                    from rich_output import rich_success, rich_info
+                    rich_success(f"使用预设配置: {config_path}")
                     preset_config = base_config[config_path]
 
                     # 深度合并预设配置到基础配置
                     merged_config = self._deep_merge_config(base_config, preset_config)
-                    print(f"📊 案例名称: {merged_config['data']['case_name']}")
+                    rich_info(f"案例名称: {merged_config['data']['case_name']}", show_always=True)
                     return merged_config
                 else:
-                    print(f"⚠️ 未找到预设配置 '{config_path}'，使用默认配置")
+                    from rich_output import rich_warning
+                    rich_warning(f"未找到预设配置 '{config_path}'，使用默认配置")
                     return base_config
         else:
-            print("⚠️ 未找到配置文件，使用默认配置")
+            from rich_output import rich_warning
+            rich_warning("未找到配置文件，使用默认配置")
             return self._create_default_config()
 
     def _deep_merge_config(self, base_config: Dict[str, Any], preset_config: Dict[str, Any]) -> Dict[str, Any]:
@@ -997,7 +1027,7 @@ class UnifiedTrainingSystem:
         # 加载数据
         mpc = load_power_grid_data(config['data']['case_name'])
 
-        hetero_data = processor.graph_from_mpc(mpc).to(self.device)
+        hetero_data = processor.graph_from_mpc(mpc, config).to(self.device)
         print(f"✅ 数据加载完成: {hetero_data}")
 
         # 2. GAT编码器
@@ -1012,7 +1042,7 @@ class UnifiedTrainingSystem:
         ).to(self.device)
 
         with torch.no_grad():
-            node_embeddings, attention_weights = encoder.encode_nodes_with_attention(hetero_data)
+            node_embeddings, attention_weights = encoder.encode_nodes_with_attention(hetero_data, config)
 
         print(f"✅ 编码器初始化完成")
 
@@ -1059,7 +1089,8 @@ class UnifiedTrainingSystem:
                 reward_weights=env_config['reward_weights'],
                 max_steps=env_config['max_steps'],
                 device=self.device,
-                attention_weights=attention_weights
+                attention_weights=attention_weights,
+                config=config
             )
 
             print(f"✅ 标准环境创建完成: {env.total_nodes}节点, {env.num_partitions}分区")

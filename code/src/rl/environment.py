@@ -32,7 +32,8 @@ class PowerGridPartitioningEnv:
                  reward_weights: Dict[str, float] = None,
                  max_steps: int = 200,
                  device: torch.device = None,
-                 attention_weights: Dict[str, torch.Tensor] = None):
+                 attention_weights: Dict[str, torch.Tensor] = None,
+                 config: Dict[str, Any] = None):
         """
         初始化电力网络分割环境
 
@@ -44,11 +45,13 @@ class PowerGridPartitioningEnv:
             max_steps: 每个回合的最大步数
             device: 用于计算的Torch设备
             attention_weights: GAT编码器注意力权重，用于增强嵌入
+            config: 配置字典，用于控制输出详细程度
         """
         self.device = device or torch.device('cpu')
         self.hetero_data = hetero_data.to(self.device)
         self.num_partitions = num_partitions
         self.max_steps = max_steps
+        self.config = config
 
         # 生成增强的节点嵌入（如果提供了注意力权重）
         enhanced_embeddings = self._generate_enhanced_embeddings(
@@ -56,7 +59,7 @@ class PowerGridPartitioningEnv:
         ) if attention_weights else node_embeddings
 
         # 初始化核心组件
-        self.state_manager = StateManager(hetero_data, enhanced_embeddings, device)
+        self.state_manager = StateManager(hetero_data, enhanced_embeddings, device, config)
         self.action_space = ActionSpace(hetero_data, num_partitions, device)
 
         # 【新增】增强奖励函数支持
@@ -77,7 +80,7 @@ class PowerGridPartitioningEnv:
             # 保持原有的增量奖励机制
             self.reward_function = None
 
-        self.metis_initializer = MetisInitializer(hetero_data, device)
+        self.metis_initializer = MetisInitializer(hetero_data, device, config)
         self.evaluator = PartitionEvaluator(hetero_data, device)
 
         # 【保留】用于存储上一步的指标，实现增量奖励

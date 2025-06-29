@@ -55,7 +55,7 @@ class PowerGridPartitionGymEnv(gym.Env):
         # 初始化场景生成器（如果启用）
         self.use_scenario_generator = use_scenario_generator
         if use_scenario_generator:
-            self.scenario_generator = ScenarioGenerator(base_case_data, scenario_seed)
+            self.scenario_generator = ScenarioGenerator(base_case_data, scenario_seed, config)
         
         # 环境参数
         self.num_partitions = config['environment']['num_partitions']
@@ -125,7 +125,7 @@ class PowerGridPartitionGymEnv(gym.Env):
             current_case = self.base_case
         
         # 将案例转换为异构图
-        self.current_hetero_data = self.processor.graph_from_mpc(current_case).to(self.device)
+        self.current_hetero_data = self.processor.graph_from_mpc(current_case, self.config).to(self.device)
         
         # 使用GAT编码器生成节点嵌入
         # 过滤掉不支持的参数
@@ -140,7 +140,7 @@ class PowerGridPartitionGymEnv(gym.Env):
         
         with torch.no_grad():
             self.current_node_embeddings, self.current_attention_weights = \
-                encoder.encode_nodes_with_attention(self.current_hetero_data)
+                encoder.encode_nodes_with_attention(self.current_hetero_data, self.config)
         
         # 创建内部环境
         self.internal_env = PowerGridPartitioningEnv(
@@ -150,7 +150,8 @@ class PowerGridPartitionGymEnv(gym.Env):
             reward_weights=self.reward_weights,
             max_steps=self.max_steps,
             device=self.device,
-            attention_weights=self.current_attention_weights
+            attention_weights=self.current_attention_weights,
+            config=self.config
         )
         
         # 重置内部环境
@@ -261,7 +262,7 @@ class PowerGridPartitionGymEnv(gym.Env):
             np.random.seed(seed)
             torch.manual_seed(seed)
             if self.scenario_generator is not None:
-                self.scenario_generator = ScenarioGenerator(self.base_case, seed)
+                self.scenario_generator = ScenarioGenerator(self.base_case, seed, self.config)
         return [seed]
 
 

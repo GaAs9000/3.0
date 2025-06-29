@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import torch
 from torch_geometric.data import HeteroData
-from typing import Dict, Tuple, List, Optional
+from typing import Dict, Tuple, List, Optional, Any
 from sklearn.preprocessing import StandardScaler, RobustScaler
 import hashlib
 import pickle
@@ -36,16 +36,22 @@ class PowerGridDataProcessor:
         self.BUS_TYPE_MAP = {1: 'pq', 2: 'pv', 3: 'slack'}
         self.BRANCH_TYPE_MAP = {0: 'line', 1: 'transformer'}
 
-    def graph_from_mpc(self, mpc: Dict) -> HeteroData:
+    def graph_from_mpc(self, mpc: Dict, config: Dict[str, Any] = None) -> HeteroData:
         """
         将MATPOWER格式数据转换为简化的PyTorch Geometric异构图数据 (HeteroData)
-        
+
         参数:
             mpc: MATPOWER格式的电网数据字典
-            
+            config: 配置字典，用于控制输出详细程度
+
         返回:
             data: 简化的PyTorch Geometric HeteroData对象
         """
+        # 获取调试配置
+        debug_config = config.get('debug', {}) if config else {}
+        training_output = debug_config.get('training_output', {})
+        show_cache_loading = training_output.get('show_cache_loading', True)
+        only_show_errors = training_output.get('only_show_errors', False)
         # 1. 计算数据哈希用于缓存 (文件名中加入v3后缀以区分新版本)
         raw_bytes = pickle.dumps((mpc["bus"].tolist(), mpc["branch"].tolist()))
         case_hash = hashlib.md5(raw_bytes).hexdigest()[:8]
@@ -63,30 +69,53 @@ class PowerGridDataProcessor:
                     wait_count += 1
                 
                 if os.path.exists(cache_file):
-                    print(f"📂 从缓存加载简化异构图: {cache_file}")
+                    if show_cache_loading and not only_show_errors:
+                        try:
+                            from rich_output import rich_debug
+                            rich_debug(f"从缓存加载简化异构图: {cache_file}", "cache")
+                        except ImportError:
+                            pass
                     return torch.load(cache_file, map_location="cpu", weights_only=False)
             except Exception as e:
-                print(f"⚠️ 缓存加载失败: {e}，重新构建...")
+                try:
+                    from rich_output import rich_warning
+                    rich_warning(f"缓存加载失败: {e}，重新构建...")
+                except ImportError:
+                    print(f"⚠️ 缓存加载失败: {e}，重新构建...")
         
         # 3. 首次构建简化异构图数据
-        print(f"🔨 首次构建简化异构图数据...")
+        if not only_show_errors:
+            try:
+                from rich_output import rich_debug
+                rich_debug("首次构建简化异构图数据...", "cache")
+            except ImportError:
+                pass
         baseMVA, df_nodes, df_edges, df_edge_features = self._process_matpower_data(mpc)
         data = self._create_simplified_hetero_data(df_nodes, df_edges, df_edge_features)
-        
+
         # 4. 保存到缓存（带进程锁保护）
         try:
             # 创建锁文件
             with open(lock_file, 'w') as f:
                 f.write(str(os.getpid()))
-            
+
             torch.save(data, cache_file, pickle_protocol=pickle.DEFAULT_PROTOCOL)
-            print(f"💾 已缓存简化异构图到: {cache_file}")
+            if not only_show_errors:
+                try:
+                    from rich_output import rich_debug
+                    rich_debug(f"已缓存简化异构图到: {cache_file}", "cache")
+                except ImportError:
+                    pass
             
             # 删除锁文件
             if os.path.exists(lock_file):
                 os.remove(lock_file)
         except Exception as e:
-            print(f"⚠️ 缓存保存失败: {e}")
+            try:
+                from rich_output import rich_warning
+                rich_warning(f"缓存保存失败: {e}")
+            except ImportError:
+                print(f"⚠️ 缓存保存失败: {e}")
             if os.path.exists(lock_file):
                 os.remove(lock_file)
         
@@ -175,7 +204,11 @@ class PowerGridDataProcessor:
         data = HeteroData()
         
         # --- 1. 处理节点：统一类型 + 独热编码 ---
-        print(f"🔍 节点类型分布: {df_nodes['bus_type'].value_counts().to_dict()}")
+        try:
+            from rich_output import rich_debug
+            rich_debug(f"节点类型分布: {df_nodes['bus_type'].value_counts().to_dict()}", "cache")
+        except ImportError:
+            pass
         
         # 创建bus_type的独热编码
         bus_type_dummies = pd.get_dummies(df_nodes['bus_type'], prefix='type')
@@ -207,13 +240,21 @@ class PowerGridDataProcessor:
         data['bus'].feature_names = feature_names
         data['bus'].feature_index_map = feature_index_map
         
-        print(f"  📍 bus: {len(df_nodes)} 个节点，特征维度: {combined_features.shape[1]}")
-        print(f"    - 原始数值特征: {original_features.shape[1]}")
-        print(f"    - 独热编码类型特征: {bus_type_dummies.shape[1]}")
-        print(f"    - 特征顺序: {feature_names}")
+        try:
+            from rich_output import rich_debug
+            rich_debug(f"bus: {len(df_nodes)} 个节点，特征维度: {combined_features.shape[1]}", "cache")
+            rich_debug(f"原始数值特征: {original_features.shape[1]}", "cache")
+            rich_debug(f"独热编码类型特征: {bus_type_dummies.shape[1]}", "cache")
+            rich_debug(f"特征顺序: {feature_names}", "cache")
+        except ImportError:
+            pass
         
         # --- 2. 处理边：统一关系类型 ---
-        print(f"🔗 边类型分布: is_transformer = {df_edge_features['is_transformer'].value_counts().to_dict()}")
+        try:
+            from rich_output import rich_debug
+            rich_debug(f"边类型分布: is_transformer = {df_edge_features['is_transformer'].value_counts().to_dict()}", "cache")
+        except ImportError:
+            pass
         
         # 构建边索引张量
         edge_index = torch.tensor(df_edges[['from_bus', 'to_bus']].values.T, dtype=torch.long)
@@ -231,17 +272,29 @@ class PowerGridDataProcessor:
         data['bus', 'connects', 'bus'].edge_feature_names = edge_feature_names
         data['bus', 'connects', 'bus'].edge_feature_index_map = edge_feature_index_map
         
-        print(f"  🔗 ('bus', 'connects', 'bus'): {edge_index.shape[1]} 条边，特征维度: {edge_attr.shape[1]}")
-        print(f"    - 边特征顺序: {edge_feature_names}")
+        try:
+            from rich_output import rich_debug
+            rich_debug(f"('bus', 'connects', 'bus'): {edge_index.shape[1]} 条边，特征维度: {edge_attr.shape[1]}", "cache")
+            rich_debug(f"边特征顺序: {edge_feature_names}", "cache")
+        except ImportError:
+            pass
         
         # --- 3. 创建无向图 ---
         try:
             from torch_geometric.transforms import ToUndirected
             data = ToUndirected()(data)
-            print("✅ 成功创建无向简化异构图")
-            print(f"  🔗 无向化后边数: {data['bus', 'connects', 'bus'].edge_index.shape[1]}")
+            try:
+                from rich_output import rich_success, rich_debug
+                rich_success("成功创建无向简化异构图")
+                rich_debug(f"无向化后边数: {data['bus', 'connects', 'bus'].edge_index.shape[1]}", "cache")
+            except ImportError:
+                pass
         except Exception as e:
-            print(f"⚠️ 警告：无法使用ToUndirected转换: {e}")
+            try:
+                from rich_output import rich_warning
+                rich_warning(f"无法使用ToUndirected转换: {e}")
+            except ImportError:
+                print(f"⚠️ 警告：无法使用ToUndirected转换: {e}")
 
         return data
 

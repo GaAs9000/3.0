@@ -10,7 +10,7 @@
 
 import torch
 import numpy as np
-from typing import Dict, List, Tuple, Optional, Set
+from typing import Dict, List, Tuple, Optional, Set, Any
 from torch_geometric.data import HeteroData
 
 
@@ -27,28 +27,35 @@ class StateManager:
     4. 区域聚合嵌入 - 每个区域的均值/最大池化嵌入
     """
     
-    def __init__(self, 
+    def __init__(self,
                  hetero_data: HeteroData,
                  node_embeddings: Dict[str, torch.Tensor],
-                 device: torch.device):
+                 device: torch.device,
+                 config: Dict[str, Any] = None):
         """
         初始化状态管理器
-        
+
         Args:
             hetero_data: 异构图数据
             node_embeddings: 来自GAT编码器的预计算节点嵌入
                            - 可能是原始嵌入H，也可能是增强嵌入H' = concat(H, H_attn)
                            - 具体取决于Environment是否提供了注意力权重
             device: 计算设备
+            config: 配置字典，用于控制输出详细程度
         """
         self.device = device
         self.hetero_data = hetero_data.to(device)
-        
+        self.config = config
+
+        # 获取调试配置
+        debug_config = config.get('debug', {}) if config else {}
+        self.training_output = debug_config.get('training_output', {})
+
         # 设置节点映射和嵌入
         self._setup_node_mappings()
         self._setup_node_embeddings(node_embeddings)
         self._setup_adjacency_info()
-        
+
         # 状态变量
         self.current_partition = None
         self.boundary_nodes = None
@@ -99,10 +106,14 @@ class StateManager:
         self.embedding_dim = self.node_embeddings.shape[1]
         
         # 记录嵌入维度信息（用于调试）
-        print(f"🔧 StateManager: 设置节点嵌入矩阵，形状 {self.node_embeddings.shape}")
-        print(f"   - 总节点数: {self.total_nodes}")
-        print(f"   - 嵌入维度: {self.embedding_dim}")
-        print(f"   - 注意：此嵌入可能包含GAT原始嵌入 + 注意力增强信息")
+        show_state_manager_details = self.training_output.get('show_state_manager_details', True)
+        only_show_errors = self.training_output.get('only_show_errors', False)
+
+        if show_state_manager_details and not only_show_errors:
+            print(f"🔧 StateManager: 设置节点嵌入矩阵，形状 {self.node_embeddings.shape}")
+            print(f"   - 总节点数: {self.total_nodes}")
+            print(f"   - 嵌入维度: {self.embedding_dim}")
+            print(f"   - 注意：此嵌入可能包含GAT原始嵌入 + 注意力增强信息")
         
     def _setup_adjacency_info(self):
         """设置用于边界节点计算的邻接信息"""

@@ -212,6 +212,7 @@ python test.py --mode full --output-dir evaluation_results
 - **📈 深度分析**：奖励函数和性能的全面分析
 - **🔧 易于使用**：简洁的命令行接口
 - **📋 完整评估**：从训练到评估的全流程支持
+- **🎨 美化输出**：使用 Rich 库提供彩色进度条和优雅的终端显示
 
 ## 📞 技术支持
 
@@ -219,6 +220,45 @@ python test.py --mode full --output-dir evaluation_results
 1. 依赖安装是否完整：`python train.py --check-deps`
 2. 配置文件是否正确：`config.yaml`
 3. 数据缓存是否正常：`cache/` 目录
+
+## 🎨 终端输出美化
+
+### 输出控制功能
+
+系统使用 **Rich** 库提供美化的终端输出，支持：
+- 🌈 **彩色进度条**：实时显示训练进度和关键指标
+- 📊 **格式化表格**：优雅展示训练摘要和评估结果
+- ⚡ **智能过滤**：只显示重要信息，减少终端冗余输出
+
+### 快速配置
+
+**🔥 推荐设置**（只显示报错和进度条）：
+```yaml
+# config.yaml
+debug:
+  training_output:
+    only_show_errors: true    # 简洁模式，只显示关键信息
+    use_rich_output: true     # 启用彩色美化输出
+```
+
+**🔍 调试设置**（显示详细信息）：
+```yaml
+# config.yaml  
+debug:
+  training_output:
+    only_show_errors: false           # 显示所有信息
+    show_attention_collection: true   # 显示GAT注意力收集过程
+    show_scenario_generation: true    # 显示场景生成详情
+    show_cache_loading: true          # 显示数据缓存过程
+```
+
+### 使用建议
+
+| 场景 | 设置 | 效果 |
+|------|------|------|
+| **日常训练** | `only_show_errors: true` | 干净整洁，只显示进度条和错误 |
+| **问题调试** | `only_show_errors: false` | 显示详细调试信息 |
+| **性能监控** | 保持默认设置 | 平衡信息量和可读性 |
 
 ---
 

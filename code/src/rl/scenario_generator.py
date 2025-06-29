@@ -1,7 +1,7 @@
 import random
 import numpy as np
 import copy
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Any
 
 
 class ScenarioGenerator:
@@ -9,16 +9,23 @@ class ScenarioGenerator:
     电力网络场景生成器
     用于生成多样化的训练场景，提高智能体的鲁棒性
     """
-    
-    def __init__(self, base_case: Dict, seed: Optional[int] = None):
+
+    def __init__(self, base_case: Dict, seed: Optional[int] = None, config: Optional[Dict] = None):
         """
         初始化场景生成器
-        
+
         Args:
             base_case: 基础案例数据（MATPOWER格式）
             seed: 随机种子
+            config: 配置字典，用于控制输出详细程度
         """
         self.base_case = base_case
+        self.config = config
+
+        # 获取调试配置
+        debug_config = config.get('debug', {}) if config else {}
+        self.training_output = debug_config.get('training_output', {})
+
         if seed is not None:
             random.seed(seed)
             np.random.seed(seed)
@@ -74,7 +81,13 @@ class ScenarioGenerator:
             # 随机选择一条线路断开
             idx = random.choice(active_indices)
             all_branches[idx, 10] = 0  # 设置线路状态为0（断开）
-            print(f"🔧 N-1故障：断开线路 {idx} (从母线 {int(all_branches[idx, 0])} 到 {int(all_branches[idx, 1])})")
+
+            # 根据配置决定是否显示详细信息
+            show_scenario_generation = self.training_output.get('show_scenario_generation', True)
+            only_show_errors = self.training_output.get('only_show_errors', False)
+
+            if show_scenario_generation and not only_show_errors:
+                print(f"🔧 N-1故障：断开线路 {idx} (从母线 {int(all_branches[idx, 0])} 到 {int(all_branches[idx, 1])})")
     
     def _apply_injection_perturbation(self, case_data: Dict, 
                                     scale_range: tuple = (0.8, 1.2)):
@@ -100,8 +113,13 @@ class ScenarioGenerator:
             pmax = case_data['gen'][:, 8]
             # 确保不超过Pmax限制
             case_data['gen'][:, 1] = np.minimum(orig_pg * scale, pmax)
-            
-        print(f"🔧 注入扰动：缩放因子 = {scale:.3f}")
+
+        # 根据配置决定是否显示详细信息
+        show_scenario_generation = self.training_output.get('show_scenario_generation', True)
+        only_show_errors = self.training_output.get('only_show_errors', False)
+
+        if show_scenario_generation and not only_show_errors:
+            print(f"🔧 注入扰动：缩放因子 = {scale:.3f}")
     
     def generate_batch_scenarios(self, 
                                num_scenarios: int,
