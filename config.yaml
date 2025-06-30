@@ -57,8 +57,8 @@ environment:
   
   # 奖励组件权重
   reward_weights:
-    # 奖励模式选择: 'legacy' (原有), 'enhanced' (增强), 'dual_layer' (双层)
-    reward_mode: legacy
+    # 奖励模式选择: 'legacy' (原有), 'dual_layer' (新奖励系统)
+    reward_mode: dual_layer
 
     # 基础奖励权重（legacy模式）
     load_balance: 0.4           # 负载平衡权重
@@ -91,32 +91,7 @@ environment:
       excellent_power: 10.0     # 卓越功率不平衡阈值(%)
       good_power: 50.0         # 良好功率不平衡阈值(%)
 
-    # 增强奖励系统配置（enhanced模式）
-    use_enhanced_rewards: false  # 是否启用增强奖励系统（向后兼容）
 
-    enhanced_config:
-      # 第一阶段：稠密奖励
-      enable_dense_rewards: true
-      # 第二阶段：探索奖励
-      enable_exploration_bonus: false
-      # 第二阶段：势函数塑造
-      enable_potential_shaping: false
-      # 第三阶段：自适应权重
-      enable_adaptive_weights: false
-      # 当前训练回合数（用于自适应权重）
-      episode_count: 0
-
-    # 第一阶段：稠密奖励权重
-    local_connectivity: 0.4        # 局部连通性：高权重，提供即时拓扑反馈
-    incremental_balance: 0.3       # 增量平衡：中等权重，引导负载平衡
-    boundary_compression: 0.3      # 边界压缩：中等权重，提供进度激励
-
-    # 第二阶段：探索与塑造权重
-    exploration_bonus: 0.1         # 探索奖励：低权重，避免过度探索
-    potential_shaping: 0.2         # 势函数塑造：中等权重，长期引导
-
-    # 第三阶段：物理约束权重
-    neighbor_consistency: 0.15     # 邻居一致性：中等权重，物理约束
 
 # ==================== GAT编码器配置 ====================
 gat:
@@ -248,11 +223,7 @@ logging:
     - entropies
     - explained_variance
     - approx_kl
-    # 增强奖励组件跟踪
     - reward_components
-    - local_connectivity_rewards
-    - incremental_balance_rewards
-    - boundary_compression_rewards
 
   wandb:
     enabled: true
@@ -311,18 +282,26 @@ visualization:
 
 # ==================== 预设配置 ====================
 # 完整训练配置
-full_training:
+full:
   training:
-    num_episodes: 2000
+    num_episodes: 5000
     max_steps_per_episode: 500
     update_interval: 20
     save_interval: 100
     eval_interval: 50
+    success_criteria:
+      load_cv_threshold: 0.25
+      connectivity_threshold: 0.9
+  parallel_training:
+    enabled: true               # 启用并行训练
+    num_cpus: 8
+  scenario_generation:
+    enabled: true               # 启用场景生成
   evaluation:
     num_episodes: 50
 
 # IEEE 118节点系统配置
-ieee118_training:
+ieee118:
   data:
     case_name: ieee118
   environment:
@@ -338,7 +317,7 @@ ieee118_training:
     lr_critic: 5.0e-4
     hidden_dim: 512
   training:
-    num_episodes: 5000
+    num_episodes: 3000
     max_steps_per_episode: 500
     success_criteria:
       load_cv_threshold: 0.35
@@ -354,64 +333,22 @@ ieee118_training:
       node_size_scale: 300
       font_size: 6
 
-# ==================== 奖励系统预设配置 ====================
+# ==================== 训练模式预设配置 ====================
 
-# 双层奖励训练配置（推荐）
-dual_layer_training:
+# 快速训练配置（推荐）
+fast:
   training:
-    mode: dual_layer
-    num_episodes: 1200
-    success_criteria:
-      load_cv_threshold: 0.2      # 双层奖励应该能达到更好效果
-      connectivity_threshold: 0.9
-    convergence:
-      window_size: 15             # 适应双层奖励的收敛特性
-  environment:
-    reward_weights:
-      reward_mode: dual_layer
-      dual_layer_config:
-        # 即时奖励权重 - 平衡三个指标
-        balance_weight: 1.0
-        decoupling_weight: 1.0
-        power_weight: 1.0
-        # 终局奖励权重 - 强调负载平衡和解耦
-        final_balance_weight: 0.5
-        final_decoupling_weight: 0.4
-        final_power_weight: 0.1
-      thresholds:
-        # 更严格的质量标准
-        excellent_cv: 0.08
-        good_cv: 0.15
-        excellent_coupling: 0.25
-        good_coupling: 0.4
-        excellent_power: 8.0
-        good_power: 30.0
-  scenario_generation:
-    enabled: true               # 启用场景生成
-
-# 增强奖励训练配置（向后兼容）
-enhanced_rewards_training:
-  training:
-    mode: enhanced_rewards
     num_episodes: 1500
+    max_steps_per_episode: 200
     success_criteria:
-      load_cv_threshold: 0.25     # 提高标准，因为新奖励应该能达到更好效果
+      load_cv_threshold: 0.3
       connectivity_threshold: 0.9
-    convergence:
-      window_size: 20             # 增加窗口大小以适应新奖励的波动
-  environment:
-    reward_weights:
-      use_enhanced_rewards: true
-      load_balance: 0.3           # 稍微降低基础权重，为稠密奖励让出空间
-      electrical_decoupling: 0.3
-      power_balance: 0.2
+  parallel_training:
+    enabled: false              # 快速模式不启用并行
   scenario_generation:
     enabled: true               # 启用场景生成
-    perturb_prob: 0.8           # 提高扰动概率以增强鲁棒性
-  logging:
-    console_log_interval: 5
-    metrics_save_interval: 25
-    plot_save_interval: 50
+
+
 
 # 并行训练专用配置
 parallel_training_config:
@@ -449,9 +386,3 @@ debug:
     use_rich_output: true         # 使用 Rich 库美化输出
     show_training_summary: true   # 显示训练摘要表格
 
-  # 奖励调试
-  reward_debugging:
-    enabled: false
-    log_reward_components: false
-    save_reward_breakdown: false
-    plot_reward_evolution: false

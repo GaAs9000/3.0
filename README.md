@@ -1,6 +1,6 @@
 # 🔋 电力网络分区强化学习系统
 
-基于图注意力网络(GAT)和强化学习(PPO)的电力网络智能分区系统，支持增强奖励机制和场景生成。
+基于图注意力网络(GAT)和强化学习(PPO)的电力网络智能分区系统，采用基于势函数理论的奖励机制和场景生成。
 
 ## 🚀 快速开始
 
@@ -14,11 +14,8 @@ pip install pandapower networkx plotly seaborn  # 可选依赖
 ### 立即开始训练
 
 ```bash
-# 双层奖励训练（最新推荐）
-python train.py --config dual_layer_training
-
-# 增强奖励训练
-python train.py --config enhanced_rewards_training
+# 快速训练（推荐）
+python train.py --mode fast
 
 # 完整训练（2-4小时）
 python train.py --mode full
@@ -45,27 +42,15 @@ python test.py --mode full
 
 | 模式 | 训练时间 | 回合数 | 适用场景 | 特色功能 |
 |------|----------|--------|----------|----------|
-| `dual_layer_training` | 40分钟 | 1200 | **最新推荐**、理论最优 | 双层奖励系统 |
-| `enhanced_rewards_training` | 45分钟 | 1500 | 高质量训练 | 三阶段增强奖励 |
-| `full` | 2-4小时 | 5000 | 高质量结果、论文实验 | 完整训练流程 |
-| `ieee118` | 4-8小时 | 3000 | 大规模系统测试 | 并行+场景生成 |
+| `fast` | 45分钟 | 1500 | **推荐模式**、日常训练 | 场景生成 |
+| `full` | 2-4小时 | 5000 | 高质量结果、论文实验 | 并行+场景生成 |
+| `ieee118` | 4-8小时 | 3000 | 大规模系统训练 | 并行+场景生成 |
 
-### 评估模式
 
-| 模式 | 评估时间 | 功能 | 适用场景 | 输出结果 |
-|------|----------|------|----------|----------|
-| `full` | 30-60分钟 | **完整评估流程**（包含基线对比、性能分析、可视化） | 论文实验、系统验证 | 综合HTML报告 |
 
 ## 🎯 奖励系统
 
-### 双层奖励系统（最新）
-
 基于势函数理论的双层激励结构，提供理论最优的训练效果：
-
-```bash
-# 双层奖励训练（推荐）
-python train.py --config dual_layer_training
-```
 
 **核心特性：**
 - 🔬 **理论基础**：严格遵循势函数奖励塑造理论
@@ -75,15 +60,6 @@ python train.py --config dual_layer_training
 - 📊 **详细分解**：提供奖励组件的详细分析
 
 详细说明请参考：[docs/REWARD.md](docs/REWARD.md)
-
-### 增强奖励系统
-
-三阶段训练流程，适用于复杂场景：
-
-```bash
-# 完整三阶段训练
-python train.py --config enhanced_rewards_training
-```
 
 ### 场景生成功能
 
@@ -97,13 +73,13 @@ python train.py --config enhanced_rewards_training
 
 ```bash
 # 指定电力系统算例
-python train.py --config dual_layer_training --case ieee30 --partitions 5
+python train.py --mode fast --case ieee30 --partitions 5
 
 # 调整训练参数
 python train.py --mode full --episodes 3000 --lr 0.001
 
 # 保存训练结果
-python train.py --config dual_layer_training --save-results
+python train.py --mode fast --save-results
 
 # 完整评估（包含所有测试对比）
 python test.py --mode full --output-dir my_evaluation
@@ -114,21 +90,19 @@ python test.py --mode full --output-dir my_evaluation
 ### 🎯 推荐的一站式命令
 
 ```bash
-# 🚀 训练：使用双层奖励系统进行理论最优训练
-python train.py --config dual_layer_training --save-results
+# 🚀 训练：快速训练获得高质量结果
+python train.py --mode fast --save-results
 
-# 🧪 评估：完整评估流程（包含基线对比、性能分析、可视化）
-python test.py --mode full --output-dir evaluation_results
-
-# 📊 结果：查看生成的HTML报告
-# 报告位置：evaluation_results/evaluation_report_YYYYMMDD_HHMMSS.html
+# 📊 结果：查看训练日志和模型输出
+# 结果位置：logs/ 和 checkpoints/ 目录
 ```
 
 ### 💡 使用建议
 
-1. **日常研究**：使用 `enhanced_rewards_training` 获得高质量结果
-2. **完整评估**：使用 `test.py --mode full` 包含基线对比和性能分析功能
-3. **大规模验证**：使用 `ieee118` 模式测试大规模性能
+1. **日常训练**：使用 `fast` 模式进行快速训练
+2. **高质量结果**：使用 `full` 模式获得最佳性能
+3. **大规模训练**：使用 `ieee118` 模式训练大规模系统
+4. **奖励系统详情**：参考 `docs/REWARD.md` 了解奖励系统原理
 
 
 
@@ -137,7 +111,7 @@ python test.py --mode full --output-dir evaluation_results
 ```
 ├── train.py                  # 训练模块（专注模型训练功能）
 ├── test.py                   # 评估模块（专注模型评估分析）
-├── config.yaml              # 统一配置文件（包含增强奖励配置）
+├── config.yaml              # 统一配置文件（包含奖励系统配置）
 ├── code/                     # 核心代码
 │   ├── src/                  # 源代码
 │   │   ├── data_processing.py    # 数据处理
@@ -159,8 +133,7 @@ python test.py --mode full --output-dir evaluation_results
 ## 🎉 核心特性
 
 - **🧠 智能分区**：基于GAT的图神经网络编码器
-- **🔬 双层奖励**：基于势函数理论的理论最优奖励系统
-- **🎯 增强奖励**：三阶段渐进式奖励设计
+- **🎯 奖励系统**：基于势函数理论的理论最优奖励系统
 - **🛡️ 数值稳定**：全面的NaN/inf保护和异常处理
 - **🎭 场景生成**：自动生成多样化训练场景
 - **📊 基线对比**：完整的基线方法对比框架

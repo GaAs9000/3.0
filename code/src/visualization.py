@@ -181,7 +181,7 @@ class VisualizationManager:
                 plt.savefig(save_path)
                 print(f"💾 分区图已保存到: {save_path}")
             
-            plt.show()
+            plt.show(block=False)
             
             # 清理内存
             gc.collect()

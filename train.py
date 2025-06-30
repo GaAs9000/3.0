@@ -889,19 +889,16 @@ class UnifiedTrainingSystem:
         base_config = self.config.copy()
 
         configs = {
-            'enhanced_rewards': {
+            'fast': {
                 **base_config,
                 'training': {
                     **base_config['training'],
-                    'mode': 'enhanced_rewards',
+                    'mode': 'fast',
                     'num_episodes': 1500
                 },
-                'environment': {
-                    **base_config['environment'],
-                    'reward_weights': {
-                        **base_config['environment']['reward_weights'],
-                        'use_enhanced_rewards': True
-                    }
+                'parallel_training': {
+                    **base_config['parallel_training'],
+                    'enabled': False
                 },
                 'scenario_generation': {
                     **base_config['scenario_generation'],
@@ -912,9 +909,17 @@ class UnifiedTrainingSystem:
                 **base_config,
                 'training': {
                     **base_config['training'],
-                    'num_episodes': 2000,
+                    'num_episodes': 5000,
                     'max_steps_per_episode': 500,
                     'update_interval': 20
+                },
+                'parallel_training': {
+                    **base_config['parallel_training'],
+                    'enabled': True
+                },
+                'scenario_generation': {
+                    **base_config['scenario_generation'],
+                    'enabled': True
                 }
             },
             'ieee118': {
@@ -937,7 +942,7 @@ class UnifiedTrainingSystem:
                 },
                 'training': {
                     **base_config['training'],
-                    'num_episodes': 5000,
+                    'num_episodes': 3000,
                     'max_steps_per_episode': 500
                 },
                 'parallel_training': {
@@ -979,8 +984,8 @@ class UnifiedTrainingSystem:
         # 获取模式配置
         configs = self.get_training_configs()
         if mode not in configs:
-            print(f"⚠️ 未知训练模式: {mode}，使用增强奖励模式")
-            mode = 'enhanced_rewards'
+            print(f"⚠️ 未知训练模式: {mode}，使用快速模式")
+            mode = 'fast'
 
         config = configs[mode]
 
@@ -1333,8 +1338,8 @@ def main():
     # 基础参数
     parser.add_argument('--config', type=str, default=None,
                        help='配置文件路径或预设配置名称')
-    parser.add_argument('--mode', type=str, default='enhanced_rewards',
-                       choices=['enhanced_rewards', 'full', 'ieee118', 'parallel', 'curriculum'],
+    parser.add_argument('--mode', type=str, default='fast',
+                       choices=['fast', 'full', 'ieee118', 'parallel', 'curriculum'],
                        help='训练模式')
 
     # 训练参数

@@ -63,29 +63,19 @@ class PowerGridPartitioningEnv:
         self.action_space = ActionSpace(hetero_data, num_partitions, device)
 
         # 【新增】奖励函数支持
-        # 支持三种奖励模式：legacy（原有）、enhanced（增强）、dual_layer（双层）
-        self.reward_mode = reward_weights.get('reward_mode', 'legacy') if reward_weights else 'legacy'
+        # 支持两种奖励模式：legacy（原有）、dual_layer（新奖励系统）
+        self.reward_mode = reward_weights.get('reward_mode', 'dual_layer') if reward_weights else 'dual_layer'
 
         if self.reward_mode == 'dual_layer':
-            # 使用新的双层奖励函数
+            # 使用新的奖励函数
             from .reward import DualLayerRewardFunction
             self.reward_function = DualLayerRewardFunction(
                 hetero_data,
                 config={'reward_weights': reward_weights, 'thresholds': reward_weights.get('thresholds', {})},
                 device=device
             )
-        elif self.reward_mode == 'enhanced':
-            # 使用增强奖励函数
-            from .reward import EnhancedRewardFunction
-            enhanced_config = reward_weights.get('enhanced_config', {})
-            self.reward_function = EnhancedRewardFunction(
-                hetero_data,
-                reward_weights,
-                device,
-                **enhanced_config
-            )
         else:
-            # 保持原有的增量奖励机制
+            # 保持原有的增量奖励机制（向后兼容）
             self.reward_function = None
 
         self.metis_initializer = MetisInitializer(hetero_data, device, config)
@@ -540,9 +530,9 @@ class PowerGridPartitioningEnv:
         # 3. 计算新状态的指标
         current_metrics = self.evaluator.evaluate_partition(self.state_manager.current_partition)
         
-        # 4. 【核心】计算奖励 - 支持三种模式
+        # 4. 【核心】计算奖励 - 支持两种模式
         if self.reward_mode == 'dual_layer' and self.reward_function is not None:
-            # 使用新的双层奖励函数 - 仅计算即时奖励
+            # 使用新的奖励函数 - 仅计算即时奖励
             reward = self.reward_function.compute_incremental_reward(
                 self.state_manager.current_partition,
                 action
@@ -556,19 +546,8 @@ class PowerGridPartitioningEnv:
                 'current_metrics': current_reward_metrics,
                 'reward_mode': 'dual_layer'
             }
-        elif self.reward_mode == 'enhanced' and self.reward_function is not None:
-            # 使用增强奖励函数
-            reward, reward_components = self.reward_function.compute_reward(
-                self.state_manager.current_partition,
-                self.state_manager.get_boundary_nodes(),
-                action,
-                return_components=True
-            )
-            # 存储奖励组件用于调试和分析
-            self.last_reward_components = reward_components
-            self.last_reward_components['reward_mode'] = 'enhanced'
         else:
-            # 使用原有的增量奖励机制
+            # 使用原有的增量奖励机制（向后兼容）
             reward = self._compute_improvement_reward(current_metrics, self.previous_metrics)
             self.last_reward_components = {
                 'improvement_reward': reward,
@@ -616,11 +595,11 @@ class PowerGridPartitioningEnv:
             'step': self.current_step,
             'metrics': current_metrics,
             'reward': reward,
-            'reward_mode': 'enhanced' if self.use_enhanced_rewards else 'incremental',
+            'reward_mode': self.reward_mode,
             **info_bonus
         }
 
-        # 添加奖励组件信息（如果使用增强奖励）
+        # 添加奖励组件信息
         if self.last_reward_components is not None:
             info['reward_components'] = self.last_reward_components
         

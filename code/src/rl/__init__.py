@@ -6,7 +6,7 @@ from .environment import PowerGridPartitioningEnv
 from .agent import PPOAgent
 from .state import StateManager
 from .action_space import ActionSpace, ActionMask
-from .reward import RewardFunction
+from .reward import RewardFunction, DualLayerRewardFunction
 from .utils import MetisInitializer, PartitionEvaluator
 from .scenario_generator import ScenarioGenerator
 
