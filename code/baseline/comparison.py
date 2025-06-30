@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING
 from .baseline import set_baseline_seed
 from .spectral_clustering import SpectralPartitioner
 from .kmeans_clustering import KMeansPartitioner
-from .random_partition import RandomPartitioner
 from .evaluator import evaluate_partition_method
 
 if TYPE_CHECKING:

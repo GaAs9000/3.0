@@ -13,6 +13,23 @@ try:
         PLOTLY_AVAILABLE = True
 except ImportError:
         PLOTLY_AVAILABLE = False
+        # 创建虚拟的 go 对象以避免 NameError
+        class DummyGo:
+            class Figure:
+                pass
+            class Scatter:
+                pass
+            class Bar:
+                pass
+            class Heatmap:
+                pass
+            class Scatterpolar:
+                pass
+            class Table:
+                pass
+        go = DummyGo()
+        def make_subplots(*args, **kwargs):
+            return None
 
 # Import types that will be defined in other modules
 from typing import TYPE_CHECKING
