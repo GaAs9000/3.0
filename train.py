@@ -1042,7 +1042,7 @@ class UnifiedTrainingSystem:
                 return self._run_parallel_training(config)
             elif mode == 'curriculum' or config['curriculum']['enabled']:
                 return self._run_curriculum_training(config)
-            elif mode == 'adaptive' or config.get('adaptive_curriculum', {}).get('enabled', False):
+            elif config.get('adaptive_curriculum', {}).get('enabled', False):
                 return self._run_curriculum_training(config)  # 智能自适应也使用课程学习流程
             else:
                 return self._run_standard_training(config)
@@ -1353,11 +1353,14 @@ class UnifiedTrainingSystem:
 
         try:
             # 导入智能导演系统
-            from code.src.rl.adaptive_curriculum import AdaptiveCurriculumDirector
+            from code.src.rl.adaptive import AdaptiveDirector
+
+            # 获取基础训练模式
+            base_mode = self._detect_base_mode(config)
 
             # 初始化智能导演
-            director = AdaptiveCurriculumDirector(config)
-            print("✅ 智能导演系统已初始化")
+            director = AdaptiveDirector(config, base_mode)
+            print(f"✅ 智能导演系统已初始化 (基础模式: {base_mode})")
 
             # 运行自适应训练
             result = self._run_adaptive_training_with_director(config, director)
@@ -1379,6 +1382,20 @@ class UnifiedTrainingSystem:
             import traceback
             traceback.print_exc()
             return {'success': False, 'error': str(e), 'mode': 'adaptive_curriculum'}
+
+    def _detect_base_mode(self, config: Dict[str, Any]) -> str:
+        """检测基础训练模式"""
+        # 根据配置特征检测基础模式
+        num_episodes = config.get('training', {}).get('num_episodes', 1500)
+        parallel_enabled = config.get('parallel_training', {}).get('enabled', False)
+
+        if num_episodes >= 4000 or parallel_enabled:
+            if num_episodes >= 4000:
+                return 'ieee118'
+            else:
+                return 'full'
+        else:
+            return 'fast'
 
     def _run_adaptive_training_with_director(self, config: Dict[str, Any], director) -> Dict[str, Any]:
         """使用智能导演运行自适应训练"""
@@ -1465,7 +1482,10 @@ class UnifiedTrainingSystem:
                 return None
 
             # 主状态表格
-            table = Table(title="🧠 智能自适应课程学习状态", show_header=True, header_style="bold magenta")
+            base_mode = 'unknown'
+            if director_decision and 'stage_info' in director_decision:
+                base_mode = director_decision['stage_info'].get('base_mode', 'unknown')
+            table = Table(title=f"🧠 智能自适应训练状态 ({base_mode.upper()})", show_header=True, header_style="bold magenta")
             table.add_column("指标", style="cyan", width=15)
             table.add_column("当前值", style="green", width=20)
             table.add_column("说明", style="yellow", width=25)
@@ -1764,8 +1784,10 @@ def main():
     parser.add_argument('--config', type=str, default=None,
                        help='配置文件路径或预设配置名称')
     parser.add_argument('--mode', type=str, default='fast',
-                       choices=['fast', 'adaptive', 'full', 'ieee118', 'parallel', 'curriculum'],
+                       choices=['fast', 'full', 'ieee118', 'parallel', 'curriculum'],
                        help='训练模式')
+    parser.add_argument('-a', '--adaptive', action='store_true',
+                       help='启用智能自适应训练 (可与任何模式组合)')
 
     # 训练参数
     parser.add_argument('--episodes', type=int, help='训练回合数')
@@ -1815,6 +1837,11 @@ def main():
             train_kwargs['system.device'] = args.device
         if args.seed:
             train_kwargs['system.seed'] = args.seed
+
+        # 处理智能自适应参数
+        if args.adaptive:
+            train_kwargs['adaptive_curriculum.enabled'] = True
+            print(f"🧠 启用智能自适应训练 (基础模式: {args.mode})")
 
         # 运行训练
         results = system.run_training(mode=args.mode, **train_kwargs)

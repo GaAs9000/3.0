@@ -1,8 +1,9 @@
 """
-智能自适应课程学习系统
+智能自适应训练系统
 
 从"固定剧本"升级为"智能导演"模式的核心实现。
 提供性能驱动的阶段转换、平滑参数演化和安全保障机制。
+支持与fast/full/ieee118等模式的智能集成。
 
 作者：Augment Agent
 日期：2025-06-30
@@ -55,6 +56,39 @@ class SafetyConfig:
     max_loss_threshold: float = 10
     performance_deterioration_patience: int = 50
     performance_deterioration_threshold: float = 0.8
+
+
+@dataclass
+class ModeAdaptationConfig:
+    """模式适配配置"""
+    mode: str = "fast"
+    
+    # 不同模式的转换条件调整
+    fast_mode_adjustments: Dict[str, float] = None
+    full_mode_adjustments: Dict[str, float] = None
+    ieee118_mode_adjustments: Dict[str, float] = None
+    
+    def __post_init__(self):
+        if self.fast_mode_adjustments is None:
+            self.fast_mode_adjustments = {
+                'episode_length_stability': 0.7,  # 更宽松
+                'composite_score_target': 0.6,    # 更宽松
+                'safety_threshold_factor': 1.5    # 更宽松
+            }
+        
+        if self.full_mode_adjustments is None:
+            self.full_mode_adjustments = {
+                'episode_length_stability': 0.8,  # 标准
+                'composite_score_target': 0.7,    # 标准
+                'safety_threshold_factor': 1.0    # 标准
+            }
+        
+        if self.ieee118_mode_adjustments is None:
+            self.ieee118_mode_adjustments = {
+                'episode_length_stability': 0.9,  # 更严格
+                'composite_score_target': 0.8,    # 更严格
+                'safety_threshold_factor': 0.8    # 更严格
+            }
 
 
 class PerformanceAnalyzer:
@@ -129,8 +163,9 @@ class PerformanceAnalyzer:
 class ParameterScheduler:
     """参数调度器 - 平滑参数演化"""
     
-    def __init__(self, config: ParameterEvolutionConfig):
+    def __init__(self, config: ParameterEvolutionConfig, mode_config: ModeAdaptationConfig):
         self.config = config
+        self.mode_config = mode_config
         self.current_stage = 1
         self.stage_progress = 0.0
         self.stage_start_episode = 0
@@ -228,12 +263,34 @@ class ParameterScheduler:
 class SafetyMonitor:
     """安全监控器 - 训练崩溃检测与恢复"""
     
-    def __init__(self, config: SafetyConfig):
+    def __init__(self, config: SafetyConfig, mode_config: ModeAdaptationConfig):
         self.config = config
+        self.mode_config = mode_config
         self.best_performance = -float('inf')
         self.deterioration_count = 0
         self.emergency_mode = False
         
+        # 根据模式调整安全阈值
+        self._adjust_safety_thresholds()
+        
+    def _adjust_safety_thresholds(self):
+        """根据训练模式调整安全阈值"""
+        mode = self.mode_config.mode
+        
+        if mode == "fast":
+            adjustments = self.mode_config.fast_mode_adjustments
+        elif mode == "ieee118":
+            adjustments = self.mode_config.ieee118_mode_adjustments
+        else:  # full or default
+            adjustments = self.mode_config.full_mode_adjustments
+        
+        factor = adjustments.get('safety_threshold_factor', 1.0)
+        
+        # 调整安全阈值
+        self.adjusted_min_episode_length = max(1, int(self.config.min_episode_length * factor))
+        self.adjusted_max_reward_threshold = self.config.max_reward_threshold * factor
+        self.adjusted_max_loss_threshold = self.config.max_loss_threshold * factor
+    
     def check_training_safety(self, performance: Dict[str, float]) -> Dict[str, Any]:
         """检查训练安全状态"""
         safety_status = {
@@ -245,8 +302,8 @@ class SafetyMonitor:
         
         # 检查训练崩溃信号
         collapse_signals = [
-            performance.get('episode_length', 0) < self.config.min_episode_length,
-            performance.get('reward', -float('inf')) < self.config.max_reward_threshold,
+            performance.get('episode_length', 0) < self.adjusted_min_episode_length,
+            performance.get('reward', -float('inf')) < self.adjusted_max_reward_threshold,
             # 可以添加更多崩溃检测信号
         ]
         
@@ -285,16 +342,21 @@ class SafetyMonitor:
         }
 
 
-class AdaptiveCurriculumDirector:
-    """智能自适应课程学习导演 - 核心控制器"""
-    
-    def __init__(self, config: Dict[str, Any]):
+class AdaptiveDirector:
+    """智能自适应训练导演 - 核心控制器"""
+
+    def __init__(self, config: Dict[str, Any], base_mode: str = "fast"):
         self.config = config
-        
+        self.base_mode = base_mode
+
         # 初始化子组件
         curriculum_config = config.get('adaptive_curriculum', {})
 
-        self.transition_criteria = StageTransitionCriteria(**curriculum_config.get('stage_transition', {}))
+        # 模式适配配置
+        self.mode_config = ModeAdaptationConfig(mode=base_mode)
+
+        # 根据基础模式调整转换条件
+        self.transition_criteria = self._create_mode_adapted_criteria(curriculum_config)
         self.param_evolution_config = ParameterEvolutionConfig(**curriculum_config.get('parameter_evolution', {}))
 
         # 优先使用模式特定的安全监控配置
@@ -304,11 +366,11 @@ class AdaptiveCurriculumDirector:
             safety_monitoring_config = config.get('adaptive_curriculum', {}).get('safety_monitoring', {})
 
         self.safety_config = SafetyConfig(**safety_monitoring_config)
-        
+
         self.performance_analyzer = PerformanceAnalyzer(config)
-        self.parameter_scheduler = ParameterScheduler(self.param_evolution_config)
-        self.safety_monitor = SafetyMonitor(self.safety_config)
-        
+        self.parameter_scheduler = ParameterScheduler(self.param_evolution_config, self.mode_config)
+        self.safety_monitor = SafetyMonitor(self.safety_config, self.mode_config)
+
         # 状态跟踪
         self.episode_count = 0
         self.stage_transition_history = []
@@ -319,49 +381,75 @@ class AdaptiveCurriculumDirector:
         # 简化日志输出
         self.verbose = config.get('debug', {}).get('adaptive_curriculum_verbose', False)
 
-        logger.info("智能自适应课程学习导演已初始化")
-    
+        logger.info(f"智能自适应训练导演已初始化 (基础模式: {base_mode})")
+
+    def _create_mode_adapted_criteria(self, curriculum_config: Dict[str, Any]) -> StageTransitionCriteria:
+        """根据基础模式创建适配的转换条件"""
+        base_criteria = curriculum_config.get('stage_transition', {})
+
+        # 获取模式特定的调整
+        if self.base_mode == "fast":
+            adjustments = self.mode_config.fast_mode_adjustments
+        elif self.base_mode == "ieee118":
+            adjustments = self.mode_config.ieee118_mode_adjustments
+        else:  # full or default
+            adjustments = self.mode_config.full_mode_adjustments
+
+        # 应用调整
+        adapted_criteria = base_criteria.copy()
+        adapted_criteria['episode_length_stability'] = adjustments.get(
+            'episode_length_stability',
+            base_criteria.get('episode_length_stability', 0.8)
+        )
+        adapted_criteria['composite_score_target'] = adjustments.get(
+            'composite_score_target',
+            base_criteria.get('composite_score_target', 0.7)
+        )
+
+        return StageTransitionCriteria(**adapted_criteria)
+
     def step(self, episode: int, episode_info: Dict[str, Any]) -> Dict[str, Any]:
         """每个episode后的调度决策"""
         self.episode_count = episode
-        
+
         # 1. 性能分析
         performance = self.performance_analyzer.analyze_episode(episode_info)
-        
+
         # 2. 安全检查
         safety_status = self.safety_monitor.check_training_safety(performance)
-        
+
         # 3. 紧急模式处理
         if safety_status['emergency_mode']:
             return self._handle_emergency_mode(safety_status)
-        
+
         # 4. 阶段转换判定
         self._check_stage_transition(performance)
-        
+
         # 5. 更新参数调度
         self.parameter_scheduler.update_progress(episode)
         current_params = self.parameter_scheduler.get_stage_parameters(
             self.parameter_scheduler.current_stage,
             self.parameter_scheduler.stage_progress
         )
-        
+
         # 6. 返回完整调度结果
         return {
             **current_params,
             'stage_info': {
                 'current_stage': self.parameter_scheduler.current_stage,
                 'stage_progress': self.parameter_scheduler.stage_progress,
-                'stage_name': current_params['stage_name']
+                'stage_name': current_params['stage_name'],
+                'base_mode': self.base_mode
             },
             'performance_info': performance,
             'safety_status': safety_status,
             'episode': episode
         }
-    
+
     def _check_stage_transition(self, performance: Dict[str, float]):
         """检查是否需要阶段转换"""
         current_stage = self.parameter_scheduler.current_stage
-        
+
         if current_stage == 1:
             # 阶段1 -> 阶段2 的转换条件
             if self._check_stage1_to_2_transition(performance):
@@ -372,7 +460,7 @@ class AdaptiveCurriculumDirector:
                     'to_stage': 2,
                     'trigger': 'episode_length_stability'
                 })
-        
+
         elif current_stage == 2:
             # 阶段2 -> 阶段3 的转换条件
             if self._check_stage2_to_3_transition(performance):
@@ -383,7 +471,7 @@ class AdaptiveCurriculumDirector:
                     'to_stage': 3,
                     'trigger': 'composite_score_target'
                 })
-        
+
         elif current_stage == 3:
             # 阶段3 -> 阶段4 的转换条件
             if self._check_stage3_to_4_transition(performance):
@@ -394,48 +482,48 @@ class AdaptiveCurriculumDirector:
                     'to_stage': 4,
                     'trigger': 'refinement_complete'
                 })
-    
+
     def _check_stage1_to_2_transition(self, performance: Dict[str, float]) -> bool:
         """检查阶段1到阶段2的转换条件"""
         if len(self.performance_analyzer.episode_history) < self.transition_criteria.episode_length_window:
             return False
-        
+
         # 检查episode长度稳定性
         recent_lengths = [
-            ep.get('episode_length', 0) 
+            ep.get('episode_length', 0)
             for ep in list(self.performance_analyzer.episode_history)[-self.transition_criteria.episode_length_window:]
         ]
-        
+
         target_achieved_count = sum(1 for length in recent_lengths if length >= self.transition_criteria.episode_length_target)
         stability_rate = target_achieved_count / len(recent_lengths)
-        
+
         return stability_rate >= self.transition_criteria.episode_length_stability
-    
+
     def _check_stage2_to_3_transition(self, performance: Dict[str, float]) -> bool:
         """检查阶段2到阶段3的转换条件"""
         if len(self.performance_analyzer.performance_history) < self.transition_criteria.composite_score_window:
             return False
-        
+
         # 检查复合评分目标
         recent_scores = [
-            p['composite_score'] 
+            p['composite_score']
             for p in list(self.performance_analyzer.performance_history)[-self.transition_criteria.composite_score_window:]
         ]
-        
+
         mean_score = np.mean(recent_scores)
         return mean_score >= self.transition_criteria.composite_score_target
-    
+
     def _check_stage3_to_4_transition(self, performance: Dict[str, float]) -> bool:
         """检查阶段3到阶段4的转换条件"""
         # 简单条件：在阶段3停留足够长时间且性能稳定
         episodes_in_stage3 = self.episode_count - self.parameter_scheduler.stage_start_episode
-        
+
         if episodes_in_stage3 >= 300:  # 在阶段3至少300个episodes
             trend_analysis = self.performance_analyzer.get_trend_analysis(50)
             return trend_analysis['stability'] > 0.8  # 性能稳定
-        
+
         return False
-    
+
     def _handle_emergency_mode(self, safety_status: Dict[str, Any]) -> Dict[str, Any]:
         """处理紧急模式"""
         emergency_params = self.safety_monitor.get_emergency_params()
@@ -453,19 +541,23 @@ class AdaptiveCurriculumDirector:
             'stage_info': {
                 'current_stage': 0,  # 特殊阶段标识
                 'stage_progress': 0.0,
-                'stage_name': 'emergency_recovery'
+                'stage_name': 'emergency_recovery',
+                'base_mode': self.base_mode
             },
             'safety_status': safety_status,
             'episode': self.episode_count
         }
-    
+
     def get_status_summary(self) -> Dict[str, Any]:
         """获取当前状态摘要"""
         return {
+            'base_mode': self.base_mode,
             'current_stage': self.parameter_scheduler.current_stage,
             'stage_progress': self.parameter_scheduler.stage_progress,
             'episode_count': self.episode_count,
             'transition_history': self.stage_transition_history,
             'emergency_mode': self.safety_monitor.emergency_mode,
-            'best_performance': self.safety_monitor.best_performance
+            'best_performance': self.safety_monitor.best_performance,
+            'emergency_count': self.emergency_count,
+            'normal_stage_count': self.normal_stage_count
         }

@@ -17,11 +17,20 @@ pip install pandapower networkx plotly seaborn  # 可选依赖
 # 快速训练（推荐）
 python train.py --mode fast
 
+# 智能自适应快速训练（推荐）
+python train.py --mode fast -a
+
 # 完整训练（2-4小时）
 python train.py --mode full
 
+# 智能自适应完整训练
+python train.py --mode full -a
+
 # IEEE 118节点大规模训练
 python train.py --mode ieee118
+
+# 智能自适应大规模训练
+python train.py --mode ieee118 -a
 ```
 
 ### 模型评估测试
@@ -31,21 +40,34 @@ python train.py --mode ieee118
 python test.py --mode full
 ```
 
-## 📋 系统架构
+## 📋 项目结构
 
-### 🏗️ 双模块设计
-
-- **🚀 `train.py`** - 训练模块：专注于模型训练、数据处理、基础可视化
-- **🧪 `test.py`** - 评估模块：专注于模型性能评估、基线对比、可视化分析
+```
+power-grid-partitioning/
+├── train.py              # 🚀 主训练脚本
+├── config.yaml           # ⚙️ 配置文件
+├── requirements.txt       # 📦 依赖列表
+├── code/                  # 💻 核心代码
+│   └── src/
+│       ├── rl/           # 强化学习模块
+│       ├── environment/  # 环境模块
+│       └── utils/        # 工具模块
+├── docs/                  # 📚 文档
+├── logs/                  # 📊 训练日志
+├── models/                # 🤖 保存的模型
+└── output/                # 📈 输出结果
+```
 
 ### 训练模式对比
 
 | 模式 | 训练时间 | 回合数 | 适用场景 | 特色功能 |
 |------|----------|--------|----------|----------|
 | `fast` | 45分钟 | 1500 | **推荐模式**、日常训练 | 场景生成 |
-| `adaptive` | 1-2小时 | 2000 | **智能训练**、自适应优化 | 🧠智能导演+场景生成 |
+| `fast -a` | 1-2小时 | 2000 | **智能训练**、自适应优化 | 🧠智能导演+场景生成 |
 | `full` | 2-4小时 | 5000 | 高质量结果、论文实验 | 并行+场景生成 |
+| `full -a` | 3-5小时 | 5000 | **智能完整训练** | 🧠智能导演+并行+场景生成 |
 | `ieee118` | 4-8小时 | 3000 | 大规模系统训练 | 并行+场景生成 |
+| `ieee118 -a` | 5-10小时 | 3000 | **智能大规模训练** | 🧠智能导演+并行+场景生成 |
 
 
 
@@ -79,8 +101,10 @@ python test.py --mode full
 4. **微调期**：学习率退火，精细优化
 
 ```bash
-# 启用智能自适应课程学习
-python train.py --mode adaptive
+# 启用智能自适应课程学习（与任何模式组合）
+python train.py --mode fast -a
+python train.py --mode full -a
+python train.py --mode ieee118 -a
 ```
 
 详细说明请参考：[docs/ADAPTIVE_CURRICULUM.md](docs/ADAPTIVE_CURRICULUM.md)
