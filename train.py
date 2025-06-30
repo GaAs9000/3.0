@@ -322,6 +322,11 @@ class TrainingLogger:
         self.coupling_edges = []
         self.best_reward = -float('inf')
 
+        # 智能自适应课程学习相关指标
+        self.curriculum_stages = []
+        self.stage_transitions = []
+        self.director_decisions = []
+
         log_config = config.get('logging', {})
         self.metrics_save_interval = log_config.get('metrics_save_interval', 100)
 
@@ -971,6 +976,31 @@ class UnifiedTrainingSystem:
                     **base_config['curriculum'],
                     'enabled': True
                 }
+            },
+            'adaptive': {
+                **base_config,
+                'training': {
+                    **base_config['training'],
+                    'num_episodes': 2000,
+                    'max_steps_per_episode': 200,
+                    'success_criteria': {
+                        **base_config['training'].get('success_criteria', {}),
+                        'load_cv_threshold': 0.25,
+                        'connectivity_threshold': 0.95
+                    }
+                },
+                'adaptive_curriculum': {
+                    **base_config.get('adaptive_curriculum', {}),
+                    'enabled': True
+                },
+                'parallel_training': {
+                    **base_config['parallel_training'],
+                    'enabled': False
+                },
+                'scenario_generation': {
+                    **base_config['scenario_generation'],
+                    'enabled': True
+                }
             }
         }
 
@@ -1012,6 +1042,8 @@ class UnifiedTrainingSystem:
                 return self._run_parallel_training(config)
             elif mode == 'curriculum' or config['curriculum']['enabled']:
                 return self._run_curriculum_training(config)
+            elif mode == 'adaptive' or config.get('adaptive_curriculum', {}).get('enabled', False):
+                return self._run_curriculum_training(config)  # 智能自适应也使用课程学习流程
             else:
                 return self._run_standard_training(config)
 
@@ -1275,7 +1307,15 @@ class UnifiedTrainingSystem:
 
     def _run_curriculum_training(self, config: Dict[str, Any]) -> Dict[str, Any]:
         """运行课程学习训练"""
-        print("📚 课程学习训练模式")
+        # 检查是否启用智能自适应课程学习
+        if config.get('adaptive_curriculum', {}).get('enabled', False):
+            return self._run_adaptive_curriculum_training(config)
+        else:
+            return self._run_traditional_curriculum_training(config)
+
+    def _run_traditional_curriculum_training(self, config: Dict[str, Any]) -> Dict[str, Any]:
+        """运行传统课程学习训练"""
+        print("📚 传统课程学习训练模式")
 
         curriculum_config = config['curriculum']
         start_partitions = curriculum_config['start_partitions']
@@ -1301,10 +1341,395 @@ class UnifiedTrainingSystem:
 
         return {
             'success': all(r['success'] for r in results),
-            'mode': 'curriculum',
+            'mode': 'traditional_curriculum',
             'config': config,
             'stage_results': results
         }
+
+    def _run_adaptive_curriculum_training(self, config: Dict[str, Any]) -> Dict[str, Any]:
+        """运行智能自适应课程学习训练"""
+        print("🧠 智能自适应课程学习训练模式")
+        print("=" * 60)
+
+        try:
+            # 导入智能导演系统
+            from code.src.rl.adaptive_curriculum import AdaptiveCurriculumDirector
+
+            # 初始化智能导演
+            director = AdaptiveCurriculumDirector(config)
+            print("✅ 智能导演系统已初始化")
+
+            # 运行自适应训练
+            result = self._run_adaptive_training_with_director(config, director)
+
+            return {
+                'success': result.get('success', False),
+                'mode': 'adaptive_curriculum',
+                'config': config,
+                'director_status': director.get_status_summary(),
+                **result
+            }
+
+        except ImportError as e:
+            print(f"❌ 无法导入智能导演系统: {e}")
+            print("🔄 回退到传统课程学习模式")
+            return self._run_traditional_curriculum_training(config)
+        except Exception as e:
+            print(f"❌ 智能自适应课程学习失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return {'success': False, 'error': str(e), 'mode': 'adaptive_curriculum'}
+
+    def _run_adaptive_training_with_director(self, config: Dict[str, Any], director) -> Dict[str, Any]:
+        """使用智能导演运行自适应训练"""
+        print("\n🎬 启动智能导演训练流程...")
+
+        # 1. 环境和智能体初始化
+        print("\n1️⃣ 初始化环境和智能体...")
+        mpc = load_power_grid_data(config['data']['case_name'])
+
+        # 创建环境（使用场景生成）
+        if config['scenario_generation']['enabled']:
+            from rl.gym_wrapper import PowerGridPartitionGymEnv
+
+            # 确保设备配置正确传递
+            config_copy = config.copy()
+            config_copy['system']['device'] = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+            gym_env = PowerGridPartitionGymEnv(
+                base_case_data=mpc,
+                config=config_copy,
+                use_scenario_generator=True,
+                scenario_seed=config['system']['seed']
+            )
+            # 重置环境以获取初始状态
+            obs_array, info = gym_env.reset()
+            env = gym_env.internal_env
+        else:
+            from rl.environment import PowerGridPartitioningEnv
+            env = PowerGridPartitioningEnv(mpc, config)
+            gym_env = None
+
+        # 创建智能体
+        from rl.agent import PPOAgent
+
+        # 获取正确的嵌入维度
+        node_embedding_dim = env.state_manager.embedding_dim
+        region_embedding_dim = node_embedding_dim * 2
+
+        agent = PPOAgent(
+            node_embedding_dim=node_embedding_dim,
+            region_embedding_dim=region_embedding_dim,
+            num_partitions=env.num_partitions,
+            lr_actor=config['agent']['lr_actor'],
+            lr_critic=config['agent']['lr_critic'],
+            gamma=config['agent']['gamma'],
+            eps_clip=config['agent']['eps_clip'],
+            k_epochs=config['agent']['k_epochs'],
+            entropy_coef=config['agent']['entropy_coef'],
+            value_coef=config['agent']['value_coef'],
+            device=env.device,
+            actor_scheduler_config=config['agent'].get('actor_scheduler'),
+            critic_scheduler_config=config['agent'].get('critic_scheduler')
+        )
+
+        # 2. 智能自适应训练循环
+        print("\n2️⃣ 开始智能自适应训练...")
+        num_episodes = config['training']['num_episodes']
+        max_steps_per_episode = config['training']['max_steps_per_episode']
+        update_interval = config['training']['update_interval']
+
+        # 初始化训练日志
+        logger = TrainingLogger(config, num_episodes)
+
+        # 智能导演状态跟踪
+        director_decisions = []
+        stage_transitions = []
+
+        # 创建实时状态表格
+        try:
+            from rich.console import Console
+            from rich.table import Table
+            from rich.live import Live
+            from rich.panel import Panel
+            from rich.columns import Columns
+            from rich.text import Text
+            console = Console()
+            use_rich_table = True
+        except ImportError:
+            use_rich_table = False
+
+        def create_status_table(episode, director_decision, episode_reward, best_reward):
+            """创建智能导演状态表格"""
+            if not use_rich_table:
+                return None
+
+            # 主状态表格
+            table = Table(title="🧠 智能自适应课程学习状态", show_header=True, header_style="bold magenta")
+            table.add_column("指标", style="cyan", width=15)
+            table.add_column("当前值", style="green", width=20)
+            table.add_column("说明", style="yellow", width=25)
+
+            # 基础信息
+            table.add_row("Episode", f"{episode}/{num_episodes}", "当前训练进度")
+            table.add_row("当前奖励", f"{episode_reward:.3f}", "本轮episode奖励")
+            table.add_row("最佳奖励", f"{best_reward:.3f}", "历史最佳奖励")
+
+            if director_decision and 'stage_info' in director_decision:
+                stage_info = director_decision['stage_info']
+                stage_name = stage_info['stage_name']
+                stage_progress = stage_info['stage_progress']
+
+                # 阶段信息
+                stage_emoji = {
+                    'exploration': '🔍',
+                    'transition': '🔄',
+                    'refinement': '⚡',
+                    'fine_tuning': '🎯',
+                    'emergency_recovery': '🚨'
+                }.get(stage_name, '❓')
+
+                table.add_row("当前阶段", f"{stage_emoji} {stage_name}", f"进度: {stage_progress:.1%}")
+
+                # 参数信息
+                if 'reward_weights' in director_decision:
+                    weights = director_decision['reward_weights']
+                    balance_w = weights.get('balance_weight', 0)
+                    decoupling_w = weights.get('decoupling_weight', 0)
+                    power_w = weights.get('power_weight', 0)
+                    table.add_row("奖励权重", f"B:{balance_w:.1f} D:{decoupling_w:.1f} P:{power_w:.1f}", "平衡/解耦/功率")
+
+                if 'learning_rate_factor' in director_decision:
+                    lr_factor = director_decision['learning_rate_factor']
+                    table.add_row("学习率因子", f"{lr_factor:.3f}", "相对于基础学习率")
+
+            # 统计信息
+            emergency_count = sum(1 for t in stage_transitions if t.get('stage_name') == 'emergency_recovery')
+            normal_count = len(stage_transitions) - emergency_count
+            table.add_row("阶段转换", f"正常:{normal_count} 紧急:{emergency_count}", "智能转换统计")
+
+            return Panel(table, border_style="blue")
+
+        # 初始化Live显示
+        if use_rich_table:
+            initial_table = create_status_table(0, None, 0.0, -float('inf'))
+            live = Live(initial_table, console=console, refresh_per_second=2)
+            live.start()
+
+        try:
+            for episode in range(num_episodes):
+                # 重置环境
+                if gym_env is not None:
+                    obs_array, info = gym_env.reset()
+                    env = gym_env.internal_env
+                    state, _ = env.reset()
+                else:
+                    state, _ = env.reset()
+
+                episode_reward = 0
+                episode_length = 0
+
+                # Episode执行
+                for step in range(max_steps_per_episode):
+                    action, log_prob, value = agent.select_action(state, training=True)
+
+                    if action is None:
+                        break
+
+                    state, reward, terminated, truncated, info = env.step(action)
+                    done = terminated or truncated
+
+                    agent.store_experience(state, action, reward, log_prob, value, done)
+                    episode_reward += reward
+                    episode_length += 1
+
+                    if done:
+                        break
+
+                # 收集episode信息
+                episode_info = {
+                    'episode': episode,
+                    'reward': episode_reward,
+                    'episode_length': episode_length,
+                    'success': info.get('success', False),
+                    'load_cv': info.get('load_cv', 1.0),
+                    'coupling_ratio': info.get('coupling_ratio', 1.0),
+                    'connectivity': info.get('connectivity', 0.0),
+                    **info
+                }
+
+                # 智能导演决策
+                director_decision = director.step(episode, episode_info)
+                director_decisions.append(director_decision)
+
+                # 应用智能导演的参数调整
+                self._apply_director_decision(env, agent, director_decision)
+
+                # 记录阶段转换
+                if 'stage_info' in director_decision:
+                    stage_info = director_decision['stage_info']
+                    if len(stage_transitions) == 0 or stage_transitions[-1]['stage'] != stage_info['current_stage']:
+                        stage_transitions.append({
+                            'episode': episode,
+                            'stage': stage_info['current_stage'],
+                            'stage_name': stage_info['stage_name']
+                        })
+
+                # 更新实时表格
+                if use_rich_table and episode % 2 == 0:  # 每2个episode更新一次表格
+                    current_best = max([r for r in logger.episode_rewards if r is not None] + [-float('inf')])
+                    updated_table = create_status_table(episode, director_decision, episode_reward, current_best)
+                    live.update(updated_table)
+
+                # 记录训练日志
+                logger.log_episode(episode, episode_reward, episode_length, episode_info)
+
+                # 智能体更新
+                if episode % update_interval == 0 and episode > 0:
+                    try:
+                        training_stats = agent.update()
+                        if training_stats:
+                            logger.log_training_step(
+                                episode,
+                                training_stats.get('actor_loss'),
+                                training_stats.get('critic_loss'),
+                                training_stats.get('entropy')
+                            )
+                    except Exception as e:
+                        print(f"⚠️ Episode {episode} 智能体更新失败: {e}")
+
+                # 定期保存中间结果
+                if episode % config['training']['save_interval'] == 0 and episode > 0:
+                    self._save_adaptive_intermediate_results(episode, director, logger)
+
+            # 训练完成统计
+            final_stats = logger.get_statistics()
+            director_summary = director.get_status_summary()
+
+            # 关闭Live显示
+            if use_rich_table:
+                live.stop()
+
+            # 统计阶段转换信息
+            emergency_transitions = sum(1 for t in stage_transitions if t['stage_name'] == 'emergency_recovery')
+            normal_transitions = len(stage_transitions) - emergency_transitions
+
+            # 创建最终结果表格
+            if use_rich_table:
+                final_table = Table(title="🎯 智能自适应训练完成", show_header=True, header_style="bold green")
+                final_table.add_column("指标", style="cyan", width=15)
+                final_table.add_column("结果", style="green", width=20)
+
+                final_table.add_row("总回合数", str(final_stats.get('total_episodes', 0)))
+                final_table.add_row("最佳奖励", f"{final_stats.get('best_reward', 0):.4f}")
+                final_table.add_row("平均奖励", f"{final_stats.get('mean_reward', 0):.4f}")
+                final_table.add_row("最终阶段", str(director_summary['current_stage']))
+                final_table.add_row("智能转换", f"{normal_transitions}次正常 + {emergency_transitions}次紧急恢复")
+
+                console.print(Panel(final_table, border_style="green"))
+            else:
+                print(f"\n🎯 智能自适应训练完成:")
+                print(f"   - 总回合数: {final_stats.get('total_episodes', 0)}")
+                print(f"   - 最佳奖励: {final_stats.get('best_reward', 0):.4f}")
+                print(f"   - 平均奖励: {final_stats.get('mean_reward', 0):.4f}")
+                print(f"   - 最终阶段: {director_summary['current_stage']}")
+                print(f"   - 智能转换: {normal_transitions}次正常 + {emergency_transitions}次紧急恢复")
+
+            return {
+                'success': True,
+                'episode_rewards': logger.episode_rewards,
+                'episode_lengths': logger.episode_lengths,
+                'training_stats': final_stats,
+                'director_decisions': director_decisions,
+                'stage_transitions': stage_transitions,
+                'director_summary': director_summary
+            }
+
+        except Exception as e:
+            # 确保关闭Live显示
+            if use_rich_table and 'live' in locals():
+                live.stop()
+            print(f"❌ 智能自适应训练过程中出错: {e}")
+            import traceback
+            traceback.print_exc()
+            return {'success': False, 'error': str(e)}
+
+        finally:
+            # 清理资源
+            if use_rich_table and 'live' in locals():
+                try:
+                    live.stop()
+                except:
+                    pass
+            if hasattr(logger, 'progress_bar'):
+                logger.progress_bar.__exit__(None, None, None)
+
+    def _apply_director_decision(self, env, agent, decision: Dict[str, Any]):
+        """应用智能导演的决策到环境和智能体"""
+        import builtins
+
+        try:
+            # 静默模式：减少日志输出
+            verbose = self.config.get('debug', {}).get('adaptive_curriculum_verbose', False)
+
+            # 更新环境参数
+            if hasattr(env, 'reward_function') and 'reward_weights' in decision:
+                reward_weights = decision['reward_weights']
+                if hasattr(env.reward_function, 'update_weights'):
+                    if verbose:
+                        env.reward_function.update_weights(reward_weights)
+                    else:
+                        # 临时禁用打印
+                        original_print = builtins.print
+                        builtins.print = lambda *args, **kwargs: None
+                        env.reward_function.update_weights(reward_weights)
+                        builtins.print = original_print
+
+            # 更新连通性惩罚
+            if 'connectivity_penalty' in decision:
+                if hasattr(env, 'connectivity_penalty'):
+                    env.connectivity_penalty = decision['connectivity_penalty']
+
+            # 更新智能体学习率
+            if 'learning_rate_factor' in decision and decision['learning_rate_factor'] != 1.0:
+                if hasattr(agent, 'update_learning_rate'):
+                    if verbose:
+                        agent.update_learning_rate(decision['learning_rate_factor'])
+                    else:
+                        # 临时禁用打印
+                        original_print = builtins.print
+                        builtins.print = lambda *args, **kwargs: None
+                        agent.update_learning_rate(decision['learning_rate_factor'])
+                        builtins.print = original_print
+
+        except Exception as e:
+            builtins.print(f"⚠️ 应用导演决策时出错: {e}")
+
+    def _save_adaptive_intermediate_results(self, episode: int, director, logger):
+        """保存智能自适应训练的中间结果"""
+        try:
+            from pathlib import Path
+            import json
+
+            checkpoint_dir = Path(self.config['logging']['checkpoint_dir'])
+            checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+            # 保存训练统计
+            stats = logger.get_statistics()
+            stats_file = checkpoint_dir / f"adaptive_training_stats_episode_{episode}.json"
+            with open(stats_file, 'w') as f:
+                json.dump(stats, f, indent=2)
+
+            # 保存智能导演状态
+            director_status = director.get_status_summary()
+            director_file = checkpoint_dir / f"director_status_episode_{episode}.json"
+            with open(director_file, 'w') as f:
+                json.dump(director_status, f, indent=2)
+
+            print(f"💾 智能自适应中间结果已保存: episode {episode}")
+
+        except Exception as e:
+            print(f"⚠️ 保存智能自适应中间结果失败: {e}")
 
     def save_results(self, results: Dict[str, Any], output_dir: str = 'experiments'):
         """保存训练结果"""
@@ -1339,7 +1764,7 @@ def main():
     parser.add_argument('--config', type=str, default=None,
                        help='配置文件路径或预设配置名称')
     parser.add_argument('--mode', type=str, default='fast',
-                       choices=['fast', 'full', 'ieee118', 'parallel', 'curriculum'],
+                       choices=['fast', 'adaptive', 'full', 'ieee118', 'parallel', 'curriculum'],
                        help='训练模式')
 
     # 训练参数

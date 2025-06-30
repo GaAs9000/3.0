@@ -180,6 +180,48 @@ curriculum: &curriculum_base
   strategy: linear      # 学习策略
   success_threshold: 0.8  # 进入下一阶段的成功率阈值
 
+# ==================== 智能自适应课程学习配置 ====================
+adaptive_curriculum: &adaptive_curriculum_base
+  enabled: false        # 是否启用智能自适应课程学习
+
+  # 阶段转换触发条件
+  stage_transition:
+    # 阶段1 -> 阶段2 的触发条件
+    episode_length_target: 15              # 目标Episode长度
+    episode_length_window: 50              # 评估窗口大小
+    episode_length_stability: 0.8          # 80%的episodes达到目标
+
+    # 阶段2 -> 阶段3 的触发条件
+    coupling_improvement_threshold: 0.05    # 最小改善率阈值
+    coupling_trend_window: 100             # 趋势分析窗口
+    composite_score_target: 0.7            # 复合评分目标
+    composite_score_window: 100            # 复合评分评估窗口
+
+    # 通用条件
+    connectivity_rate_threshold: 0.9       # 连通性达标率
+    plateau_detection_enabled: true        # 平台期检测
+
+  # 参数演化策略
+  parameter_evolution:
+    # 连通性惩罚参数范围
+    connectivity_penalty_range: [0.1, 1.5]
+    # 动作掩码放松程度范围
+    action_mask_relaxation_range: [0.0, 0.7]
+    # 奖励权重范围
+    balance_weight_range: [0.6, 0.8]
+    decoupling_weight_range: [0.2, 0.6]
+    power_weight_range: [0.0, 0.3]
+    # 学习率衰减因子
+    learning_rate_decay_factor: 0.1
+
+  # 安全监控配置
+  safety_monitoring:
+    min_episode_length: 2                  # 最小episode长度（更宽松）
+    max_reward_threshold: -200             # 最大奖励阈值（更宽松）
+    max_loss_threshold: 20                 # 最大损失阈值（更宽松）
+    performance_deterioration_patience: 100 # 性能恶化容忍度（更大）
+    performance_deterioration_threshold: 0.6 # 性能恶化阈值（更宽松）
+
 # ==================== 评估配置 ====================
 evaluation:
   num_episodes: 20      # 评估回合数
@@ -345,6 +387,28 @@ fast:
       connectivity_threshold: 0.9
   parallel_training:
     enabled: false              # 快速模式不启用并行
+  scenario_generation:
+    enabled: true               # 启用场景生成
+
+# 智能自适应课程学习配置
+adaptive:
+  training:
+    num_episodes: 2000          # 智能自适应需要更多episodes
+    max_steps_per_episode: 200
+    success_criteria:
+      load_cv_threshold: 0.25   # 更严格的标准
+      connectivity_threshold: 0.95
+  adaptive_curriculum:
+    enabled: true               # 启用智能自适应课程学习
+    # 专门为adaptive模式优化的安全监控
+    safety_monitoring:
+      min_episode_length: 1     # 非常宽松的最小长度
+      max_reward_threshold: -500 # 非常宽松的奖励阈值
+      max_loss_threshold: 50    # 非常宽松的损失阈值
+      performance_deterioration_patience: 200 # 很大的容忍度
+      performance_deterioration_threshold: 0.3 # 很宽松的阈值
+  parallel_training:
+    enabled: false              # 初期不启用并行
   scenario_generation:
     enabled: true               # 启用场景生成
 

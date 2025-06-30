@@ -449,6 +449,31 @@ class PPOAgent:
 
         return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
+    def update_learning_rate(self, factor: float):
+        """动态更新学习率（用于智能自适应课程学习）"""
+        try:
+            # 更新actor学习率
+            for param_group in self.actor_optimizer.param_groups:
+                param_group['lr'] *= factor
+
+            # 更新critic学习率
+            for param_group in self.critic_optimizer.param_groups:
+                param_group['lr'] *= factor
+
+            print(f"📈 学习率已更新，缩放因子: {factor:.3f}")
+
+        except Exception as e:
+            print(f"⚠️ 更新学习率失败: {e}")
+
+    def get_current_learning_rates(self) -> Dict[str, float]:
+        """获取当前学习率"""
+        try:
+            actor_lr = self.actor_optimizer.param_groups[0]['lr']
+            critic_lr = self.critic_optimizer.param_groups[0]['lr']
+            return {'actor_lr': actor_lr, 'critic_lr': critic_lr}
+        except:
+            return {'actor_lr': 0.0, 'critic_lr': 0.0}
+
     def select_action(self, state: Dict[str, torch.Tensor], training: bool = True) -> Tuple[Tuple[int, int], float, float]:
         """
         使用当前策略选择动作

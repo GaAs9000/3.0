@@ -556,6 +556,40 @@ class DualLayerRewardFunction:
         """获取当前分区的指标（用于调试和分析）"""
         return self._compute_core_metrics(partition)
 
+    def update_weights(self, new_weights: Dict[str, float]):
+        """动态更新奖励权重（用于智能自适应课程学习）"""
+        try:
+            # 更新即时奖励权重
+            if 'balance_weight' in new_weights:
+                self.weights['balance_weight'] = new_weights['balance_weight']
+            if 'decoupling_weight' in new_weights:
+                self.weights['decoupling_weight'] = new_weights['decoupling_weight']
+            if 'power_weight' in new_weights:
+                self.weights['power_weight'] = new_weights['power_weight']
+
+            # 更新终局奖励权重（保持一致性）
+            if 'balance_weight' in new_weights:
+                self.weights['final_balance_weight'] = new_weights['balance_weight']
+            if 'decoupling_weight' in new_weights:
+                self.weights['final_decoupling_weight'] = new_weights['decoupling_weight']
+            if 'power_weight' in new_weights:
+                self.weights['final_power_weight'] = new_weights['power_weight']
+
+            print(f"🎯 奖励权重已更新: balance={self.weights['balance_weight']:.2f}, "
+                  f"decoupling={self.weights['decoupling_weight']:.2f}, "
+                  f"power={self.weights['power_weight']:.2f}")
+
+        except Exception as e:
+            print(f"⚠️ 更新奖励权重失败: {e}")
+
+    def get_current_weights(self) -> Dict[str, float]:
+        """获取当前奖励权重"""
+        return {
+            'balance_weight': self.weights.get('balance_weight', 1.0),
+            'decoupling_weight': self.weights.get('decoupling_weight', 1.0),
+            'power_weight': self.weights.get('power_weight', 1.0)
+        }
+
     # ==================== 向后兼容接口 ====================
 
     def compute_reward(self,
