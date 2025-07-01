@@ -205,15 +205,40 @@ class RichProgressBar:
     def update(self, advance: int = 1, **kwargs):
         """更新进度"""
         self.current += advance
-        
+
         if self.progress and self.task_id is not None:
-            # 更新 Rich 进度条
+            # 更新 Rich 进度条 - 增强显示重构后的系统状态
             update_dict = {'advance': advance}
             if kwargs:
-                # 格式化附加信息
-                postfix = ", ".join([f"{k}={v}" for k, v in kwargs.items()])
+                # 特殊处理奖励显示，突出显示正奖励
+                formatted_parts = []
+                for k, v in kwargs.items():
+                    if k == '奖励':
+                        try:
+                            reward = float(v)
+                            if reward > 0:
+                                formatted_parts.append(f"[bold green]{k}={v}[/bold green] 🎉")
+                            elif reward > -1:
+                                formatted_parts.append(f"[yellow]{k}={v}[/yellow] ⚡")
+                            else:
+                                formatted_parts.append(f"[red]{k}={v}[/red]")
+                        except:
+                            formatted_parts.append(f"{k}={v}")
+                    elif k == '最佳':
+                        try:
+                            best = float(v)
+                            if best > 0:
+                                formatted_parts.append(f"[bold cyan]{k}={v}[/bold cyan] 🏆")
+                            else:
+                                formatted_parts.append(f"{k}={v}")
+                        except:
+                            formatted_parts.append(f"{k}={v}")
+                    else:
+                        formatted_parts.append(f"{k}={v}")
+
+                postfix = ", ".join(formatted_parts)
                 update_dict['description'] = f"{self.description} ({postfix})"
-            
+
             self.progress.update(self.task_id, **update_dict)
         elif hasattr(self, 'tqdm_progress') and self.tqdm_progress:
             # 更新 tqdm 进度条
@@ -324,6 +349,66 @@ def rich_debug(message: str, category: str = "general"):
 def rich_progress(description: str, total: int = None):
     """创建进度条"""
     return get_output_manager().create_progress_bar(description, total)
+
+
+def create_training_status_panel(episode: int, reward: float, best_reward: float,
+                                avg_reward: float, positive_rewards: int,
+                                quality_score: float = None, plateau_confidence: float = None):
+    """创建训练状态面板"""
+    if not RICH_AVAILABLE:
+        return None
+
+    from rich.panel import Panel
+    from rich.table import Table
+    from rich.text import Text
+
+    # 创建状态表格
+    table = Table(show_header=False, box=None, padding=(0, 1))
+    table.add_column("指标", style="bold cyan")
+    table.add_column("数值", justify="right")
+    table.add_column("状态", justify="center")
+
+    # 回合信息
+    table.add_row("回合", f"{episode}", "📊")
+
+    # 奖励信息
+    reward_color = "green" if reward > 0 else "yellow" if reward > -1 else "red"
+    reward_icon = "🎉" if reward > 0 else "⚡" if reward > -1 else "❌"
+    table.add_row("当前奖励", f"[{reward_color}]{reward:.3f}[/{reward_color}]", reward_icon)
+
+    # 最佳奖励
+    best_color = "bold green" if best_reward > 0 else "cyan"
+    best_icon = "🏆" if best_reward > 0 else "🎯"
+    table.add_row("最佳奖励", f"[{best_color}]{best_reward:.3f}[/{best_color}]", best_icon)
+
+    # 平均奖励
+    avg_color = "green" if avg_reward > -1 else "yellow" if avg_reward > -2 else "red"
+    table.add_row("平均奖励", f"[{avg_color}]{avg_reward:.3f}[/{avg_color}]", "📈")
+
+    # 正奖励次数
+    positive_color = "bold green" if positive_rewards > 0 else "dim"
+    table.add_row("正奖励次数", f"[{positive_color}]{positive_rewards}[/{positive_color}]", "✨")
+
+    # 质量分数（如果可用）
+    if quality_score is not None:
+        quality_color = "green" if quality_score > 0.4 else "yellow" if quality_score > 0.3 else "red"
+        table.add_row("质量分数", f"[{quality_color}]{quality_score:.3f}[/{quality_color}]", "⭐")
+
+    # 平台期置信度（如果可用）
+    if plateau_confidence is not None:
+        conf_color = "bold green" if plateau_confidence > 0.9 else "green" if plateau_confidence > 0.8 else "yellow"
+        table.add_row("平台期置信度", f"[{conf_color}]{plateau_confidence:.3f}[/{conf_color}]", "🎯")
+
+    # 系统状态
+    system_status = "🟢 重构成功" if best_reward > 0 else "🟡 学习中" if avg_reward > -2 else "🔴 需优化"
+    table.add_row("系统状态", system_status, "🔧")
+
+    return Panel(
+        table,
+        title="[bold blue]🚀 训练状态监控 - 系统现代化重构版[/bold blue]",
+        border_style="blue",
+        padding=(1, 2)
+    )
 
 
 def print_training_summary(stats: Dict[str, Any]):

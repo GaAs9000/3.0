@@ -1,0 +1,59 @@
+{
+  "plateau_detector": {
+    "improving": {
+      "plateau_detected": "False",
+      "confidence": 0.6331913025654696,
+      "improvement_rate": 0.08869047619047615,
+      "stability_score": 0.9598440244245807,
+      "historical_percentile": 1.0
+    },
+    "plateau": {
+      "plateau_detected": "False",
+      "confidence": 0.8466371380234221,
+      "improvement_rate": 0.0008333333333333096,
+      "stability_score": 0.9999015711891844,
+      "historical_percentile": 0.5
+    },
+    "declining": {
+      "plateau_detected": "False",
+      "confidence": 0.3328174171668544,
+      "improvement_rate": 0.09583333333333334,
+      "stability_score": 0.9538358350006261,
+      "historical_percentile": 0.1
+    },
+    "noisy": {
+      "plateau_detected": "True",
+      "confidence": 0.867892772040007,
+      "improvement_rate": 0.014285714285714233,
+      "stability_score": 0.95011876394288,
+      "historical_percentile": 0.8
+    }
+  },
+  "quality_score": {
+    "ieee14": {
+      "num_nodes": 14,
+      "random_score": 0.5413945864124864,
+      "uniform_score": 0.5097951162721108,
+      "score_difference": -0.03159947014037556
+    },
+    "ieee30": {
+      "num_nodes": 30,
+      "random_score": 0.7453226095230486,
+      "uniform_score": 0.6643004463871,
+      "score_difference": -0.08102216313594868
+    },
+    "ieee57": {
+      "num_nodes": 57,
+      "random_score": 0.5923181002801889,
+      "uniform_score": 0.4360576432890221,
+      "score_difference": -0.15626045699116686
+    }
+  },
+  "early_stopping": {
+    "steps_executed": 1,
+    "early_stop_triggered": false,
+    "final_info": {
+      "termination_reason": "invalid_action"
+    }
+  }
+}

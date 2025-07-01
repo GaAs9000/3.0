@@ -66,21 +66,21 @@ class PowerGridPartitioningEnv:
         from .action_space import ActionMask
         self.action_space.mask_handler = ActionMask(hetero_data, device)
 
-        # 【新增】奖励函数支持
-        # 支持两种奖励模式：legacy（原有）、dual_layer（新奖励系统）
-        self.reward_mode = reward_weights.get('reward_mode', 'dual_layer') if reward_weights else 'dual_layer'
+        # 奖励函数支持 - 统一使用自适应质量导向奖励系统
+        reward_config = {
+            'reward_weights': reward_weights,
+            'thresholds': reward_weights.get('thresholds', {}) if reward_weights else {},
+            'max_steps': max_steps
+        }
+        # 如果config中有adaptive_quality配置，添加到reward_config中
+        if config and 'adaptive_quality' in config:
+            reward_config['adaptive_quality'] = config['adaptive_quality']
 
-        if self.reward_mode == 'dual_layer':
-            # 使用新的奖励函数
-            from .reward import DualLayerRewardFunction
-            self.reward_function = DualLayerRewardFunction(
-                hetero_data,
-                config={'reward_weights': reward_weights, 'thresholds': reward_weights.get('thresholds', {})},
-                device=device
-            )
-        else:
-            # 保持原有的增量奖励机制（向后兼容）
-            self.reward_function = None
+        self.reward_function = RewardFunction(
+            hetero_data,
+            config=reward_config,
+            device=device
+        )
 
         self.metis_initializer = MetisInitializer(hetero_data, device, config)
         self.evaluator = PartitionEvaluator(hetero_data, device)
@@ -392,11 +392,13 @@ class PowerGridPartitioningEnv:
         self.is_truncated = False
 
         # 重置奖励函数状态
-        if self.reward_mode == 'dual_layer' and self.reward_function is not None:
-            self.reward_function.reset_episode()
+        self.reward_function.reset_episode()
         
         # 获取初始观察
         observation = self.state_manager.get_observation()
+
+        # 添加动作掩码到观察中
+        observation['action_mask'] = self.get_action_mask(use_advanced_constraints=True)
         
         # 计算初始指标
         initial_metrics = self.evaluator.evaluate_partition(
@@ -419,119 +421,9 @@ class PowerGridPartitioningEnv:
         
         return observation, info
     
-    def _compute_improvement_reward(self, current_metrics: dict, previous_metrics: dict) -> float:
-        """
-        计算基于"改善程度"的即时奖励 (Delta Reward)。
-        奖励的核心是比较当前指标与上一步指标的差异。
-        """
-        # 硬约束检查：如果破坏了连通性，给予重罚
-        # 【修复】将连通性惩罚从-10.0降低到-3.0
-        if current_metrics.get('connectivity', 1.0) < 1.0:
-            return -3.0
 
-        # 【改进】大幅降低进度奖励，从隐式的大奖励变为小激励
-        progress_reward = 0.1  # 每个动作的基础奖励，仅作为探索激励
-
-        # 定义各项改善的权重
-        improvement_weights = {
-            'load_cv': 5.0,      # 降低权重，避免过度激励
-            'total_coupling': 2.0,
-            'power_balance': 3.0
-        }
-
-        # 1. 负荷均衡改善奖励 (load_cv 越低越好，所以 prev - curr > 0 代表改善)
-        cv_improvement = previous_metrics.get('load_cv', 1.0) - current_metrics.get('load_cv', 1.0)
-        cv_reward = cv_improvement * improvement_weights['load_cv']
-
-        # 2. 耦合度改善奖励 (total_coupling 越低越好)
-        coupling_improvement = previous_metrics.get('total_coupling', 1e5) - current_metrics.get('total_coupling', 1e5)
-        coupling_reward = coupling_improvement * improvement_weights['total_coupling']
-
-        # 3. 功率平衡改善奖励 (power_imbalance_mean 越低越好)
-        pb_improvement = previous_metrics.get('power_imbalance_mean', 1e5) - current_metrics.get('power_imbalance_mean', 1e5)
-        pb_reward = pb_improvement * improvement_weights['power_balance']
-
-        # 4. 质量维持奖励 - 如果已经很好了，给予小奖励维持
-        quality_maintenance = 0.0
-        if current_metrics.get('load_cv', 1.0) < 0.2:
-            quality_maintenance = 0.3
-
-        # 5. 时间效率激励 - 早期完成给予额外奖励
-        efficiency_bonus = max(0, (self.max_steps - self.current_step) * 0.005)
-
-        # 将所有奖励分量加总
-        total_reward = progress_reward + cv_reward + coupling_reward + pb_reward + quality_maintenance + efficiency_bonus
-        
-        # 将奖励值裁剪到一个合理的范围
-        clipped_reward = np.clip(total_reward, -3.0, 2.0)
-
-        return clipped_reward
     
-    def _compute_final_bonus(self) -> float:
-        """
-        计算完成分区后的最终奖励 - 这才是重头戏！
-        强化"终局质量"，鼓励智能体追求高质量的最终结果
-        """
-        current_metrics = self.evaluator.evaluate_partition(self.state_manager.current_partition)
-        
-        # 基础完成奖励 - 奖励成功完成所有节点分配
-        completion_bonus = 15.0
-        
-        # 质量奖励 - 根据最终分区质量给予额外奖励
-        quality_bonus = 0.0
-        
-        # 负荷均衡奖励（CV越小越好）
-        load_cv = current_metrics.get('load_cv', 1.0)
-        if load_cv < 0.1:
-            quality_bonus += 20.0  # 极佳的负荷平衡
-        elif load_cv < 0.2:
-            quality_bonus += 10.0
-        elif load_cv < 0.3:
-            quality_bonus += 5.0
-        
-        # 低耦合奖励
-        total_coupling = current_metrics.get('total_coupling', 1e5)
-        inter_region_lines = current_metrics.get('inter_region_lines', 1)
-        avg_coupling = total_coupling / max(inter_region_lines, 1)
-        if avg_coupling < 0.3:
-            quality_bonus += 10.0
-        elif avg_coupling < 0.5:
-            quality_bonus += 5.0
-        
-        # 功率平衡奖励
-        power_imbalance = current_metrics.get('power_imbalance_mean', 1e5)
-        if power_imbalance < 10.0:
-            quality_bonus += 8.0
-        elif power_imbalance < 50.0:
-            quality_bonus += 4.0
-        
-        # 连通性必须满足
-        connectivity = current_metrics.get('connectivity', 1.0)
-        if connectivity == 1.0:
-            quality_bonus += 5.0
-        else:
-            # 如果最终状态不连通，严重惩罚
-            # 【修复】将终局连通性惩罚从-30.0降低到-10.0，仍然严厉但合理
-            return -10.0
-        
-        # 效率奖励 - 用较少步数完成
-        efficiency_bonus = 0.0
-        if self.current_step < self.max_steps * 0.8:
-            efficiency_ratio = 1.0 - (self.current_step / self.max_steps)
-            efficiency_bonus = efficiency_ratio * 10.0
-        
-        total_bonus = completion_bonus + quality_bonus + efficiency_bonus
-        
-        # 记录详细信息用于调试
-        self.final_bonus_components = {
-            'completion': completion_bonus,
-            'quality': quality_bonus,
-            'efficiency': efficiency_bonus,
-            'total': total_bonus,
-            'metrics': current_metrics
-        }
-        
-        return total_bonus
+
         
     def step(self, action: Tuple[int, int]) -> Tuple[Dict[str, torch.Tensor], float, bool, bool, Dict[str, Any]]:
         """
@@ -556,7 +448,7 @@ class PowerGridPartitioningEnv:
             self.state_manager.current_partition,
             self.state_manager.get_boundary_nodes()
         ):
-            # 【修复】将无效动作惩罚从-10.0降低到-2.0，与正常奖励尺度匹配
+            # 无效动作惩罚
             return self.state_manager.get_observation(), -2.0, True, False, {'termination_reason': 'invalid_action'}
 
         # 2. 【新增】连通性约束检查（软约束模式）
@@ -579,33 +471,34 @@ class PowerGridPartitioningEnv:
         node_idx, target_partition = action
         self.state_manager.update_partition(node_idx, target_partition)
 
-        # 5. 计算新状态的指标
-        current_metrics = self.evaluator.evaluate_partition(self.state_manager.current_partition)
-        
-        # 6. 【核心】计算奖励 - 支持两种模式
-        if self.reward_mode == 'dual_layer' and self.reward_function is not None:
-            # 使用新的奖励函数 - 仅计算即时奖励
-            reward = self.reward_function.compute_incremental_reward(
-                self.state_manager.current_partition,
-                action
-            )
-            # 获取当前指标用于调试
-            current_reward_metrics = self.reward_function.get_current_metrics(
-                self.state_manager.current_partition
-            )
-            self.last_reward_components = {
-                'incremental_reward': reward,
-                'current_metrics': current_reward_metrics,
-                'reward_mode': 'dual_layer'
-            }
-        else:
-            # 使用原有的增量奖励机制（向后兼容）
-            reward = self._compute_improvement_reward(current_metrics, self.previous_metrics)
-            self.last_reward_components = {
-                'improvement_reward': reward,
-                'current_metrics': current_metrics,
-                'reward_mode': 'legacy'
-            }
+        # 5. 【核心】计算奖励 - 使用自适应质量导向奖励系统
+        plateau_result = None
+        # 使用自适应质量导向奖励函数
+        reward, plateau_result = self.reward_function.compute_incremental_reward(
+            self.state_manager.current_partition,
+            action
+        )
+
+        # 6. 统一使用新奖励系统的指标（修复双套指标系统冲突）
+        current_metrics = self.reward_function.get_current_metrics(
+            self.state_manager.current_partition
+        )
+        quality_score = self.reward_function.get_current_quality_score(
+            self.state_manager.current_partition
+        )
+
+        # 补充一些环境需要的额外指标
+        current_metrics.update({
+            'connectivity': 1.0,  # 假设连通（可以后续优化）
+            'step': self.current_step
+        })
+
+        self.last_reward_components = {
+            'incremental_reward': reward,
+            'current_metrics': current_metrics,
+            'quality_score': quality_score,
+            'plateau_result': plateau_result
+        }
 
         # 7. 【新增】应用软约束惩罚
         constraint_penalty = 0.0
@@ -622,45 +515,72 @@ class PowerGridPartitioningEnv:
         
         # 5. 【关键】更新"上一步"的指标，为下一次计算做准备
         self.previous_metrics = current_metrics
-        
-        # 6. 更新步数和检查终止条件
+
+        # 6. 【新增】检查平台期早停条件
+        early_stop_triggered = False
+        early_stop_confidence = 0.0
+        if plateau_result is not None:
+            # 检查是否满足早停条件
+            early_stop_threshold = self.reward_function.adaptive_quality_config['efficiency_reward']['early_stop_confidence']
+            if (plateau_result.plateau_detected and
+                plateau_result.confidence > early_stop_threshold):
+                early_stop_triggered = True
+                early_stop_confidence = plateau_result.confidence
+
+        # 7. 更新步数和检查终止条件
         self.current_step += 1
         terminated, truncated = self._check_termination()
+
+        # 8. 【新增】应用早停逻辑
+        if early_stop_triggered and not terminated and not truncated:
+            terminated = True
+            # 在info中记录早停信息
+            info_bonus = {
+                'early_termination': True,
+                'termination_reason': 'quality_plateau_reached',
+                'plateau_confidence': early_stop_confidence,
+                'plateau_details': plateau_result._asdict() if plateau_result else {}
+            }
         
-        # 7. 【核心改进】区分结束类型，应用终局奖励
+        # 9. 【核心改进】区分结束类型，应用终局奖励
         if terminated or truncated:
-            if self.reward_mode == 'dual_layer' and self.reward_function is not None:
-                # 使用双层奖励函数计算终局奖励
+            # 确定终止类型（考虑早停情况）
+            if early_stop_triggered:
+                termination_type = 'early_stop'
+            else:
                 termination_type = self._determine_termination_type(terminated, truncated)
-                final_reward, final_components = self.reward_function.compute_final_reward(
-                    self.state_manager.current_partition,
-                    termination_type
-                )
-                reward += final_reward
+
+            # 使用奖励函数计算终局奖励
+            final_reward, final_components = self.reward_function.compute_final_reward(
+                self.state_manager.current_partition,
+                termination_type
+            )
+            reward += final_reward
+
+            # 合并早停信息和终局奖励信息
+            if early_stop_triggered:
+                info_bonus.update(final_components)
+                info_bonus['termination_type'] = termination_type
+                info_bonus['final_reward'] = final_reward
+            else:
                 info_bonus = final_components
                 info_bonus['termination_type'] = termination_type
-            else:
-                # 使用原有的终局奖励逻辑
-                final_bonus, termination_type = self._apply_final_bonus(terminated, truncated)
-                reward += final_bonus
 
-                # 记录终局奖励详情
-                if hasattr(self, 'final_bonus_components'):
-                    info_bonus = self.final_bonus_components
-                    info_bonus['termination_type'] = termination_type
-                else:
-                    info_bonus = {'termination_type': termination_type, 'final_bonus': final_bonus}
+                reward += final_bonus
         else:
             info_bonus = {}
         
         # 8. 准备返回信息
         observation = self.state_manager.get_observation()
+
+        # 添加动作掩码到观察中
+        observation['action_mask'] = self.get_action_mask(use_advanced_constraints=True)
         
         info = {
             'step': self.current_step,
             'metrics': current_metrics,
             'reward': reward,
-            'reward_mode': self.reward_mode,
+            'reward_mode': 'adaptive_quality',
             **info_bonus
         }
 

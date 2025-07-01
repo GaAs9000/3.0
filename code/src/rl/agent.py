@@ -491,20 +491,22 @@ class PPOAgent:
         region_embeddings = state['region_embeddings']
         boundary_nodes = state['boundary_nodes']
         
-        # 获取动作掩码
-        action_mask = torch.zeros(
-            node_embeddings.shape[0], self.num_partitions,
-            dtype=torch.bool, device=self.device
-        )
-        
-        # 基于边界节点和当前分区设置有效动作
-        current_partition = state['current_partition']
-        for node_idx in boundary_nodes:
-            current_node_partition = current_partition[node_idx].item()
-            # 允许移动到所有其他分区（简化版）
-            for p in range(self.num_partitions):
-                if p + 1 != current_node_partition:  # +1用于基于1的分区
-                    action_mask[node_idx, p] = True
+        # 获取动作掩码 - 使用环境提供的正确掩码
+        if 'action_mask' in state:
+            action_mask = state['action_mask']
+        else:
+            # 回退到简化版本（不推荐）
+            action_mask = torch.zeros(
+                node_embeddings.shape[0], self.num_partitions,
+                dtype=torch.bool, device=self.device
+            )
+            current_partition = state['current_partition']
+            for node_idx in boundary_nodes:
+                current_node_partition = current_partition[node_idx].item()
+                # 允许移动到所有其他分区（简化版）
+                for p in range(self.num_partitions):
+                    if p + 1 != current_node_partition:  # +1用于基于1的分区
+                        action_mask[node_idx, p] = True
         
         with torch.no_grad():
             # 获取网络输出

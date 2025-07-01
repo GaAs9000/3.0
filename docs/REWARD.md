@@ -1,257 +1,368 @@
-# 奖励函数系统
+# 自适应质量导向奖励系统设计文档
 
 ## 概述
 
-本系统实现了基于势函数理论的激励结构，用于电力网络分区的强化学习训练。该系统由**即时奖励（reward）**和**终局奖励（Reward）**组成，旨在提供密集反馈的同时确保智能体追求高质量的最终分区方案。
+本文档描述了电力网络分区强化学习系统中的自适应质量导向奖励函数设计。该系统实现了基于势函数理论的自适应质量导向激励结构，具备跨网络适应性、平台期检测和智能早停机制。
 
-## 核心设计原则
+## 🎯 核心设计理念
 
-### 1. 理论基础
-- **势函数奖励塑造**：基于Ng等人的势函数理论，确保奖励塑造不改变最优策略
-- **增量奖励机制**：即时奖励等价于势函数差值，提供密集的学习信号
-- **质量导向终局**：终局奖励基于最终分区质量，定义成功标准
+### 两层奖励结构 + 平台期检测
+1. **主奖励层**：纯势函数，鼓励质量改善，零固定阈值
+2. **效率奖励层**：仅在质量平台期激活，鼓励快速收敛
+3. **检测机制**：基于相对改善率的自适应判断
 
-### 2. 数值稳定性
-- **NaN/inf保护**：所有数学计算都有epsilon保护和异常处理
-- **值域限制**：奖励值被限制在合理范围内，防止梯度爆炸
-- **鲁棒性设计**：能够处理极端输入和边界情况
+### 完全相对化设计
+- **零固定阈值依赖**：所有评估基于相对改善，自动适应不同网络规模
+- **跨网络适应性**：同一套配置适用于IEEE14到IEEE118的所有网络
+- **势函数奖励**：基于质量分数的相对变化，理论保证最优策略不变
 
-### 3. 向后兼容
-- **多模式支持**：支持legacy、enhanced、dual_layer三种奖励模式
-- **配置驱动**：所有参数通过配置文件控制，便于调优
-- **接口一致**：保持与原有系统相同的调用接口
+### 核心特性
+- **完全相对化**：自动适应不同网络的质量水平
+- **平台期检测**：基于改善率、稳定性和历史表现的综合判断
+- **效率激励**：仅在质量平台期激活，避免质量牺牲
+- **数值稳定性**：全面的NaN/inf保护和异常处理
 
-## 系统架构
+## 📊 核心算法设计
 
-### DualLayerRewardFunction类
+### 1. 综合质量分数计算
+
+```
+Q(s) = 1 - normalize(w₁·CV + w₂·coupling_ratio + w₃·power_imbalance)
+
+其中:
+- CV ∈ [0, ∞), 越小越好
+- coupling_ratio ∈ [0, 1], 越小越好
+- power_imbalance ∈ [0, ∞), 越小越好
+- normalize(): 映射到 [0, 1], 使Q(s) ∈ [0, 1], 越大越好
+```
+
+### 2. 势函数主奖励
+
+```
+Φ(s) = Q(s)  // 直接使用质量分作为势函数
+
+主奖励 = γ · Φ(s_{t+1}) - Φ(s_t)
+      = γ · Q(s_{t+1}) - Q(s_t)
+```
+
+**关键优势**: 完全相对化，自动适应不同网络的质量水平
+
+### 3. 平台期检测算法
+
+```
+ALGORITHM: QualityPlateauDetection
+INPUT: recent_scores[window_size], all_history_scores
+OUTPUT: plateau_detected, confidence
+
+// 1. 改善率检测
+slope = linear_regression_slope(recent_scores)
+improvement_rate = |slope|
+
+// 2. 稳定性检测
+variance = var(recent_scores)
+stability_score = 1 / (1 + variance)
+
+// 3. 相对水平检测
+current_score = recent_scores.last()
+historical_percentile = percentile_rank(all_history_scores, current_score)
+
+// 4. 综合判断
+plateau_detected = (
+    improvement_rate < min_improvement_threshold AND
+    stability_score > stability_threshold AND
+    historical_percentile > min_percentile_threshold
+)
+
+confidence = weighted_average(
+    1 - improvement_rate/max_rate,     # 改善越慢，置信度越高
+    stability_score,                   # 越稳定，置信度越高
+    historical_percentile              # 表现越好，置信度越高
+)
+```
+
+### 4. 效率奖励机制
+
+```
+IF plateau_detected AND confidence > confidence_threshold:
+    efficiency_reward = λ · (max_steps - current_step) / max_steps
+ELSE:
+    efficiency_reward = 0
+
+总奖励 = 主奖励 + efficiency_reward
+```
+
+## 🏗️ 系统架构
+
+### RewardFunction类
 
 ```python
-class DualLayerRewardFunction:
-    """奖励函数系统核心类"""
-    
+class RewardFunction:
+    """自适应质量导向奖励函数系统"""
+
     def __init__(self, hetero_data, config, device):
-        """初始化奖励函数"""
-        
+        """初始化自适应质量导向奖励函数"""
+        self.plateau_detector = self._create_plateau_detector()
+        self.adaptive_quality_config = self._load_adaptive_quality_config()
+
     def compute_incremental_reward(self, partition, action):
-        """计算即时奖励"""
-        
-    def compute_final_reward(self, partition, termination_type):
-        """计算终局奖励"""
+        """计算自适应质量导向即时奖励"""
+        # 返回 (总奖励, 平台期检测结果)
+
+    def _compute_quality_score(self, partition):
+        """计算统一质量分数"""
+
+    def should_early_stop(self, partition):
+        """判断是否应该早停"""
 ```
 
 ### 核心组件
 
-1. **_compute_core_metrics()**: 中心化指标计算，避免重复计算
-2. **previous_metrics**: 前一步指标缓存，支持增量计算
-3. **数值稳定性保护**: 全面的NaN/inf检查和处理
+1. **QualityPlateauDetector**: 平台期检测器，实现三层检测算法
+2. **_compute_quality_score()**: 统一质量分数计算，支持跨网络适应性
+3. **plateau_detector**: 平台期检测器实例，管理检测状态
+4. **adaptive_quality_config**: 自适应质量配置，控制检测参数
 
-## 即时奖励系统
+## ⚙️ 配置参数设计
 
-### 计算公式
-```
-reward_t = tanh(5.0 * (w1*Δbalance + w2*Δdecoupling + w3*Δpower))
-```
+### 新增配置节
 
-其中：
-- **Δbalance** = CV(t-1) - CV(t)：负载平衡改善量
-- **Δdecoupling** = coupling_ratio(t-1) - coupling_ratio(t)：电气解耦改善量  
-- **Δpower** = power_imbalance(t-1) - power_imbalance(t)：功率平衡改善量
-
-### 核心指标
-
-#### 1. 负载平衡指标 (CV)
-```
-CV = σ(L1, L2, ..., LK) / μ(L1, L2, ..., LK)
-```
-- **Lk**: 第k个分区的总有功功率负载
-- **σ**: 标准差函数
-- **μ**: 平均值函数
-
-#### 2. 电气解耦指标
-```
-coupling_ratio = Σ(跨区导纳) / Σ(总导纳)
-edge_decoupling_ratio = 1 - (跨区边数 / 总边数)
-```
-
-#### 3. 功率平衡指标
-```
-power_imbalance_normalized = Σ|Pgen,k - Pload,k| / Σ|Pd,i|
-```
-
-### 特性
-- **值域稳定**：使用tanh归一化到[-1, 1]范围
-- **敏感度控制**：5倍放大因子增加对改善的敏感性
-- **增量特性**：符合势函数奖励塑造理论
-
-## 终局奖励系统
-
-### 计算公式
-```
-Reward = (w1*R_balance + w2*R_decoupling + w3*R_power + threshold_bonus) * termination_discount
-```
-
-### 核心奖励组件
-
-#### 1. 负载平衡奖励
-```
-R_balance = exp(-2.0 * CV)
-```
-- CV越小，奖励越接近1.0
-- 指数函数提供非线性激励
-
-#### 2. 电气解耦奖励
-```
-R_decoupling = 0.5 * σ(5*(r_edge - 0.5)) + 0.5 * σ(5*(r_admittance - 0.5))
-```
-- **r_edge**: 拓扑解耦率 = 1 - (跨区边数/总边数)
-- **r_admittance**: 导纳解耦率 = 1 - (跨区导纳/总导纳)
-- **σ**: sigmoid函数
-
-#### 3. 功率平衡奖励
-```
-R_power = exp(-3.0 * I_normalized)
-```
-- **I_normalized**: 归一化功率不平衡度
-- 指数函数强调功率平衡的重要性
-
-### 非线性阈值奖励
-
-根据质量阈值提供分段奖励：
-
-| 指标 | 卓越阈值 | 卓越奖励 | 良好阈值 | 良好奖励 |
-|------|----------|----------|----------|----------|
-| CV | < 0.1 | +10.0 | < 0.2 | +5.0 |
-| 耦合比率 | < 0.3 | +8.0 | < 0.5 | +4.0 |
-| 功率不平衡 | < 10% | +6.0 | < 50% | +3.0 |
-
-### 终止条件折扣
-
-| 终止类型 | 折扣系数 | 说明 |
-|----------|----------|------|
-| natural | 1.0 | 自然完成，无折扣 |
-| timeout | 0.7 | 超时完成，70%折扣 |
-| stuck | 0.3 | 提前卡住，30%折扣 |
-
-## 配置参数
-
-### 基本配置
 ```yaml
-environment:
-  reward_weights:
-    reward_mode: dual_layer  # 启用新奖励系统
-    
-    dual_layer_config:
-      # 即时奖励权重
-      balance_weight: 1.0
-      decoupling_weight: 1.0
-      power_weight: 1.0
-      
-      # 终局奖励权重
-      final_balance_weight: 0.4
-      final_decoupling_weight: 0.4
-      final_power_weight: 0.2
+adaptive_quality:
+  enabled: true
+
+  # 平台期检测参数
+  plateau_detection:
+    window_size: 15                    # 观察窗口大小
+    min_improvement_rate: 0.005        # 最小改善率阈值
+    stability_threshold: 0.8           # 稳定性要求
+    min_percentile: 0.7                # 历史表现要求(前70%)
+    confidence_threshold: 0.8          # 早停置信度要求
+
+  # 效率奖励参数
+  efficiency_reward:
+    lambda: 0.5                        # 效率奖励权重
+    early_stop_confidence: 0.85        # 早停置信度阈值
+
+  # 质量分数权重(替代原有固定阈值)
+  quality_weights:
+    cv_weight: 0.4
+    coupling_weight: 0.3
+    power_weight: 0.3
 ```
 
-### 质量阈值配置
+### 移除的配置
+
 ```yaml
-    thresholds:
-      excellent_cv: 0.1
-      good_cv: 0.2
-      excellent_coupling: 0.3
-      good_coupling: 0.5
-      excellent_power: 10.0
-      good_power: 50.0
+# 删除这些固定阈值配置
+thresholds:
+  excellent_cv: 0.1          # ❌ 删除
+  good_cv: 0.2               # ❌ 删除
+  excellent_coupling: 0.3    # ❌ 删除
+  good_coupling: 0.5         # ❌ 删除
+  excellent_power: 10.0      # ❌ 删除
+  good_power: 50.0           # ❌ 删除
+## 🚀 使用示例
+
+### 1. 基本配置
+
+```python
+# 在config.yaml中启用自适应质量系统
+adaptive_quality:
+  enabled: true
+  plateau_detection:
+    window_size: 15
+    min_improvement_rate: 0.005
+    stability_threshold: 0.8
+    min_percentile: 0.7
+    confidence_threshold: 0.8
+  efficiency_reward:
+    lambda: 0.5
+    early_stop_confidence: 0.85
+  quality_weights:
+    cv_weight: 0.4
+    coupling_weight: 0.3
+    power_weight: 0.3
 ```
 
-### 预设配置
-系统默认启用新的奖励系统，所有训练模式都使用该奖励函数。
+### 2. 环境集成
 
-## 使用方法
+```python
+# 创建支持自适应质量的环境
+env = PowerGridPartitioningEnv(
+    hetero_data=hetero_data,
+    node_embeddings=node_embeddings,
+    num_partitions=3,
+    reward_weights={},  # 统一使用自适应质量导向奖励系统
+    max_steps=200,
+    device=device,
+    config=config  # 包含adaptive_quality配置
+)
 
-### 1. 配置启用
-在`config.yaml`中设置：
-```yaml
-environment:
-  reward_weights:
-    reward_mode: dual_layer
+# 训练循环
+obs, info = env.reset()
+for step in range(max_steps):
+    action = agent.select_action(obs)
+    obs, reward, terminated, truncated, info = env.step(action)
+
+    # 检查早停
+    if info.get('early_termination', False):
+        print(f"早停触发于第{step}步，置信度={info['plateau_confidence']:.3f}")
+        break
 ```
 
-### 2. 训练启动
+### 3. 奖励函数直接使用
+
+```python
+# 创建奖励函数
+reward_function = RewardFunction(
+    hetero_data,
+    config={'adaptive_quality': adaptive_config},
+    device=device
+)
+
+# 计算奖励
+reward, plateau_result = reward_function.compute_incremental_reward(
+    current_partition, action
+)
+
+# 检查平台期
+if plateau_result and plateau_result.plateau_detected:
+    print(f"检测到平台期，置信度: {plateau_result.confidence:.3f}")
+```
+
+## 📈 预期效果与验证
+
+### 1. 训练效果改善
+
+**指标监控**:
+- `average_episode_length`: 应该随训练下降（更快收敛）
+- `early_termination_rate`: 应该随训练上升（更多早停成功）
+- `plateau_confidence_mean`: 检测器的平均置信度
+- `quality_score_final`: 最终质量分数分布
+
+### 2. 跨网络适应性验证
+
+**测试方案**:
+```
+FOR each_network IN [IEEE14, IEEE30, IEEE57, IEEE118]:
+    使用完全相同的配置参数训练
+
+    记录：
+    - 收敛的quality_score范围
+    - 平台期检测的触发时机
+    - 早停成功率
+
+    验证：
+    - 不同网络都能稳定训练
+    - 质量改善曲线形状相似
+    - 无需针对性调参
+```
+
+### 3. 消融实验
+
+```
+实验组A: 仅主奖励(势函数)
+实验组B: 主奖励 + 固定阈值早停
+实验组C: 主奖励 + 自适应平台期检测 (完整方案)
+
+对比维度:
+- 训练稳定性
+- 最终质量
+- 收敛速度
+- 跨网络泛化性
+```
+
+## 🔧 实施优先级
+
+### Phase 1: 核心算法 (必须)
+1. ✅ 实现 `compute_quality_score()` 函数
+2. ✅ 修改主奖励为势函数形式
+3. ✅ 基础的平台期检测逻辑
+
+### Phase 2: 集成与调优 (重要)
+1. ✅ 环境层集成早停逻辑
+2. ✅ 效率奖励机制
+3. ✅ 配置文件重构
+
+### Phase 3: 监控与验证 (建议)
+1. ✅ 详细的日志和可视化
+2. 🔄 跨网络测试
+3. 🔄 超参数敏感性分析
+
+## 💡 关键成功因素
+
+1. **归一化函数设计**: 确保质量分数在不同网络上可比
+2. **窗口大小调优**: 平衡检测敏感性和稳定性
+3. **权重配置**: 主奖励vs效率奖励的平衡
+4. **渐进式部署**: 先在单一网络验证，再推广到多网络
+
+## 🧪 测试验证
+
+运行测试脚本验证系统功能：
+
 ```bash
-python train.py --mode fast
+python test_adaptive_quality.py
 ```
 
-### 3. 环境集成
-系统自动集成到`PowerGridPartitioningEnv`中，无需修改训练代码。
+测试内容：
+- ✅ 平台期检测算法的正确性
+- ✅ 质量分数计算的跨网络适应性
+- ✅ 早停机制的触发条件
+- ✅ 系统集成的完整性
 
-## 技术特性
+## 📚 理论基础
 
-### 数值稳定性保护
-- **输入验证**：检查NaN/inf输入
-- **计算保护**：epsilon保护除零操作
-- **结果限制**：将结果限制在合理范围
-- **异常处理**：捕获并处理计算异常
+### 势函数奖励塑造理论
 
-### 性能优化
-- **缓存机制**：前一步指标缓存避免重复计算
-- **中心化计算**：_compute_core_metrics()统一计算所有指标
-- **向量化操作**：使用PyTorch张量操作提高效率
-
-### 调试支持
-- **组件分解**：终局奖励返回详细的组件分解
-- **指标暴露**：get_current_metrics()方法用于调试分析
-- **状态管理**：reset_episode()方法重置内部状态
-
-## 理论验证
-
-### 势函数理论符合性
-即时奖励严格遵循势函数奖励塑造理论：
+基于Ng et al. (1999)的势函数奖励塑造理论：
 ```
-F(s,a,s') = γ * Φ(s') - Φ(s)
+R'(s,a,s') = R(s,a,s') + γΦ(s') - Φ(s)
 ```
-其中势函数Φ(s) = -(w1*CV + w2*coupling + w3*power_imbalance)
 
-### 公式正确性
-所有奖励公式都经过数学验证，确保：
-- 负载平衡奖励：R_balance = exp(-2.0 * CV)
-- 功率平衡奖励：R_power = exp(-3.0 * I_normalized)
-- 电气解耦奖励：基于sigmoid函数的组合
+在我们的系统中：
+- **Φ(s) = Q(s)**：势函数直接使用质量分数
+- **R(s,a,s') = 0**：原始环境奖励为0
+- **R'(s,a,s') = γQ(s') - Q(s)**：塑形后的奖励
 
-## 与原系统对比
+**理论保证**：势函数奖励塑造不改变最优策略，只改变学习速度。
 
-| 特性 | 原系统 | 新奖励系统 |
-|------|--------|-------------|
-| 理论基础 | 启发式设计 | 势函数理论 |
-| 奖励密度 | 稀疏 | 密集+终局 |
-| 数值稳定性 | 基本保护 | 全面保护 |
-| 配置灵活性 | 有限 | 高度可配置 |
-| 调试支持 | 基本 | 详细分解 |
+### 平台期检测的数学基础
 
-## 最佳实践
+#### 1. 改善率检测
+使用线性回归分析质量分数序列的趋势：
+```
+slope = argmin_β Σ(Q_i - (α + β·i))²
+improvement_rate = |slope|
+```
 
-### 1. 参数调优
-- 从默认配置开始
-- 根据网络特性调整权重
-- 监控奖励组件分解进行优化
+#### 2. 稳定性检测
+基于方差的稳定性度量：
+```
+stability_score = 1 / (1 + Var(Q_recent))
+```
 
-### 2. 训练策略
-- 使用fast模式进行日常训练
-- 监控即时奖励和终局奖励的平衡
-- 根据收敛情况调整阈值
+#### 3. 历史百分位数
+评估当前表现在历史中的相对位置：
+```
+percentile = |{Q_hist ≤ Q_current}| / |Q_hist|
+```
 
-### 3. 性能监控
-- 关注奖励组件的分布
-- 监控数值稳定性警告
-- 分析终止类型分布
+### 跨网络适应性的数学原理
 
-## 故障排除
+通过归一化确保质量分数的可比性：
+```
+normalized_cv = CV / (1 + CV)           ∈ [0, 1)
+normalized_coupling = coupling_ratio     ∈ [0, 1]
+normalized_power = power_imb / (1 + power_imb) ∈ [0, 1)
 
-### 常见问题
-1. **奖励值异常**：检查输入数据的有效性
-2. **收敛缓慢**：调整权重平衡或阈值设置
-3. **数值不稳定**：启用调试模式查看详细信息
+Q(s) = 1 - (w₁·norm_cv + w₂·norm_coupling + w₃·norm_power) / (w₁ + w₂ + w₃)
+```
 
-### 调试方法
-1. 使用`get_current_metrics()`检查指标计算
-2. 分析终局奖励的组件分解
-3. 监控即时奖励的变化趋势
+这种设计确保：
+- 不同网络规模的质量分数具有可比性
+- 权重配置在所有网络上保持一致的语义
+- 无需针对特定网络调整阈值参数
+
+---
+
+**总结**: 这套自适应质量导向奖励系统彻底移除了固定阈值依赖，通过势函数+平台期检测实现真正的自适应质量导向训练。同一套配置可以适用于任意规模的电网，既保证质量改善又鼓励训练效率。

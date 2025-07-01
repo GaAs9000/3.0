@@ -46,24 +46,34 @@ environment:
   num_partitions: 3
   max_steps: 200
   reward_weights:
-    reward_mode: dual_layer
+    # 保留基础权重配置以向后兼容
     load_balance: 0.4
     electrical_decoupling: 0.4
     power_balance: 0.2
-    dual_layer_config:
-      balance_weight: 1.0
-      decoupling_weight: 1.0
-      power_weight: 1.0
-      final_balance_weight: 0.4
-      final_decoupling_weight: 0.4
-      final_power_weight: 0.2
-    thresholds:
-      excellent_cv: 0.1
-      good_cv: 0.2
-      excellent_coupling: 0.3
-      good_coupling: 0.5
-      excellent_power: 10.0
-      good_power: 50.0
+    final_balance_weight: 0.4
+    final_decoupling_weight: 0.4
+    final_power_weight: 0.2
+
+# ==================== 自适应质量导向训练配置 ====================
+adaptive_quality:
+  # 平台期检测参数
+  plateau_detection:
+    window_size: 15                    # 观察窗口大小
+    min_improvement_rate: 0.005        # 最小改善率阈值
+    stability_threshold: 0.8           # 稳定性要求
+    min_percentile: 0.7                # 历史表现要求(前70%)
+    confidence_threshold: 0.8          # 早停置信度要求
+
+  # 效率奖励参数
+  efficiency_reward:
+    lambda: 0.5                        # 效率奖励权重
+    early_stop_confidence: 0.85        # 早停置信度阈值
+
+  # 质量分数权重(替代原有固定阈值)
+  quality_weights:
+    cv_weight: 0.4
+    coupling_weight: 0.3
+    power_weight: 0.3
 
 # ==================== GAT编码器配置 ====================
 gat:
