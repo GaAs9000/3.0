@@ -19,6 +19,14 @@ import time
 
 logger = logging.getLogger(__name__)
 
+# 导入增强平台期检测系统
+try:
+    from .plateau_detector import PlateauDetectorIntegration, PlateauDetectionConfig
+    _plateau_detector_available = True
+except ImportError:
+    _plateau_detector_available = False
+    logger.warning("平台期检测系统不可用，将使用基础转换机制")
+
 
 @dataclass
 class StageTransitionCriteria:
@@ -381,6 +389,16 @@ class AdaptiveDirector:
         # 简化日志输出
         self.verbose = config.get('debug', {}).get('adaptive_curriculum_verbose', False)
 
+        # 初始化增强平台期检测系统
+        self.plateau_detector_integration = None
+        if _plateau_detector_available and curriculum_config.get('plateau_detection', {}).get('enabled', False):
+            try:
+                self.plateau_detector_integration = PlateauDetectorIntegration(self)
+                logger.info(f"增强平台期检测系统已启用")
+            except Exception as e:
+                logger.warning(f"平台期检测系统初始化失败: {e}")
+                self.plateau_detector_integration = None
+
         logger.info(f"智能自适应训练导演已初始化 (基础模式: {base_mode})")
 
     def _create_mode_adapted_criteria(self, curriculum_config: Dict[str, Any]) -> StageTransitionCriteria:
@@ -424,6 +442,10 @@ class AdaptiveDirector:
 
         # 4. 阶段转换判定
         self._check_stage_transition(performance)
+
+        # 4.5. 检查是否需要回退（如果启用了增强检测）
+        if self.plateau_detector_integration:
+            self.plateau_detector_integration.check_and_handle_fallback()
 
         # 5. 更新参数调度
         self.parameter_scheduler.update_progress(episode)

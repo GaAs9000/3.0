@@ -10,7 +10,7 @@
 
 import torch
 import numpy as np
-from typing import Dict, List, Tuple, Set, Optional
+from typing import Dict, List, Tuple, Set, Optional, Any
 from torch_geometric.data import HeteroData
 
 
@@ -87,35 +87,52 @@ class ActionSpace:
         """将局部索引转换为全局索引"""
         return self.local_to_global_map[node_type][local_indices]
         
-    def get_valid_actions(self, 
+    def get_valid_actions(self,
                          current_partition: torch.Tensor,
-                         boundary_nodes: torch.Tensor) -> List[Tuple[int, int]]:
+                         boundary_nodes: torch.Tensor,
+                         constraint_mode: str = 'hard') -> List[Tuple[int, int]]:
         """
-        获取当前状态的所有有效动作
-        
+        获取当前状态的所有有效动作 - 支持软约束模式
+
         Args:
             current_partition: 当前分区分配 [total_nodes]
             boundary_nodes: 当前边界节点 [num_boundary]
-            
+            constraint_mode: 约束模式 ('hard' 或 'soft')
+
         Returns:
             有效的(node_idx, target_partition)元组列表
         """
         valid_actions = []
-        
+
         for node_idx in boundary_nodes:
             node_idx_int = node_idx.item()
             current_node_partition = current_partition[node_idx_int].item()
-            
+
             # 获取相邻分区
             neighboring_partitions = self._get_neighboring_partitions(
                 node_idx_int, current_partition
             )
-            
+
             # 为每个相邻分区添加有效动作
             for target_partition in neighboring_partitions:
                 if target_partition != current_node_partition:
-                    valid_actions.append((node_idx_int, target_partition))
-                    
+                    action = (node_idx_int, target_partition)
+
+                    # 在软约束模式下，不过滤连通性违规的动作
+                    if constraint_mode == 'soft':
+                        valid_actions.append(action)
+                    else:
+                        # 硬约束模式：检查连通性约束
+                        if hasattr(self, 'mask_handler') and self.mask_handler:
+                            violation_info = self.mask_handler.check_connectivity_violation(
+                                current_partition, action
+                            )
+                            if not violation_info['violates_connectivity']:
+                                valid_actions.append(action)
+                        else:
+                            # 如果没有mask_handler，默认添加动作
+                            valid_actions.append(action)
+
         return valid_actions
         
     def _get_neighboring_partitions(self, 
@@ -248,38 +265,45 @@ class ActionSpace:
                          state: Dict[str, torch.Tensor],
                          boundary_nodes: torch.Tensor,
                          hetero_data: HeteroData,
-                         apply_constraints: bool = True) -> torch.Tensor:
+                         apply_constraints: bool = True,
+                         constraint_mode: str = 'hard') -> torch.Tensor:
         """
         获取带有高级约束的动作掩码
-        
-        专为计算分区设计的约束系统，重点关注：
-        - 分区连通性
-        - 拓扑优化
-        - 大小平衡
-        
+
+        支持硬约束和软约束两种模式：
+        - 硬约束模式：直接从掩码中移除违规动作（传统模式）
+        - 软约束模式：保留所有基础有效动作，违规信息用于奖励计算
+
         Args:
             state: 当前状态
             boundary_nodes: 当前边界节点
             hetero_data: 异构图数据
             apply_constraints: 是否应用高级约束
-            
+            constraint_mode: 约束模式 ('hard' 或 'soft')
+
         Returns:
-            高级动作掩码
+            动作掩码
         """
         # 获取基础掩码
         base_mask = self.get_action_mask(state['partition_assignment'], boundary_nodes)
-        
+
         if not apply_constraints:
             return base_mask
-            
+
         # 初始化高级掩码处理器
         if not hasattr(self, 'mask_handler'):
             self.mask_handler = ActionMask(hetero_data, self.device)
-            
+
         current_partition = state['partition_assignment']
+
+        # 软约束模式：返回基础掩码，不进行额外过滤
+        if constraint_mode == 'soft':
+            return base_mask
+
+        # 硬约束模式：应用传统的约束过滤
         advanced_mask = base_mask.clone()
-        
-        # 应用连通性约束
+
+        # 应用连通性约束（硬约束模式）
         for node_idx in boundary_nodes:
             for target_partition in range(self.num_partitions):
                 if advanced_mask[node_idx, target_partition]:
@@ -287,15 +311,15 @@ class ActionSpace:
                     if not self.mask_handler.apply_connectivity_constraint(
                         advanced_mask, current_partition, action):
                         advanced_mask[node_idx, target_partition] = False
-                        
+
         # 应用拓扑优化约束
         advanced_mask = self.mask_handler.apply_topology_optimization(
             advanced_mask, current_partition, boundary_nodes)
-            
-        # 应用大小平衡约束  
+
+        # 应用大小平衡约束
         advanced_mask = self.mask_handler.apply_size_balance_constraint(
             advanced_mask, current_partition)
-            
+
         return advanced_mask
 
 
@@ -355,39 +379,52 @@ class ActionMask:
         """将局部索引转换为全局索引"""
         return self.local_to_global_map[node_type][local_indices]
         
-    def apply_connectivity_constraint(self,
-                                    action_mask: torch.Tensor,
-                                    current_partition: torch.Tensor,
-                                    action: Tuple[int, int]) -> bool:
+    def check_connectivity_violation(self,
+                                   current_partition: torch.Tensor,
+                                   action: Tuple[int, int]) -> Dict[str, Any]:
         """
-        检查动作是否保持分区内部连通性
-        
-        目的：确保分区后每个子网络仍然连通，便于潮流计算
-        
+        检查动作是否会违反连通性约束（仅检测，不阻止）
+
+        目的：为软约束系统提供违规信息，用于奖励惩罚计算
+
         Args:
-            action_mask: 当前动作掩码
             current_partition: 当前分区分配
             action: 提议的动作
-            
+
         Returns:
-            如果动作保持连通性返回True，否则返回False
+            包含违规信息的字典：
+            - 'violates_connectivity': bool, 是否违反连通性
+            - 'violation_severity': float, 违规严重程度 (0.0-1.0)
+            - 'isolated_nodes_count': int, 会产生的孤立节点数量
+            - 'affected_partition_size': int, 受影响分区的大小
         """
         node_idx, target_partition = action
         current_node_partition = current_partition[node_idx].item()
-        
+
         # 检查移动节点后，原分区是否仍然连通
         current_partition_nodes = torch.where(current_partition == current_node_partition)[0]
-        
+
         # 如果原分区只有这一个节点，移动后该分区消失，这是允许的
         if len(current_partition_nodes) <= 1:
-            return True
-            
+            return {
+                'violates_connectivity': False,
+                'violation_severity': 0.0,
+                'isolated_nodes_count': 0,
+                'affected_partition_size': 1
+            }
+
         # 如果有多个节点，需要检查移除该节点后剩余节点是否连通
         remaining_nodes = current_partition_nodes[current_partition_nodes != node_idx]
         if len(remaining_nodes) <= 1:
-            return True
-            
-        # 简化的连通性检查：检查剩余节点中是否有孤立节点
+            return {
+                'violates_connectivity': False,
+                'violation_severity': 0.0,
+                'isolated_nodes_count': 0,
+                'affected_partition_size': len(current_partition_nodes)
+            }
+
+        # 检查剩余节点中的孤立节点
+        isolated_nodes = []
         for remaining_node in remaining_nodes:
             has_connection = False
             for neighbor in self.adjacency_list[remaining_node.item()]:
@@ -395,9 +432,32 @@ class ActionMask:
                     has_connection = True
                     break
             if not has_connection:
-                return False  # 发现孤立节点，拒绝移动
-                
-        return True
+                isolated_nodes.append(remaining_node.item())
+
+        # 计算违规严重程度
+        violation_severity = 0.0
+        if len(isolated_nodes) > 0:
+            # 基于孤立节点比例计算严重程度
+            violation_severity = len(isolated_nodes) / len(remaining_nodes)
+
+        return {
+            'violates_connectivity': len(isolated_nodes) > 0,
+            'violation_severity': violation_severity,
+            'isolated_nodes_count': len(isolated_nodes),
+            'affected_partition_size': len(current_partition_nodes)
+        }
+
+    def apply_connectivity_constraint(self,
+                                    action_mask: torch.Tensor,
+                                    current_partition: torch.Tensor,
+                                    action: Tuple[int, int]) -> bool:
+        """
+        【已弃用】保留用于向后兼容，建议使用 check_connectivity_violation
+
+        检查动作是否保持分区内部连通性
+        """
+        violation_info = self.check_connectivity_violation(current_partition, action)
+        return not violation_info['violates_connectivity']
         
     def apply_topology_optimization(self,
                                   action_mask: torch.Tensor,

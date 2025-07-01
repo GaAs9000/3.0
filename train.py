@@ -972,8 +972,8 @@ class UnifiedTrainingSystem:
             },
             'curriculum': {
                 **base_config,
-                'curriculum': {
-                    **base_config['curriculum'],
+                'adaptive_curriculum': {
+                    **base_config.get('adaptive_curriculum', {}),
                     'enabled': True
                 }
             },
@@ -1040,7 +1040,7 @@ class UnifiedTrainingSystem:
         try:
             if mode == 'parallel' or config['parallel_training']['enabled']:
                 return self._run_parallel_training(config)
-            elif mode == 'curriculum' or config['curriculum']['enabled']:
+            elif mode == 'curriculum' or config.get('adaptive_curriculum', {}).get('enabled', False):
                 return self._run_curriculum_training(config)
             elif config.get('adaptive_curriculum', {}).get('enabled', False):
                 return self._run_curriculum_training(config)  # 智能自适应也使用课程学习流程
@@ -1685,14 +1685,35 @@ class UnifiedTrainingSystem:
                 logger.progress_bar.__exit__(None, None, None)
 
     def _apply_director_decision(self, env, agent, decision: Dict[str, Any]):
-        """应用智能导演的决策到环境和智能体"""
+        """应用智能导演的决策到环境和智能体 - 增强版支持动态约束"""
         import builtins
 
         try:
             # 静默模式：减少日志输出
             verbose = self.config.get('debug', {}).get('adaptive_curriculum_verbose', False)
 
-            # 更新环境参数
+            # 【新增】更新动态约束参数
+            constraint_params = {}
+
+            # 约束模式设置
+            if 'connectivity_penalty' in decision:
+                constraint_params['connectivity_penalty'] = decision['connectivity_penalty']
+                # 根据惩罚强度自动设置约束模式
+                if decision['connectivity_penalty'] > 0:
+                    constraint_params['constraint_mode'] = 'soft'
+                else:
+                    constraint_params['constraint_mode'] = 'hard'
+
+            if 'action_mask_relaxation' in decision:
+                constraint_params['action_mask_relaxation'] = decision['action_mask_relaxation']
+
+            # 应用动态约束参数到环境
+            if constraint_params and hasattr(env, 'update_dynamic_constraints'):
+                env.update_dynamic_constraints(constraint_params)
+                if verbose:
+                    print(f"🔧 更新动态约束参数: {constraint_params}")
+
+            # 更新环境奖励参数
             if hasattr(env, 'reward_function') and 'reward_weights' in decision:
                 reward_weights = decision['reward_weights']
                 if hasattr(env.reward_function, 'update_weights'):
@@ -1705,7 +1726,7 @@ class UnifiedTrainingSystem:
                         env.reward_function.update_weights(reward_weights)
                         builtins.print = original_print
 
-            # 更新连通性惩罚
+            # 【保留】向后兼容的连通性惩罚设置
             if 'connectivity_penalty' in decision:
                 if hasattr(env, 'connectivity_penalty'):
                     env.connectivity_penalty = decision['connectivity_penalty']
@@ -1724,6 +1745,9 @@ class UnifiedTrainingSystem:
 
         except Exception as e:
             builtins.print(f"⚠️ 应用导演决策时出错: {e}")
+            import traceback
+            if verbose:
+                traceback.print_exc()
 
     def _save_adaptive_intermediate_results(self, episode: int, director, logger):
         """保存智能自适应训练的中间结果"""

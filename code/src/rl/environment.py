@@ -62,6 +62,10 @@ class PowerGridPartitioningEnv:
         self.state_manager = StateManager(hetero_data, enhanced_embeddings, device, config)
         self.action_space = ActionSpace(hetero_data, num_partitions, device)
 
+        # 【新增】确保ActionMask处理器被初始化
+        from .action_space import ActionMask
+        self.action_space.mask_handler = ActionMask(hetero_data, device)
+
         # 【新增】奖励函数支持
         # 支持两种奖励模式：legacy（原有）、dual_layer（新奖励系统）
         self.reward_mode = reward_weights.get('reward_mode', 'dual_layer') if reward_weights else 'dual_layer'
@@ -83,16 +87,45 @@ class PowerGridPartitioningEnv:
 
         # 【保留】用于存储上一步的指标，实现增量奖励
         self.previous_metrics = None
-        
+
+        # 【新增】动态约束参数 - 用于接收AdaptiveDirector的指令
+        # 默认使用硬约束模式以保持向后兼容性
+        self.dynamic_constraint_params = {
+            'constraint_mode': 'hard',  # 'hard' 或 'soft'
+            'connectivity_penalty': 0.5,  # 软约束惩罚强度
+            'action_mask_relaxation': 0.0,  # 动作掩码放松程度 (0.0-1.0)
+            'violation_tolerance': 0.1,  # 违规容忍度
+        }
+
+        # 【向后兼容】如果配置中指定了软约束，则启用
+        if config and config.get('adaptive_curriculum', {}).get('enabled', False):
+            self.dynamic_constraint_params['constraint_mode'] = 'soft'
+
         # 环境状态
         self.current_step = 0
         self.episode_history = []
         self.is_terminated = False
         self.is_truncated = False
-        
+
         # 缓存频繁使用的数据
         self._setup_cached_data()
-        
+
+    def update_dynamic_constraints(self, params: Dict[str, Any]):
+        """
+        更新动态约束参数（由AdaptiveDirector调用）
+
+        参数:
+            params: 包含约束参数的字典
+        """
+        if 'constraint_mode' in params:
+            self.dynamic_constraint_params['constraint_mode'] = params['constraint_mode']
+        if 'connectivity_penalty' in params:
+            self.dynamic_constraint_params['connectivity_penalty'] = params['connectivity_penalty']
+        if 'action_mask_relaxation' in params:
+            self.dynamic_constraint_params['action_mask_relaxation'] = params['action_mask_relaxation']
+        if 'violation_tolerance' in params:
+            self.dynamic_constraint_params['violation_tolerance'] = params['violation_tolerance']
+
     def _setup_cached_data(self):
         """设置频繁访问的缓存数据"""
         # 所有类型节点的总数
@@ -392,8 +425,9 @@ class PowerGridPartitioningEnv:
         奖励的核心是比较当前指标与上一步指标的差异。
         """
         # 硬约束检查：如果破坏了连通性，给予重罚
+        # 【修复】将连通性惩罚从-10.0降低到-3.0
         if current_metrics.get('connectivity', 1.0) < 1.0:
-            return -10.0
+            return -3.0
 
         # 【改进】大幅降低进度奖励，从隐式的大奖励变为小激励
         progress_reward = 0.1  # 每个动作的基础奖励，仅作为探索激励
@@ -477,7 +511,8 @@ class PowerGridPartitioningEnv:
             quality_bonus += 5.0
         else:
             # 如果最终状态不连通，严重惩罚
-            return -30.0
+            # 【修复】将终局连通性惩罚从-30.0降低到-10.0，仍然严厉但合理
+            return -10.0
         
         # 效率奖励 - 用较少步数完成
         efficiency_bonus = 0.0
@@ -500,11 +535,11 @@ class PowerGridPartitioningEnv:
         
     def step(self, action: Tuple[int, int]) -> Tuple[Dict[str, torch.Tensor], float, bool, bool, Dict[str, Any]]:
         """
-        在环境中执行一步
-        
+        在环境中执行一步 - 支持动态软约束系统
+
         参数:
             action: (node_idx, target_partition)的元组
-            
+
         返回:
             observation: 下一状态观察
             reward: 即时奖励
@@ -514,23 +549,40 @@ class PowerGridPartitioningEnv:
         """
         if self.is_terminated or self.is_truncated:
             raise RuntimeError("无法在已终止/截断的环境中执行步骤。请先调用reset()。")
-            
-        # 1. 动作验证 (如果无效，直接返回惩罚)
+
+        # 1. 基础动作验证（只检查基本有效性：边界节点、相邻分区等）
         if not self.action_space.is_valid_action(
-            action, 
+            action,
             self.state_manager.current_partition,
             self.state_manager.get_boundary_nodes()
         ):
-            return self.state_manager.get_observation(), -10.0, True, False, {'termination_reason': 'invalid_action'}
-        
-        # 2. 执行动作，更新内部状态
+            # 【修复】将无效动作惩罚从-10.0降低到-2.0，与正常奖励尺度匹配
+            return self.state_manager.get_observation(), -2.0, True, False, {'termination_reason': 'invalid_action'}
+
+        # 2. 【新增】连通性约束检查（软约束模式）
+        constraint_violation_info = self.action_space.mask_handler.check_connectivity_violation(
+            self.state_manager.current_partition, action
+        )
+
+        # 3. 根据约束模式决定是否执行动作
+        constraint_mode = self.dynamic_constraint_params.get('constraint_mode', 'hard')
+
+        if constraint_mode == 'hard' and constraint_violation_info and constraint_violation_info['violates_connectivity']:
+            # 硬约束模式：拒绝执行违规动作
+            # 【修复】将连通性违规惩罚从-10.0降低到-3.0，仍然严厉但不会压倒其他奖励
+            return self.state_manager.get_observation(), -3.0, True, False, {
+                'termination_reason': 'connectivity_violation',
+                'violation_info': constraint_violation_info
+            }
+
+        # 4. 执行动作，更新内部状态
         node_idx, target_partition = action
         self.state_manager.update_partition(node_idx, target_partition)
-        
-        # 3. 计算新状态的指标
+
+        # 5. 计算新状态的指标
         current_metrics = self.evaluator.evaluate_partition(self.state_manager.current_partition)
         
-        # 4. 【核心】计算奖励 - 支持两种模式
+        # 6. 【核心】计算奖励 - 支持两种模式
         if self.reward_mode == 'dual_layer' and self.reward_function is not None:
             # 使用新的奖励函数 - 仅计算即时奖励
             reward = self.reward_function.compute_incremental_reward(
@@ -554,6 +606,19 @@ class PowerGridPartitioningEnv:
                 'current_metrics': current_metrics,
                 'reward_mode': 'legacy'
             }
+
+        # 7. 【新增】应用软约束惩罚
+        constraint_penalty = 0.0
+        if constraint_mode == 'soft' and constraint_violation_info and constraint_violation_info['violates_connectivity']:
+            # 软约束模式：根据违规严重程度应用惩罚
+            penalty_strength = self.dynamic_constraint_params.get('connectivity_penalty', 0.5)
+            violation_severity = constraint_violation_info['violation_severity']
+            constraint_penalty = penalty_strength * violation_severity
+            reward -= constraint_penalty
+
+            # 记录惩罚信息
+            self.last_reward_components['constraint_penalty'] = constraint_penalty
+            self.last_reward_components['violation_info'] = constraint_violation_info
         
         # 5. 【关键】更新"上一步"的指标，为下一次计算做准备
         self.previous_metrics = current_metrics
@@ -670,8 +735,8 @@ class PowerGridPartitioningEnv:
         
     def _check_termination(self) -> Tuple[bool, bool]:
         """
-        检查回合是否应该终止或截断
-        
+        检查回合是否应该终止或截断 - 支持软约束模式
+
         返回:
             terminated: 自然终止（收敛或无有效动作）
             truncated: 人工终止（达到最大步数）
@@ -679,22 +744,26 @@ class PowerGridPartitioningEnv:
         # 检查截断（最大步数）
         if self.current_step >= self.max_steps:
             return False, True
-            
+
         # 检查自然终止
         boundary_nodes = self.state_manager.get_boundary_nodes()
+
+        # 【关键修复】使用当前的约束模式来获取有效动作
+        constraint_mode = self.dynamic_constraint_params.get('constraint_mode', 'hard')
         valid_actions = self.action_space.get_valid_actions(
             self.state_manager.current_partition,
-            boundary_nodes
+            boundary_nodes,
+            constraint_mode=constraint_mode
         )
-        
+
         # 没有剩余有效动作
         if len(valid_actions) == 0:
             return True, False
-            
+
         # 收敛检查（如果启用）
         if self._check_convergence():
             return True, False
-            
+
         return False, False
         
     def _check_convergence(self, window_size: int = 10, threshold: float = 0.01) -> bool:
@@ -768,17 +837,34 @@ class PowerGridPartitioningEnv:
         self.metis_initializer = None
         self.evaluator = None
         
-    def get_action_mask(self) -> torch.Tensor:
+    def get_action_mask(self, use_advanced_constraints: bool = True) -> torch.Tensor:
         """
-        获取当前状态的动作掩码
-        
+        获取当前状态的动作掩码 - 支持动态约束模式
+
+        参数:
+            use_advanced_constraints: 是否使用高级约束
+
         返回:
             指示有效动作的布尔张量
         """
-        return self.action_space.get_action_mask(
-            self.state_manager.current_partition,
-            self.state_manager.get_boundary_nodes()
-        )
+        if use_advanced_constraints:
+            # 使用高级掩码，根据当前约束模式决定行为
+            constraint_mode = self.dynamic_constraint_params.get('constraint_mode', 'hard')
+            state = {'partition_assignment': self.state_manager.current_partition}
+
+            return self.action_space.get_advanced_mask(
+                state,
+                self.state_manager.get_boundary_nodes(),
+                self.hetero_data,
+                apply_constraints=True,
+                constraint_mode=constraint_mode
+            )
+        else:
+            # 使用基础掩码
+            return self.action_space.get_action_mask(
+                self.state_manager.current_partition,
+                self.state_manager.get_boundary_nodes()
+            )
         
     def get_state_info(self) -> Dict[str, Any]:
         """
