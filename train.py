@@ -428,14 +428,17 @@ class TrainingLogger:
                 "最佳": f"{self.best_reward:.2f}"
             })
 
-        # 记录额外信息
+        # 记录额外信息 - 【修复】适配新系统指标名称
         if info:
             if 'success' in info:
                 self.success_rates.append(1.0 if info['success'] else 0.0)
-            if 'load_cv' in info:
-                self.load_cvs.append(info['load_cv'])
-            if 'coupling_edges' in info:
-                self.coupling_edges.append(info['coupling_edges'])
+            # 优先使用新指标名称，向后兼容旧名称
+            if 'cv' in info or 'load_cv' in info:
+                cv_value = info.get('cv', info.get('load_cv', 0.0))
+                self.load_cvs.append(cv_value)
+            if 'coupling_ratio' in info or 'coupling_edges' in info:
+                coupling_value = info.get('coupling_ratio', info.get('coupling_edges', 0.0))
+                self.coupling_edges.append(coupling_value)
 
         # TensorBoard日志
         if self.use_tensorboard and self.tensorboard_writer:
@@ -596,6 +599,10 @@ class UnifiedTrainer:
             # 记录到logger（包含详细信息）
             self.logger.log_episode(episode, episode_reward, episode_length, episode_info)
 
+            # 【新增】验证指标完整性，确保修复生效
+            if episode < 10:  # 只在前10个episode检查，避免影响性能
+                self._validate_metrics_integrity(episode_info, episode)
+
             # 更新智能体并记录训练指标
             if episode % update_interval == 0 and episode > 0:
                 try:
@@ -678,6 +685,41 @@ class UnifiedTrainer:
             'episode_lengths': self.logger.episode_lengths,
             'training_stats': final_stats
         }
+
+    def _validate_metrics_integrity(self, episode_info: Dict[str, Any], episode: int):
+        """
+        验证指标完整性，确保修复生效
+
+        Args:
+            episode_info: episode信息字典
+            episode: episode编号
+        """
+        try:
+            # 检查关键指标是否不再是固定值
+            metrics = episode_info.get('metrics', {})
+
+            # 检查CV指标
+            cv_value = metrics.get('cv', metrics.get('load_cv', 1.0))
+            if cv_value == 1.0 and episode > 2:
+                print(f"⚠️ Episode {episode}: CV指标仍为固定值1.0，可能存在问题")
+
+            # 检查coupling_ratio指标
+            coupling_ratio = metrics.get('coupling_ratio', 1.0)
+            if coupling_ratio == 1.0 and episode > 2:
+                print(f"⚠️ Episode {episode}: coupling_ratio指标仍为固定值1.0，可能存在问题")
+
+            # 检查connectivity指标
+            connectivity = metrics.get('connectivity', 0.0)
+            if connectivity == 1.0 and episode > 2:
+                print(f"ℹ️ Episode {episode}: connectivity = {connectivity:.3f} (已改进)")
+
+            # 输出指标摘要（仅前5个episode）
+            if episode <= 5:
+                print(f"📊 Episode {episode} 指标验证: CV={cv_value:.4f}, "
+                      f"Coupling={coupling_ratio:.4f}, Connectivity={connectivity:.4f}")
+
+        except Exception as e:
+            print(f"⚠️ Episode {episode} 指标验证失败: {e}")
 
     def _save_intermediate_results(self, episode: int):
         """保存中间训练结果"""
@@ -1020,7 +1062,7 @@ class UnifiedTrainingSystem:
                     'max_steps_per_episode': 200,
                     'success_criteria': {
                         **base_config['training'].get('success_criteria', {}),
-                        'load_cv_threshold': 0.25,
+                        'cv_threshold': 0.25,  # 【修复】使用新系统的指标名称
                         'connectivity_threshold': 0.95
                     }
                 },
@@ -1604,13 +1646,15 @@ class UnifiedTrainingSystem:
                     if done:
                         break
 
-                # 收集episode信息
+                # 收集episode信息 - 【修复】适配新奖励系统的指标名称
                 episode_info = {
                     'episode': episode,
                     'reward': episode_reward,
                     'episode_length': episode_length,
                     'success': info.get('success', False),
-                    'load_cv': info.get('load_cv', 1.0),
+                    # 新系统使用'cv'而不是'load_cv'，提供向后兼容
+                    'load_cv': info.get('cv', info.get('load_cv', 1.0)),
+                    'cv': info.get('cv', info.get('load_cv', 1.0)),  # 同时提供新名称
                     'coupling_ratio': info.get('coupling_ratio', 1.0),
                     'connectivity': info.get('connectivity', 0.0),
                     **info

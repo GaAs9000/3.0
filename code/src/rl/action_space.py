@@ -425,14 +425,17 @@ class ActionMask:
 
         # 检查剩余节点中的孤立节点
         isolated_nodes = []
+        remaining_nodes_set = set(remaining_nodes.cpu().numpy().tolist())  # 转换为set提高查找效率
+
         for remaining_node in remaining_nodes:
             has_connection = False
-            for neighbor in self.adjacency_list[remaining_node.item()]:
-                if neighbor in remaining_nodes:
+            node_id = remaining_node.item()
+            for neighbor in self.adjacency_list[node_id]:
+                if neighbor in remaining_nodes_set:
                     has_connection = True
                     break
             if not has_connection:
-                isolated_nodes.append(remaining_node.item())
+                isolated_nodes.append(node_id)
 
         # 计算违规严重程度
         violation_severity = 0.0

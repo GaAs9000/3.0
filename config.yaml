@@ -32,7 +32,7 @@ training:
   save_interval: 100
   eval_interval: 50
   success_criteria:
-    load_cv_threshold: 0.3
+    cv_threshold: 0.3  # 【修复】使用新系统的指标名称
     connectivity_threshold: 0.9
     min_length_threshold: 10
   convergence:
@@ -207,8 +207,8 @@ logging:
     - episode_rewards
     - episode_lengths
     - success_rates
-    - load_cv
-    - coupling_edges
+    - cv  # 【修复】使用新系统的指标名称
+    - coupling_ratio  # 【修复】使用新系统的指标名称
     - actor_losses
     - critic_losses
     - entropies
@@ -263,8 +263,8 @@ evaluation:
   metrics_to_track:
     - episode_reward
     - episode_length
-    - load_cv
-    - coupling_edges
+    - cv  # 【修复】使用新系统的指标名称
+    - coupling_ratio  # 【修复】使用新系统的指标名称
     - connectivity
     - success_rate
     - robustness_score
@@ -338,7 +338,7 @@ ieee118:
     num_episodes: 3000
     max_steps_per_episode: 500
     success_criteria:
-      load_cv_threshold: 0.35
+      cv_threshold: 0.35  # 【修复】使用新系统的指标名称
       connectivity_threshold: 0.95
   parallel_training:
     enabled: true

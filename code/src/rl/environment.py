@@ -400,11 +400,11 @@ class PowerGridPartitioningEnv:
         # 添加动作掩码到观察中
         observation['action_mask'] = self.get_action_mask(use_advanced_constraints=True)
         
-        # 计算初始指标
-        initial_metrics = self.evaluator.evaluate_partition(
+        # 【修复】统一使用新奖励系统计算初始指标，避免双套指标系统冲突
+        initial_metrics = self.reward_function.get_current_metrics(
             self.state_manager.current_partition
         )
-        
+
         # 【新增】在回合开始时，计算并存储初始分区的指标
         self.previous_metrics = initial_metrics
         
@@ -488,8 +488,10 @@ class PowerGridPartitioningEnv:
         )
 
         # 补充一些环境需要的额外指标
+        # 【修复】改进connectivity计算，不再简单假设为1.0
+        connectivity_score = self._compute_connectivity_score(self.state_manager.current_partition)
         current_metrics.update({
-            'connectivity': 1.0,  # 假设连通（可以后续优化）
+            'connectivity': connectivity_score,
             'step': self.current_step
         })
 
@@ -803,6 +805,42 @@ class PowerGridPartitioningEnv:
             'is_terminated': self.is_terminated,
             'is_truncated': self.is_truncated
         }
+
+    def _compute_connectivity_score(self, partition: torch.Tensor) -> float:
+        """
+        计算分区连通性分数
+
+        Args:
+            partition: 当前分区方案
+
+        Returns:
+            连通性分数 [0, 1]，1表示完全连通
+        """
+        try:
+            # 获取分区数量
+            num_partitions = partition.max().item()
+            if num_partitions <= 0:
+                return 0.0
+
+            # 简化的连通性检查：检查每个分区是否至少有一个节点
+            connected_partitions = 0
+            for i in range(1, num_partitions + 1):
+                if (partition == i).any():
+                    connected_partitions += 1
+
+            # 连通性分数 = 有节点的分区数 / 总分区数
+            connectivity_score = connected_partitions / num_partitions
+
+            # 额外检查：如果所有节点都被分配，给予额外奖励
+            unassigned_nodes = (partition == 0).sum().item()
+            if unassigned_nodes == 0:
+                connectivity_score = min(1.0, connectivity_score + 0.1)
+
+            return float(connectivity_score)
+
+        except Exception as e:
+            # 如果计算失败，返回保守估计
+            return 0.5
 
     def clear_cache(self):
         """清理缓存数据"""

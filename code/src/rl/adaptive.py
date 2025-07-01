@@ -111,10 +111,12 @@ class PerformanceAnalyzer:
         """分析单个episode的性能"""
         self.episode_history.append(episode_info)
         
+        # 【修复】适配新奖励系统的指标名称映射
         performance = {
             'episode_length': episode_info.get('episode_length', 0),
             'reward': episode_info.get('reward', -float('inf')),
-            'load_cv': episode_info.get('load_cv', 1.0),
+            # 新系统使用'cv'而不是'load_cv'
+            'load_cv': episode_info.get('cv', episode_info.get('load_cv', 1.0)),
             'coupling_ratio': episode_info.get('coupling_ratio', 1.0),
             'connectivity': episode_info.get('connectivity', 0.0),
             'success': episode_info.get('success', False)

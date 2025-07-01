@@ -246,22 +246,24 @@ class VisualizationManager:
         ax.legend()
         ax.grid(True, alpha=grid_alpha)
         
-        # 2. Load CV曲线
+        # 2. Load CV曲线 - 【修复】适配新系统指标名称
         ax = axes[0, 1]
-        if 'load_cv' in history:
-            ax.plot(episodes, history['load_cv'], 'g-', alpha=0.8)
-            ax.set_ylim(0, max(history['load_cv']) * 1.1 if history['load_cv'] else 1)
+        cv_data = history.get('cv', history.get('load_cv', []))  # 优先使用新名称
+        if cv_data:
+            ax.plot(episodes, cv_data, 'g-', alpha=0.8)
+            ax.set_ylim(0, max(cv_data) * 1.1 if cv_data else 1)
         ax.set_xlabel('Episode')
         ax.set_ylabel('Load CV')
         ax.set_title('Load Balance (CV)')
         ax.grid(True, alpha=grid_alpha)
-        
-        # 3. 耦合度曲线
+
+        # 3. 耦合度曲线 - 【修复】适配新系统指标名称
         ax = axes[1, 0]
-        if 'coupling_edges' in history:
-            ax.plot(episodes, history['coupling_edges'], 'b-', alpha=0.8)
+        coupling_data = history.get('coupling_ratio', history.get('coupling_edges', []))  # 优先使用新名称
+        if coupling_data:
+            ax.plot(episodes, coupling_data, 'b-', alpha=0.8)
         ax.set_xlabel('Episode')
-        ax.set_ylabel('Coupling Edges')
+        ax.set_ylabel('Coupling Ratio')
         ax.set_title('Inter-region Coupling')
         ax.grid(True, alpha=grid_alpha)
         
@@ -474,12 +476,12 @@ class VisualizationManager:
             row=2, col=2
         )
         
-        # 6. 统计表格
+        # 6. 统计表格 - 【修复】适配新系统指标名称
         stats_data = [
             ['Total Nodes', str(total_nodes)],
             ['Regions', str(num_partitions)],
-            ['Load CV', f"{rl_metrics.get('load_cv', 0.0):.4f}"],
-            ['Total Coupling', f"{rl_metrics.get('total_coupling', 0.0):.4f}"],
+            ['Load CV', f"{rl_metrics.get('load_cv', 0.0):.4f}"],  # 基线比较已适配，这里保持兼容
+            ['Total Coupling', f"{rl_metrics.get('total_coupling', 0.0):.4f}"],  # 基线比较已适配
             ['Connectivity', f"{rl_metrics.get('connectivity', 0.0):.2f}"]
         ]
         
