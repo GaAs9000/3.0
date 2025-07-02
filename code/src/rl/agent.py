@@ -685,26 +685,31 @@ class PPOAgent:
         return advantages, returns
         
     def _ppo_epoch(self, states, actions, old_log_probs, advantages, returns):
-        """单个PPO训练轮"""
-        total_actor_loss = 0
-        total_critic_loss = 0
-        total_entropy = 0
-        
+        """单个PPO训练轮 - 修复梯度计算图重复使用问题"""
+        # 累积所有损失，然后一次性反向传播
+        total_actor_losses = []
+        total_critic_losses = []
+        total_entropies = []
+
+        # 清零梯度
+        self.actor_optimizer.zero_grad()
+        self.critic_optimizer.zero_grad()
+
         for i in range(len(states)):
             state = states[i]
             action = actions[i]
             old_log_prob = old_log_probs[i]
             advantage = advantages[i]
             return_val = returns[i]
-            
-            # 获取当前策略输出
-            node_embeddings = state['node_embeddings']
-            region_embeddings = state['region_embeddings']
+
+            # 获取当前策略输出 - 确保每次都重新计算
+            node_embeddings = state['node_embeddings'].detach().clone()  # 断开计算图
+            region_embeddings = state['region_embeddings'].detach().clone()  # 断开计算图
             boundary_nodes = state['boundary_nodes']
-            
+
             if len(boundary_nodes) == 0:
                 continue
-                
+
             # 动作掩码
             action_mask = torch.zeros(
                 node_embeddings.shape[0], self.num_partitions,
@@ -716,22 +721,23 @@ class PPOAgent:
                 for p in range(self.num_partitions):
                     if p + 1 != current_node_partition:
                         action_mask[node_idx, p] = True
-            
+
+            # 重新前向传播，创建新的计算图
             node_logits, partition_logits = self.actor(
                 node_embeddings, region_embeddings, boundary_nodes, action_mask
             )
-            
+
             value = self.critic(node_embeddings, region_embeddings, boundary_nodes)
-            
+
             # 计算新的对数概率
             node_idx, partition_idx = action
             node_pos = (boundary_nodes == node_idx).nonzero(as_tuple=True)[0]
-            
+
             if len(node_pos) == 0:
                 continue
-                
+
             node_pos = node_pos[0]
-            
+
             # 添加数值稳定性检查
             if torch.isnan(node_logits).any() or torch.isinf(node_logits).any():
                 print(f"⚠️ PPO更新中检测到node_logits的NaN/Inf值")
@@ -749,12 +755,12 @@ class PPOAgent:
             # 使用数值稳定的概率计算
             node_probs = F.softmax(node_logits_clipped, dim=0).clamp(min=1e-12)
             partition_probs = F.softmax(partition_logits_clipped, dim=0).clamp(min=1e-12)
-            
+
             # 安全的对数概率计算
             node_log_prob = safe_log_prob(node_probs)[node_pos]
             partition_log_prob = safe_log_prob(partition_probs)[partition_idx - 1]
             new_log_prob = node_log_prob + partition_log_prob
-            
+
             # 🔧 修复2: ratio = exp(logπ_new – logπ_old) 双重保护
             log_prob_diff = torch.clamp(new_log_prob - old_log_prob, min=-20, max=20)
             ratio = torch.exp(log_prob_diff)
@@ -764,52 +770,65 @@ class PPOAgent:
             surr1 = ratio * advantage
             surr2 = torch.clamp(ratio, 1 - self.eps_clip, 1 + self.eps_clip) * advantage
             actor_loss = -torch.min(surr1, surr2)
-            
+
             # 评论家损失
             critic_loss = F.mse_loss(value, return_val)
-            
+
             # 熵计算（数值稳定）
             entropy = -(node_probs * safe_log_prob(node_probs)).sum()
             entropy += -(partition_probs * safe_log_prob(partition_probs)).sum()
-            
-            # 总损失
-            total_loss = actor_loss + self.value_coef * critic_loss - self.entropy_coef * entropy
-            
-            # 更新
-            self.actor_optimizer.zero_grad()
-            self.critic_optimizer.zero_grad()
-            total_loss.backward()
 
-            # 🔧 修复4: 梯度裁剪一次性覆盖全部可训练参数
-            if self.max_grad_norm is not None:
-                all_params = list(self.actor.parameters()) + list(self.critic.parameters())
-                grad_norm = torch.nn.utils.clip_grad_norm_(all_params, self.max_grad_norm)
-                # 可选：打印梯度范数用于调试
-                if hasattr(self, '_debug_grad_norm') and self._debug_grad_norm:
-                    print(f"📊 梯度范数: {grad_norm:.4f}")
-            else:
-                # 即使不裁剪，也计算梯度范数用于监控
-                all_params = list(self.actor.parameters()) + list(self.critic.parameters())
-                total_norm = 0
-                for p in all_params:
-                    if p.grad is not None:
-                        param_norm = p.grad.data.norm(2)
-                        total_norm += param_norm.item() ** 2
-                grad_norm = total_norm ** (1. / 2)
-                if hasattr(self, '_debug_grad_norm') and self._debug_grad_norm:
-                    print(f"📊 梯度范数(未裁剪): {grad_norm:.4f}")
+            # 累积损失
+            total_actor_losses.append(actor_loss)
+            total_critic_losses.append(critic_loss)
+            total_entropies.append(entropy)
 
-            self.actor_optimizer.step()
-            self.critic_optimizer.step()
-            
-            total_actor_loss += actor_loss.item()
-            total_critic_loss += critic_loss.item()
-            total_entropy += entropy.item()
-            
+        # 如果没有有效的样本，返回零损失
+        if not total_actor_losses:
+            return {
+                'actor_loss': 0.0,
+                'critic_loss': 0.0,
+                'entropy': 0.0
+            }
+
+        # 计算平均损失
+        avg_actor_loss = torch.stack(total_actor_losses).mean()
+        avg_critic_loss = torch.stack(total_critic_losses).mean()
+        avg_entropy = torch.stack(total_entropies).mean()
+
+        # 总损失
+        total_loss = avg_actor_loss + self.value_coef * avg_critic_loss - self.entropy_coef * avg_entropy
+
+        # 一次性反向传播
+        total_loss.backward()
+
+        # 🔧 修复4: 梯度裁剪一次性覆盖全部可训练参数
+        if self.max_grad_norm is not None:
+            all_params = list(self.actor.parameters()) + list(self.critic.parameters())
+            grad_norm = torch.nn.utils.clip_grad_norm_(all_params, self.max_grad_norm)
+            # 可选：打印梯度范数用于调试
+            if hasattr(self, '_debug_grad_norm') and self._debug_grad_norm:
+                print(f"📊 梯度范数: {grad_norm:.4f}")
+        else:
+            # 即使不裁剪，也计算梯度范数用于监控
+            all_params = list(self.actor.parameters()) + list(self.critic.parameters())
+            total_norm = 0
+            for p in all_params:
+                if p.grad is not None:
+                    param_norm = p.grad.data.norm(2)
+                    total_norm += param_norm.item() ** 2
+            grad_norm = total_norm ** (1. / 2)
+            if hasattr(self, '_debug_grad_norm') and self._debug_grad_norm:
+                print(f"📊 梯度范数(未裁剪): {grad_norm:.4f}")
+
+        # 一次性更新参数
+        self.actor_optimizer.step()
+        self.critic_optimizer.step()
+
         return {
-            'actor_loss': total_actor_loss / len(states),
-            'critic_loss': total_critic_loss / len(states),
-            'entropy': total_entropy / len(states)
+            'actor_loss': avg_actor_loss.item(),
+            'critic_loss': avg_critic_loss.item(),
+            'entropy': avg_entropy.item()
         }
 
     def enable_gradient_norm_debug(self, enable: bool = True):

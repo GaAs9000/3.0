@@ -3,6 +3,7 @@ import numpy as np
 from typing import Dict, Tuple, List, Optional, Union, Any
 from torch_geometric.data import HeteroData
 import copy
+from .scenario_context import ScenarioContext
 
 try:
     from code.src.rl.state import StateManager
@@ -364,12 +365,13 @@ class PowerGridPartitioningEnv:
         
         return attn_weights
 
-    def reset(self, seed: Optional[int] = None) -> Tuple[Dict[str, torch.Tensor], Dict[str, Any]]:
+    def reset(self, seed: Optional[int] = None, scenario_context: Optional[ScenarioContext] = None) -> Tuple[Dict[str, torch.Tensor], Dict[str, Any]]:
         """
         将环境重置为初始状态
         
         参数:
             seed: 用于可重复性的随机种子
+            scenario_context: 场景上下文（用于场景感知奖励）
             
         返回:
             observation: 初始状态观察
@@ -392,7 +394,7 @@ class PowerGridPartitioningEnv:
         self.is_truncated = False
 
         # 重置奖励函数状态
-        self.reward_function.reset_episode()
+        self.reward_function.reset_episode(scenario_context)
         
         # 获取初始观察
         observation = self.state_manager.get_observation()
@@ -416,7 +418,8 @@ class PowerGridPartitioningEnv:
             'valid_actions': self.action_space.get_valid_actions(
                 self.state_manager.current_partition,
                 self.state_manager.get_boundary_nodes()
-            )
+            ),
+            'scenario_context': scenario_context.to_dict() if scenario_context else None
         }
         
         return observation, info
@@ -473,10 +476,13 @@ class PowerGridPartitioningEnv:
 
         # 5. 【核心】计算奖励 - 使用自适应质量导向奖励系统
         plateau_result = None
+        # 获取当前场景上下文
+        current_scenario_context = getattr(self.reward_function, 'current_scenario_context', None)
         # 使用自适应质量导向奖励函数
         reward, plateau_result = self.reward_function.compute_incremental_reward(
             self.state_manager.current_partition,
-            action
+            action,
+            current_scenario_context
         )
 
         # 6. 统一使用新奖励系统的指标（修复双套指标系统冲突）
@@ -567,8 +573,7 @@ class PowerGridPartitioningEnv:
             else:
                 info_bonus = final_components
                 info_bonus['termination_type'] = termination_type
-
-                reward += final_bonus
+                info_bonus['final_reward'] = final_reward
         else:
             info_bonus = {}
         
@@ -592,47 +597,7 @@ class PowerGridPartitioningEnv:
         
         return observation, reward, terminated, truncated, info
     
-    def _apply_final_bonus(self, terminated: bool, truncated: bool) -> Tuple[float, str]:
-        """
-        根据结束类型应用不同的终局奖励
-        实现"与其慢慢磨蹭赚小钱，不如快速完成拿大奖"的设计哲学
-        """
-        # 检查是否所有节点都被分配
-        unassigned_mask = torch.zeros(self.total_nodes, dtype=torch.bool, device=self.device)
-        for i in range(self.total_nodes):
-            if self.state_manager.current_partition[i] == 0:  # 0表示未分配
-                unassigned_mask[i] = True
-        
-        unassigned_count = unassigned_mask.sum().item()
-        completion_ratio = (self.total_nodes - unassigned_count) / self.total_nodes
-        
-        if terminated:
-            # 检查是否是自然完成
-            if unassigned_count == 0:
-                # 🎉 自然完成 - 所有节点都被分配，给予最大奖励
-                final_bonus = self._compute_final_bonus()
-                termination_type = 'natural_completion'
-                return final_bonus, termination_type
-            else:
-                # ⚠️ 提前结束 - 没有有效动作但还有未分配节点
-                partial_bonus = self._compute_final_bonus() * completion_ratio * 0.3  # 打30%折扣
-                termination_type = 'no_valid_actions'
-                return partial_bonus, termination_type
-        
-        elif truncated:
-            # ⏰ 超时结束 - 达到最大步数限制
-            if unassigned_count == 0:
-                # 虽然超时但完成了所有分配，给予部分奖励
-                timeout_bonus = self._compute_final_bonus() * 0.7  # 打70%折扣
-                termination_type = 'timeout_completed'
-                return timeout_bonus, termination_type
-            else:
-                # 超时且未完成，轻微惩罚
-                timeout_penalty = -5.0 - (1.0 - completion_ratio) * 10.0  # 完成度越低惩罚越重
-                termination_type = 'timeout_incomplete'
-                return timeout_penalty, termination_type
-        
-        return 0.0, 'unknown'
+
 
     def _determine_termination_type(self, terminated: bool, truncated: bool) -> str:
         """

@@ -36,6 +36,15 @@ torch.autograd.set_detect_anomaly(True)
 warnings.filterwarnings("error", message=".*NaN.*", category=RuntimeWarning)
 warnings.filterwarnings('ignore', category=UserWarning)
 
+def safe_print(message: str):
+    """安全的Unicode打印函数，避免编码错误"""
+    try:
+        print(message)
+    except UnicodeEncodeError:
+        # 移除Unicode字符，使用ASCII替代
+        ascii_message = message.encode('ascii', 'replace').decode('ascii')
+        print(ascii_message)
+
 # 导入电力系统数据加载函数
 try:
     from scipy.io import loadmat
@@ -1276,7 +1285,7 @@ class UnifiedTrainingSystem:
         else:
             device = torch.device(device_config)
 
-        print(f"🔧 使用设备: {device}")
+        safe_print(f"🔧 使用设备: {device}")
         return device
 
     def setup_directories(self):
@@ -2215,6 +2224,10 @@ def main():
                        help='训练模式')
     parser.add_argument('-a', '--adaptive', action='store_true',
                        help='启用智能自适应训练 (可与任何模式组合)')
+    parser.add_argument('-s', '--scenario-aware', action='store_true',
+                       help='启用场景感知奖励系统 (解决跨场景训练问题)')
+    parser.add_argument('--relative-reward', action='store_true',
+                       help='启用相对改进奖励 (需要与--scenario-aware一起使用)')
 
     # 训练参数
     parser.add_argument('--episodes', type=int, help='训练回合数')
@@ -2270,6 +2283,21 @@ def main():
             train_kwargs['adaptive_curriculum.enabled'] = True
             print(f"🧠 启用智能自适应训练 (基础模式: {args.mode})")
 
+        # 处理场景感知奖励参数
+        if args.scenario_aware:
+            train_kwargs['scenario_aware_reward.enabled'] = True
+            print(f"🎯 启用场景感知奖励系统 (解决跨场景训练问题)")
+
+            # 如果同时启用相对奖励
+            if args.relative_reward:
+                train_kwargs['scenario_aware_reward.relative_reward.enabled'] = True
+                print(f"📊 启用相对改进奖励 (统一奖励量纲)")
+            else:
+                print(f"💡 提示：可使用 --relative-reward 启用相对改进奖励以获得更好效果")
+        elif args.relative_reward:
+            print(f"⚠️  警告：--relative-reward 需要与 --scenario-aware 一起使用")
+            args.relative_reward = False
+
         # 运行训练
         results = system.run_training(mode=args.mode, **train_kwargs)
 
@@ -2291,7 +2319,10 @@ def main():
             return 1
 
     except Exception as e:
-        print(f"❌ 系统错误: {str(e)}")
+        try:
+            print(f"❌ 系统错误: {str(e)}")
+        except UnicodeEncodeError:
+            print(f"[ERROR] 系统错误: {str(e)}")
         import traceback
         traceback.print_exc()
         return 1

@@ -7,6 +7,7 @@ from torch_geometric.data import HeteroData
 try:
     from .environment import PowerGridPartitioningEnv
     from .scenario_generator import ScenarioGenerator
+    from .scenario_context import ScenarioContext
     from code.src.data_processing import PowerGridDataProcessor
     from code.src.gat import create_hetero_graph_encoder
 except ImportError:
@@ -14,6 +15,7 @@ except ImportError:
     try:
         from code.src.rl.environment import PowerGridPartitioningEnv
         from code.src.rl.scenario_generator import ScenarioGenerator
+        from code.src.rl.scenario_context import ScenarioContext
         from code.src.data_processing import PowerGridDataProcessor
         from code.src.gat import create_hetero_graph_encoder
     except ImportError:
@@ -120,9 +122,10 @@ class PowerGridPartitionGymEnv(gym.Env):
         
         # 生成新场景（如果启用）
         if self.use_scenario_generator:
-            current_case = self.scenario_generator.generate_random_scene()
+            current_case, scenario_context = self.scenario_generator.generate_random_scene()
         else:
             current_case = self.base_case
+            scenario_context = ScenarioContext()  # 默认场景上下文
         
         # 将案例转换为异构图
         self.current_hetero_data = self.processor.graph_from_mpc(current_case, self.config).to(self.device)
@@ -155,7 +158,7 @@ class PowerGridPartitionGymEnv(gym.Env):
         )
         
         # 重置内部环境
-        obs_dict, info = self.internal_env.reset()
+        obs_dict, info = self.internal_env.reset(scenario_context=scenario_context)
         
         # 将观察转换为numpy数组
         obs_array = self._dict_obs_to_array(obs_dict)

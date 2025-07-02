@@ -6,15 +6,18 @@
 2. 势函数主奖励：基于质量分数的相对改善，零固定阈值依赖
 3. 平台期检测：智能检测质量改善平台期，支持早停机制
 4. 效率奖励：在平台期激活的效率激励，鼓励快速收敛
+5. 场景感知：按场景分类历史数据，支持相对改进奖励
 
 核心特性：
 - 完全相对化：自动适应不同网络的质量水平
 - 平台期检测：基于改善率、稳定性和历史表现的综合判断
 - 效率激励：仅在质量平台期激活，避免质量牺牲
+- 场景感知：同类场景内进行比较，支持跨场景泛化
+- 相对改进奖励：确保相同相对努力获得相同奖励幅度
 - 数值稳定性：全面的NaN/inf保护和异常处理
 
-作者：Augment Agent
-日期：2025-07-01
+作者：Augment Agent  
+日期：2025-01-15
 """
 
 import torch
@@ -26,6 +29,10 @@ from collections import defaultdict, deque
 from typing import Dict, List, Tuple, Optional, Any, Union
 from torch_geometric.data import HeteroData
 from .plateau_detector import QualityPlateauDetector, PlateauResult
+from .scenario_context import ScenarioContext
+from .scenario_aware_tracker import ScenarioAwareHistoryTracker
+from .scenario_aware_plateau_detector import ScenarioAwarePlateauDetector
+from .relative_reward_calculator import RelativeImprovementReward, HybridRewardFunction
 
 
 class RobustMetricsCalculator:
@@ -565,8 +572,33 @@ class RewardFunction:
         self.weights = self._load_weights()
         self.adaptive_quality_config = self._load_adaptive_quality_config()
 
-        # 初始化平台期检测器
-        self.plateau_detector = self._create_plateau_detector()
+        # 场景感知奖励系统配置
+        scenario_aware_config = self.config.get('scenario_aware_reward', {})
+        self.scenario_aware_enabled = scenario_aware_config.get('enabled', False)
+        
+        # 创建平台期检测器和相关组件
+        if self.scenario_aware_enabled:
+            # 创建场景感知组件
+            self.history_tracker = ScenarioAwareHistoryTracker(scenario_aware_config)
+            self.plateau_detector = ScenarioAwarePlateauDetector(
+                self.history_tracker, 
+                scenario_aware_config.get('detection_config', {})
+            )
+            
+            # 创建相对奖励计算器
+            relative_config = scenario_aware_config.get('relative_reward', {})
+            if relative_config.get('enabled', False):
+                self.relative_reward_calculator = HybridRewardFunction(
+                    self.history_tracker, 
+                    relative_config
+                )
+            else:
+                self.relative_reward_calculator = None
+        else:
+            # 使用原有的平台期检测器
+            self.plateau_detector = self._create_plateau_detector()
+            self.history_tracker = None
+            self.relative_reward_calculator = None
 
         # 前一步质量分数缓存
         self.previous_quality_score = None
@@ -575,6 +607,7 @@ class RewardFunction:
         # 当前步数（用于效率奖励计算）
         self.current_step = 0
         self.max_steps = self.config.get('max_steps', 200)
+        self.current_scenario_context = None  # 当前场景上下文
 
         # 鲁棒指标计算器
         self.metrics_calculator = RobustMetricsCalculator(
@@ -1315,7 +1348,8 @@ class RewardFunction:
 
     def compute_incremental_reward(self,
                                  current_partition: torch.Tensor,
-                                 action: Tuple[int, int]) -> Tuple[float, Optional[PlateauResult]]:
+                                 action: Tuple[int, int],
+                                 scenario_context: Optional[ScenarioContext] = None) -> Tuple[float, Optional[PlateauResult]]:
         """
         计算自适应质量导向即时奖励
 
@@ -1326,12 +1360,15 @@ class RewardFunction:
         Args:
             current_partition: 当前分区状态
             action: 执行的动作 (node_idx, partition_id)
+            scenario_context: 场景上下文（用于场景感知奖励）
 
         Returns:
             (总奖励, 平台期检测结果)
         """
-        # 更新步数
+        # 更新步数和场景上下文
         self.current_step += 1
+        if scenario_context is not None:
+            self.current_scenario_context = scenario_context
 
         # 计算当前质量分数
         current_quality_score = self._compute_quality_score(current_partition)
@@ -1342,7 +1379,10 @@ class RewardFunction:
             self.previous_metrics = self._compute_core_metrics(current_partition)  # 保持向后兼容
 
             # 更新平台期检测器
-            plateau_result = self.plateau_detector.update(current_quality_score)
+            if self.scenario_aware_enabled and scenario_context is not None:
+                plateau_result = self.plateau_detector.detect_plateau(current_quality_score, scenario_context)
+            else:
+                plateau_result = self.plateau_detector.update(current_quality_score)
             return 0.0, plateau_result
 
         try:
@@ -1356,13 +1396,16 @@ class RewardFunction:
             if np.isnan(main_reward) or np.isinf(main_reward):
                 main_reward = 0.0
             else:
-                main_reward = np.clip(main_reward, -1.0, 1.0)
+                main_reward = np.clip(main_reward, -2.0, 2.0)  # 扩大范围以支持相对奖励
 
             # 2. 平台期检测和效率奖励
             efficiency_reward = 0.0
 
             # 更新平台期检测器
-            plateau_result = self.plateau_detector.update(current_quality_score)
+            if self.scenario_aware_enabled and scenario_context is not None:
+                plateau_result = self.plateau_detector.detect_plateau(current_quality_score, scenario_context)
+            else:
+                plateau_result = self.plateau_detector.update(current_quality_score)
 
             # 如果检测到平台期且置信度足够高，激活效率奖励
             if (plateau_result.plateau_detected and
@@ -1392,11 +1435,12 @@ class RewardFunction:
 
         return total_reward, plateau_result
 
-    def reset_episode(self):
+    def reset_episode(self, scenario_context: Optional[ScenarioContext] = None):
         """重置episode状态"""
         self.current_step = 0
         self.previous_quality_score = None
         self.previous_metrics = None
+        self.current_scenario_context = scenario_context
 
         self.plateau_detector.reset()
 

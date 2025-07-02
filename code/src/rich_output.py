@@ -25,10 +25,18 @@ try:
     from rich.traceback import install as install_rich_traceback
     from rich.live import Live
     from rich import box
-    RICH_AVAILABLE = True
+
+    # 检测是否在subprocess环境中，如果是则禁用Rich避免编码问题
+    import os
+    if os.environ.get('PYTHONIOENCODING') != 'utf-8' and sys.platform == 'win32':
+        # Windows环境下，如果没有设置UTF-8编码，禁用Rich
+        RICH_AVAILABLE = False
+        print("[INFO] Rich disabled in subprocess environment to avoid encoding issues")
+    else:
+        RICH_AVAILABLE = True
 except ImportError:
     RICH_AVAILABLE = False
-    print("⚠️ Rich 库未安装，使用标准输出")
+    print("[WARNING] Rich library not installed, using standard output")
 
 
 class RichOutputManager:
@@ -74,9 +82,16 @@ class RichOutputManager:
             return
             
         if RICH_AVAILABLE:
-            self.console.print(f"ℹ️  {message}", style="info")
+            try:
+                self.console.print(f"ℹ️  {message}", style="info")
+            except UnicodeEncodeError:
+                # 在Windows GBK环境下的fallback
+                self.console.print(f"[INFO] {message}", style="info")
         else:
-            print(f"ℹ️  {message}")
+            try:
+                print(f"ℹ️  {message}")
+            except UnicodeEncodeError:
+                print(f"[INFO] {message}")
     
     def success(self, message: str, show_always: bool = False):
         """显示成功消息"""
@@ -84,9 +99,15 @@ class RichOutputManager:
             return
             
         if RICH_AVAILABLE:
-            self.console.print(f"✅ {message}", style="success")
+            try:
+                self.console.print(f"✅ {message}", style="success")
+            except UnicodeEncodeError:
+                self.console.print(f"[SUCCESS] {message}", style="success")
         else:
-            print(f"✅ {message}")
+            try:
+                print(f"✅ {message}")
+            except UnicodeEncodeError:
+                print(f"[SUCCESS] {message}")
     
     def warning(self, message: str):
         """显示警告消息（总是显示）"""

@@ -1,7 +1,8 @@
 import random
 import numpy as np
 import copy
-from typing import Dict, Optional, List, Any
+from typing import Dict, Optional, List, Any, Tuple
+from .scenario_context import ScenarioContext
 
 
 class ScenarioGenerator:
@@ -32,7 +33,7 @@ class ScenarioGenerator:
     
     def generate_random_scene(self, 
                             perturb_types: Optional[List[str]] = None,
-                            perturb_prob: float = 0.8) -> Dict:
+                            perturb_prob: float = 0.8) -> Tuple[Dict, ScenarioContext]:
         """
         生成随机扰动的电力网络场景
         
@@ -41,37 +42,47 @@ class ScenarioGenerator:
             perturb_prob: 应用扰动的概率
             
         Returns:
-            扰动后的案例数据
+            Tuple[Dict, ScenarioContext]: (扰动后的案例数据, 场景上下文)
         """
         # 深拷贝以避免修改原始数据
         perturbed_case = copy.deepcopy(self.base_case)
         
+        # 初始化场景上下文
+        scenario_context = ScenarioContext()
+        
         # 判断是否应用扰动
         if random.random() > perturb_prob:
-            return perturbed_case
+            return perturbed_case, scenario_context
         
         # 可用的扰动类型
         available_types = perturb_types or ['n-1', 'load_gen_fluctuation', 'both', 'none']
         perturb_type = random.choice(available_types)
         
-        # 应用扰动
+        # 应用扰动并记录上下文
         if perturb_type in ['n-1', 'both']:
-            self._apply_n1_contingency(perturbed_case)
+            fault_branch_idx = self._apply_n1_contingency(perturbed_case)
+            scenario_context.has_n1_fault = True
+            scenario_context.fault_branch_idx = fault_branch_idx
             
         if perturb_type in ['load_gen_fluctuation', 'both']:
-            self._apply_injection_perturbation(perturbed_case)
+            scale_factor = self._apply_injection_perturbation(perturbed_case)
+            scenario_context.load_scale_factor = scale_factor
+            scenario_context.has_gen_fluctuation = True
             
-        return perturbed_case
+        return perturbed_case, scenario_context
     
-    def _apply_n1_contingency(self, case_data: Dict):
+    def _apply_n1_contingency(self, case_data: Dict) -> Optional[int]:
         """
         应用N-1故障（随机断开一条线路）
         
         Args:
             case_data: 要修改的案例数据
+            
+        Returns:
+            断开的线路索引，如果没有线路可断开则返回None
         """
         if 'branch' not in case_data:
-            return
+            return None
             
         all_branches = case_data['branch']
         # 找到所有活跃的线路（状态为1）
@@ -88,15 +99,22 @@ class ScenarioGenerator:
 
             if show_scenario_generation and not only_show_errors:
                 print(f"🔧 N-1故障：断开线路 {idx} (从母线 {int(all_branches[idx, 0])} 到 {int(all_branches[idx, 1])})")
+            
+            return idx
+        
+        return None
     
     def _apply_injection_perturbation(self, case_data: Dict, 
-                                    scale_range: tuple = (0.8, 1.2)):
+                                    scale_range: tuple = (0.8, 1.2)) -> float:
         """
         应用注入功率扰动（负荷和发电机波动）
         
         Args:
             case_data: 要修改的案例数据
             scale_range: 缩放范围
+            
+        Returns:
+            实际使用的缩放因子
         """
         scale = random.uniform(*scale_range)
         
@@ -120,10 +138,12 @@ class ScenarioGenerator:
 
         if show_scenario_generation and not only_show_errors:
             print(f"🔧 注入扰动：缩放因子 = {scale:.3f}")
+        
+        return scale
     
     def generate_batch_scenarios(self, 
                                num_scenarios: int,
-                               perturb_types: Optional[List[str]] = None) -> List[Dict]:
+                               perturb_types: Optional[List[str]] = None) -> List[Tuple[Dict, ScenarioContext]]:
         """
         批量生成多个场景
         
@@ -132,12 +152,12 @@ class ScenarioGenerator:
             perturb_types: 允许的扰动类型
             
         Returns:
-            场景列表
+            场景和上下文的元组列表
         """
         scenarios = []
         for i in range(num_scenarios):
-            scenario = self.generate_random_scene(perturb_types)
-            scenarios.append(scenario)
+            scenario_data, scenario_context = self.generate_random_scene(perturb_types)
+            scenarios.append((scenario_data, scenario_context))
         return scenarios
     
     def apply_specific_contingency(self, 
