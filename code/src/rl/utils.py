@@ -28,6 +28,202 @@ try:
     SKLEARN_AVAILABLE = True
 except ImportError:
     SKLEARN_AVAILABLE = False
+
+
+class IntelligentAdmittanceExtractor:
+    """
+    智能导纳提取器，提供多种导纳提取策略
+
+    从RewardFunction中提取的智能导纳提取逻辑，
+    确保PartitionEvaluator使用与奖励函数相同的高质量导纳数据
+    """
+
+    def __init__(self, device: torch.device):
+        self.device = device
+
+    def extract_admittance(self, edge_attr: torch.Tensor, edge_index: torch.Tensor = None) -> Tuple[torch.Tensor, str]:
+        """
+        智能提取导纳数据，按优先级尝试多种方法
+
+        Args:
+            edge_attr: 边属性张量
+            edge_index: 边索引张量（用于拓扑估算）
+
+        Returns:
+            admittance: 导纳张量
+            source: 数据来源标识
+        """
+        # 方法1: 从边属性直接提取
+        admittance = self._identify_admittance_from_attributes(edge_attr)
+        if admittance is not None:
+            return admittance, 'extracted'
+
+        # 方法2: 从阻抗计算导纳
+        admittance = self._calculate_admittance_from_impedance(edge_attr)
+        if admittance is not None:
+            return admittance, 'calculated'
+
+        # 方法3: 基于拓扑估算（如果提供了edge_index）
+        if edge_index is not None:
+            admittance = self._estimate_admittance_from_topology(edge_index)
+            if admittance is not None:
+                return admittance, 'estimated'
+
+        # 方法4: 保守默认值（带警告）
+        return self._get_conservative_admittance_defaults(edge_attr.shape[0]), 'default'
+
+    def _identify_admittance_from_attributes(self, edge_attr: torch.Tensor) -> Optional[torch.Tensor]:
+        """
+        从边属性中智能识别导纳数据
+
+        根据data_processing.py中的特征顺序：
+        [r, x, b, z_magnitude, y, rateA, angle_diff, is_transformer, status]
+        导纳y在第4列（索引4）
+        """
+        if edge_attr.shape[1] <= 4:
+            return None
+
+        # 提取导纳列（第4列）
+        admittance_candidate = edge_attr[:, 4]
+
+        # 检查导纳值的合理性
+        if self._validate_admittance_values(admittance_candidate):
+            return torch.abs(admittance_candidate)
+
+        # 如果第4列不合理，尝试其他可能的列
+        for col_idx in [3, 5]:  # z_magnitude, rateA
+            if edge_attr.shape[1] > col_idx:
+                candidate = edge_attr[:, col_idx]
+                if self._validate_admittance_values(candidate):
+                    return torch.abs(candidate)
+
+        return None
+
+    def _calculate_admittance_from_impedance(self, edge_attr: torch.Tensor) -> Optional[torch.Tensor]:
+        """
+        从阻抗参数计算导纳
+
+        特征顺序：[r, x, b, z_magnitude, y, ...]
+        """
+        if edge_attr.shape[1] < 2:
+            return None
+
+        # 提取电阻和电抗
+        r = edge_attr[:, 0]  # 电阻
+        x = edge_attr[:, 1]  # 电抗
+
+        # 计算阻抗模长
+        z_squared = r**2 + x**2
+
+        # 避免除零，设置最小阻抗值
+        min_impedance = 1e-6
+        z_magnitude = torch.sqrt(z_squared.clamp(min=min_impedance**2))
+
+        # 计算导纳 Y = 1/Z
+        admittance = 1.0 / z_magnitude
+
+        # 验证结果
+        if self._validate_admittance_values(admittance):
+            return admittance
+
+        return None
+
+    def _estimate_admittance_from_topology(self, edge_index: torch.Tensor) -> Optional[torch.Tensor]:
+        """
+        基于网络拓扑估算导纳
+        """
+        num_edges = edge_index.shape[1]
+        if num_edges == 0:
+            return torch.empty(0, device=self.device)
+
+        # 计算节点度数
+        max_node = edge_index.max().item() + 1
+        node_degrees = torch.zeros(max_node, device=self.device)
+
+        # 统计每个节点的度数
+        for i in range(num_edges):
+            node1, node2 = edge_index[:, i]
+            node_degrees[node1] += 1
+            node_degrees[node2] += 1
+
+        # 基于连接的节点度数估算导纳
+        admittance_estimates = torch.zeros(num_edges, device=self.device)
+
+        for i in range(num_edges):
+            node1, node2 = edge_index[:, i]
+
+            # 基于节点度数的启发式估算
+            avg_degree = (node_degrees[node1] + node_degrees[node2]) / 2.0
+
+            # 典型导纳范围：0.5-5.0，基于度数调整
+            base_admittance = 2.0
+            degree_factor = torch.clamp(avg_degree / 3.0, 0.5, 2.0)
+
+            admittance_estimates[i] = base_admittance * degree_factor
+
+        return admittance_estimates
+
+    def _validate_admittance_values(self, admittance: torch.Tensor) -> bool:
+        """验证导纳值的合理性"""
+        if admittance.numel() == 0:
+            return False
+
+        # 检查NaN和Inf
+        if torch.any(torch.isnan(admittance)) or torch.any(torch.isinf(admittance)):
+            return False
+
+        # 检查是否全为零
+        if torch.all(admittance == 0):
+            return False
+
+        # 检查合理范围（典型输电线路导纳：0.1-10 S）
+        valid_range = (0.01, 20.0)
+        abs_admittance = torch.abs(admittance)
+
+        if torch.any(abs_admittance < valid_range[0]) or torch.any(abs_admittance > valid_range[1]):
+            # 如果只有少数值超出范围，仍然可以接受
+            out_of_range_ratio = torch.sum(
+                (abs_admittance < valid_range[0]) | (abs_admittance > valid_range[1])
+            ).float() / admittance.numel()
+
+            return out_of_range_ratio < 0.3  # 允许30%的值超出范围
+
+        return True
+
+    def _get_conservative_admittance_defaults(self, num_edges: int) -> torch.Tensor:
+        """
+        获取保守的默认导纳值，并记录详细警告
+        """
+        # 记录详细警告
+        warning_msg = (
+            f"无法提取或计算导纳数据，使用保守默认值。"
+            f"边数: {num_edges}。"
+            f"这可能影响电气解耦计算的准确性。"
+            f"建议检查输入数据格式或提供导纳信息。"
+        )
+
+        print(f"⚠️ {warning_msg}")
+
+        if num_edges == 0:
+            return torch.empty(0, device=self.device)
+
+        # 使用基于网络规模的合理默认值
+        # 典型输电线路导纳范围：1-3 S
+        mean_admittance = 2.0
+        std_admittance = 0.3
+
+        # 生成正态分布的导纳值
+        admittance = torch.normal(
+            mean=mean_admittance,
+            std=std_admittance,
+            size=(num_edges,),
+            device=self.device
+        )
+
+        # 确保在合理范围内
+        admittance = torch.clamp(torch.abs(admittance), 0.8, 4.0)
+
+        return admittance
     warnings.warn("Scikit-learn不可用。使用随机初始化作为回退。")
 
 
@@ -391,14 +587,17 @@ class PartitionEvaluator:
     def __init__(self, hetero_data: HeteroData, device: torch.device):
         """
         初始化分区评估器
-        
+
         Args:
             hetero_data: 异构图数据
             device: 计算设备
         """
         self.device = device
         self.hetero_data = hetero_data.to(device)
-        
+
+        # 初始化智能导纳提取器
+        self.admittance_extractor = IntelligentAdmittanceExtractor(device)
+
         # 设置评估数据
         self._setup_evaluation_data()
         
@@ -448,29 +647,34 @@ class PartitionEvaluator:
             self.gen_active = torch.zeros_like(self.load_active)
             
     def _extract_electrical_data(self):
-        """从边中提取电气数据"""
+        """从边中提取电气数据，使用智能导纳提取器"""
         self.all_edges = []
         self.all_admittances = []
-        
+        self.admittance_sources = []  # 记录导纳数据来源
+
         for edge_type, edge_index in self.hetero_data.edge_index_dict.items():
             edge_attr = self.hetero_data.edge_attr_dict[edge_type]
             src_type, _, dst_type = edge_type
-            
+
             # 转换为全局索引
             src_global = self._local_to_global(edge_index[0], src_type)
             dst_global = self._local_to_global(edge_index[1], dst_type)
-            
+
             global_edges = torch.stack([src_global, dst_global], dim=0)
             self.all_edges.append(global_edges)
-            
-            # 提取导纳
-            if edge_attr.shape[1] > 4:
-                admittances = edge_attr[:, 4]  # y列
-            else:
-                admittances = torch.ones(edge_attr.shape[0], device=self.device)
-                
+
+            # 使用智能导纳提取器
+            admittances, source = self.admittance_extractor.extract_admittance(
+                edge_attr, global_edges
+            )
+
             self.all_admittances.append(admittances)
-            
+            self.admittance_sources.append(source)
+
+            # 记录导纳数据来源（用于调试）
+            if source != 'extracted':
+                print(f"⚠️ 边类型 {edge_type} 的导纳数据来源: {source}")
+
         if self.all_edges:
             self.edge_index = torch.cat(self.all_edges, dim=1)
             self.edge_admittances = torch.cat(self.all_admittances, dim=0)

@@ -327,9 +327,9 @@ class PowerGridDataProcessor:
         Vm = bus[:, 7]
         Va = np.deg2rad(bus[:, 8])
         
-        # 2. 电压约束
-        Vmax = bus[:, 11] if bus.shape[1] > 11 else np.ones(n_bus) * 1.1
-        Vmin = bus[:, 12] if bus.shape[1] > 12 else np.ones(n_bus) * 0.9
+        # 2. 电压约束 - 智能设置基于网络特性
+        Vmax = bus[:, 11] if bus.shape[1] > 11 else self._estimate_voltage_constraints(bus, baseMVA, 'max')
+        Vmin = bus[:, 12] if bus.shape[1] > 12 else self._estimate_voltage_constraints(bus, baseMVA, 'min')
         
         # 3. 拓扑特征：计算节点度数
         from_idx = branch[:, 0].astype(int) - 1  # 转换为0-based索引
@@ -498,11 +498,105 @@ class PowerGridDataProcessor:
         print("⚠️ 提示：create_pyg_hetero_data现在使用简化异构图实现")
         return self._create_simplified_hetero_data(df_nodes, df_edges, df_edge_features)
 
-    def create_pyg_data(self, df_nodes: pd.DataFrame, df_edges: pd.DataFrame, 
+    def create_pyg_data(self, df_nodes: pd.DataFrame, df_edges: pd.DataFrame,
                        df_edge_features: pd.DataFrame):
         """
         向后兼容的方法，现在重定向到简化异构图创建
         """
         print("⚠️ 提示：create_pyg_data现在使用简化异构图实现")
         return self._create_simplified_hetero_data(df_nodes, df_edges, df_edge_features)
+
+    def _estimate_voltage_constraints(self, bus: np.ndarray, baseMVA: float, constraint_type: str) -> np.ndarray:
+        """
+        基于网络特性智能估算电压约束
+
+        参数:
+            bus: 母线数据矩阵
+            baseMVA: 基准功率
+            constraint_type: 'max' 或 'min'
+
+        返回:
+            电压约束数组
+        """
+        n_bus = bus.shape[0]
+
+        # 1. 分析负载水平
+        total_load = np.sum(np.abs(bus[:, 2:4]))  # 有功+无功负载
+        avg_load_per_bus = total_load / (n_bus * baseMVA)
+
+        # 2. 分析电压等级（如果有baseKV信息）
+        if bus.shape[1] > 9:  # 有baseKV列
+            base_kv = bus[:, 9]
+            # 根据电压等级分类
+            high_voltage_mask = base_kv >= 220  # 高压网络
+            medium_voltage_mask = (base_kv >= 35) & (base_kv < 220)  # 中压网络
+            low_voltage_mask = base_kv < 35  # 低压网络
+        else:
+            # 如果没有电压等级信息，基于负载水平推断
+            high_voltage_mask = avg_load_per_bus > 0.5  # 高负载假设为高压
+            medium_voltage_mask = (avg_load_per_bus >= 0.1) & (avg_load_per_bus <= 0.5)
+            low_voltage_mask = avg_load_per_bus < 0.1
+
+        # 3. 分析节点类型（如果有）
+        bus_types = bus[:, 1].astype(int)
+        slack_mask = (bus_types == 3)  # 平衡节点
+        pv_mask = (bus_types == 2)     # PV节点
+        pq_mask = (bus_types == 1)     # PQ节点
+
+        # 4. 设置约束值
+        if constraint_type == 'max':
+            constraints = np.ones(n_bus) * 1.1  # 默认值
+
+            # 高压网络：更严格的约束
+            constraints[high_voltage_mask] = 1.05
+
+            # 中压网络：标准约束
+            constraints[medium_voltage_mask] = 1.1
+
+            # 低压配电网：更宽松的约束
+            constraints[low_voltage_mask] = 1.15
+
+            # 平衡节点：更严格的约束
+            constraints[slack_mask] = 1.05
+
+            # PV节点：中等约束
+            constraints[pv_mask] = 1.08
+
+        else:  # constraint_type == 'min'
+            constraints = np.ones(n_bus) * 0.9  # 默认值
+
+            # 高压网络：更严格的约束
+            constraints[high_voltage_mask] = 0.95
+
+            # 中压网络：标准约束
+            constraints[medium_voltage_mask] = 0.9
+
+            # 低压配电网：更宽松的约束
+            constraints[low_voltage_mask] = 0.85
+
+            # 平衡节点：更严格的约束
+            constraints[slack_mask] = 0.95
+
+            # PV节点：中等约束
+            constraints[pv_mask] = 0.92
+
+        # 5. 基于负载密度进行微调
+        load_density = np.abs(bus[:, 2]) / baseMVA  # 有功负载密度
+
+        if constraint_type == 'max':
+            # 高负载区域：稍微放宽上限
+            high_load_mask = load_density > np.percentile(load_density, 80)
+            constraints[high_load_mask] += 0.02
+        else:
+            # 高负载区域：稍微提高下限
+            high_load_mask = load_density > np.percentile(load_density, 80)
+            constraints[high_load_mask] += 0.02
+
+        # 6. 确保约束在合理范围内
+        if constraint_type == 'max':
+            constraints = np.clip(constraints, 1.02, 1.2)
+        else:
+            constraints = np.clip(constraints, 0.8, 0.98)
+
+        return constraints
 

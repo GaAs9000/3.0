@@ -84,11 +84,12 @@ class SpectralPartitioner(BasePartitioner):
             if hasattr(env.evaluator, 'edge_admittances') and i < len(env.evaluator.edge_admittances):
                 weight = env.evaluator.edge_admittances[i].item()
             else:
-                weight = 1.0  # 默认权重
+                # 使用更智能的默认权重，而不是固定的1.0
+                weight = self._estimate_edge_weight(u, v, total_nodes)
 
             # 检查权重是否为NaN或无穷大
             if np.isnan(weight) or np.isinf(weight):
-                weight = 1e-10  # 使用极小的正值代替
+                weight = self._get_conservative_weight(u, v, total_nodes)
 
             adj_matrix[u, v] = weight
             adj_matrix[v, u] = weight
@@ -120,5 +121,55 @@ class SpectralPartitioner(BasePartitioner):
         )
         
         labels = clustering.fit_predict(adj_matrix)
-        
-        return labels + 1  # 转换为1-based 
+
+        return labels + 1
+
+    def _estimate_edge_weight(self, u: int, v: int, total_nodes: int) -> float:
+        """
+        智能估算边权重，基于节点索引和网络规模
+
+        Args:
+            u, v: 边的两个端点
+            total_nodes: 总节点数
+
+        Returns:
+            估算的边权重
+        """
+        # 基于网络规模的基础权重
+        if total_nodes <= 30:
+            base_weight = 3.0  # 小网络，较高权重
+        elif total_nodes <= 100:
+            base_weight = 2.0  # 中等网络
+        else:
+            base_weight = 1.5  # 大网络，较低权重
+
+        # 基于节点索引的调整（启发式）
+        # 相邻索引的节点可能有更强的电气连接
+        index_diff = abs(u - v)
+        if index_diff == 1:
+            weight_factor = 1.2  # 相邻节点
+        elif index_diff <= 5:
+            weight_factor = 1.1  # 近邻节点
+        else:
+            weight_factor = 1.0  # 远距离节点
+
+        return base_weight * weight_factor
+
+    def _get_conservative_weight(self, u: int, v: int, total_nodes: int) -> float:
+        """
+        获取保守的边权重，用于处理异常情况
+
+        Args:
+            u, v: 边的两个端点
+            total_nodes: 总节点数
+
+        Returns:
+            保守的边权重
+        """
+        # 使用较小的正值，避免影响谱聚类的数值稳定性
+        if total_nodes <= 30:
+            return 0.1
+        elif total_nodes <= 100:
+            return 0.05
+        else:
+            return 0.01  # 转换为1-based

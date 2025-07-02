@@ -672,10 +672,10 @@ class RewardFunction:
         if bus_features.shape[1] > 2:
             self.node_generation = bus_features[:, 2]
         else:
-            # 如果没有发电数据，使用零值但发出警告
-            self.node_generation = torch.zeros_like(self.node_loads)
+            # 智能估算发电数据而不是简单使用零值
+            self.node_generation = self._estimate_missing_generation_data()
             warnings.warn(
-                "缺少发电数据，使用零值。这可能影响功率平衡计算的准确性。"
+                "缺少发电数据，使用智能估算值。建议提供完整的发电数据以提高准确性。"
             )
 
         # 数据质量检查
@@ -724,6 +724,153 @@ class RewardFunction:
                     'total_load': total_load,
                     'total_generation': total_generation
                 })
+
+    def _estimate_missing_generation_data(self) -> torch.Tensor:
+        """
+        智能估算缺失的发电数据
+
+        使用多种策略来估算发电数据，而不是简单的零向量：
+        1. 基于负载分布的比例估算
+        2. 基于节点类型的启发式估算
+        3. 基于网络拓扑的估算
+
+        Returns:
+            估算的发电数据张量
+        """
+        num_nodes = self.node_loads.shape[0]
+
+        # 策略1: 基于负载分布估算
+        total_load = torch.sum(torch.abs(self.node_loads))
+
+        if total_load > 0:
+            # 假设总发电量略大于总负载（考虑损耗）
+            total_generation_estimate = total_load * 1.05  # 5%的损耗余量
+
+            # 基于负载分布分配发电
+            load_weights = torch.abs(self.node_loads) / total_load
+
+            # 识别可能的发电节点（高负载节点更可能有发电机）
+            load_percentile_80 = torch.quantile(torch.abs(self.node_loads), 0.8)
+            potential_gen_mask = torch.abs(self.node_loads) >= load_percentile_80
+
+            # 初始化发电数据
+            estimated_generation = torch.zeros_like(self.node_loads)
+
+            if potential_gen_mask.any():
+                # 在潜在发电节点中分配发电量
+                gen_weights = load_weights[potential_gen_mask]
+                gen_weights = gen_weights / gen_weights.sum()
+
+                estimated_generation[potential_gen_mask] = total_generation_estimate * gen_weights
+            else:
+                # 如果没有明显的发电节点，均匀分配到负载较大的节点
+                top_load_indices = torch.topk(torch.abs(self.node_loads),
+                                            min(3, num_nodes)).indices
+                estimated_generation[top_load_indices] = total_generation_estimate / len(top_load_indices)
+
+        else:
+            # 如果没有负载数据，使用基于拓扑的估算
+            estimated_generation = self._estimate_generation_from_topology()
+
+        # 策略2: 基于节点特征的调整（如果有节点类型信息）
+        if hasattr(self.hetero_data, 'x_dict') and 'bus' in self.hetero_data.x_dict:
+            bus_features = self.hetero_data.x_dict['bus']
+
+            # 检查是否有节点类型信息（通常在特征的后几列）
+            if bus_features.shape[1] > 10:  # 假设有足够的特征列
+                # 尝试识别PV节点和平衡节点（它们通常有发电机）
+                # 这是一个启发式方法，基于特征模式
+                for i in range(max(0, bus_features.shape[1] - 5), bus_features.shape[1]):
+                    feature_col = bus_features[:, i]
+
+                    # 检查是否是二进制特征（可能表示节点类型）
+                    unique_values = torch.unique(feature_col)
+                    if len(unique_values) <= 3 and torch.all((unique_values >= 0) & (unique_values <= 3)):
+                        # 可能是节点类型特征
+                        # PV节点(2)和平衡节点(3)通常有发电机
+                        gen_node_mask = (feature_col == 2) | (feature_col == 3)
+
+                        if gen_node_mask.any():
+                            # 调整这些节点的发电量
+                            boost_factor = 1.5
+                            estimated_generation[gen_node_mask] *= boost_factor
+
+        # 策略3: 数值合理性检查和调整
+        estimated_generation = self._validate_and_adjust_generation(estimated_generation)
+
+        return estimated_generation
+
+    def _estimate_generation_from_topology(self) -> torch.Tensor:
+        """基于网络拓扑估算发电分布"""
+        num_nodes = self.node_loads.shape[0]
+
+        if hasattr(self, 'edge_index') and self.edge_index.shape[1] > 0:
+            # 计算节点度数
+            node_degrees = torch.zeros(num_nodes, device=self.device)
+
+            for i in range(self.edge_index.shape[1]):
+                node1, node2 = self.edge_index[:, i]
+                if node1 < num_nodes:
+                    node_degrees[node1] += 1
+                if node2 < num_nodes:
+                    node_degrees[node2] += 1
+
+            # 高度数节点更可能是发电节点
+            degree_percentile_70 = torch.quantile(node_degrees, 0.7)
+            high_degree_mask = node_degrees >= degree_percentile_70
+
+            estimated_generation = torch.zeros_like(self.node_loads)
+
+            if high_degree_mask.any():
+                # 基于度数分配发电量
+                degree_weights = node_degrees[high_degree_mask]
+                degree_weights = degree_weights / degree_weights.sum()
+
+                # 假设适度的总发电量
+                total_gen_estimate = num_nodes * 0.1  # 每个节点平均0.1 p.u.
+                estimated_generation[high_degree_mask] = total_gen_estimate * degree_weights
+
+            return estimated_generation
+        else:
+            # 没有拓扑信息，使用最保守的估算
+            return torch.zeros(num_nodes, device=self.device)
+
+    def _validate_and_adjust_generation(self, generation: torch.Tensor) -> torch.Tensor:
+        """验证和调整发电数据的合理性"""
+        # 1. 确保非负值
+        generation = torch.clamp(generation, min=0.0)
+
+        # 2. 检查总发电量是否合理
+        total_load = torch.sum(torch.abs(self.node_loads))
+        total_generation = torch.sum(generation)
+
+        if total_load > 0:
+            # 发电量应该在负载的90%-120%之间
+            min_gen = total_load * 0.9
+            max_gen = total_load * 1.2
+
+            if total_generation < min_gen:
+                # 发电量太少，按比例增加
+                scale_factor = min_gen / (total_generation + 1e-9)
+                generation = generation * scale_factor
+            elif total_generation > max_gen:
+                # 发电量太多，按比例减少
+                scale_factor = max_gen / total_generation
+                generation = generation * scale_factor
+
+        # 3. 限制单个节点的发电量
+        max_single_gen = torch.sum(generation) * 0.4  # 单个节点最多40%的总发电量
+        generation = torch.clamp(generation, max=max_single_gen)
+
+        # 4. 确保数值稳定性
+        generation = torch.where(torch.isnan(generation),
+                               torch.zeros_like(generation),
+                               generation)
+        generation = torch.where(torch.isinf(generation),
+                               torch.zeros_like(generation),
+                               generation)
+
+        return generation
 
     def _extract_edge_info(self):
         """智能提取边信息用于导纳计算"""
