@@ -20,10 +20,469 @@
 import torch
 import numpy as np
 import hashlib
+import time
+import warnings
 from collections import defaultdict, deque
 from typing import Dict, List, Tuple, Optional, Any, Union
 from torch_geometric.data import HeteroData
 from .plateau_detector import QualityPlateauDetector, PlateauResult
+
+
+class RobustMetricsCalculator:
+    """
+    鲁棒的指标计算器，提供智能的错误处理和诊断
+    """
+
+    def __init__(self, config=None):
+        self.config = config or {}
+        self.error_history = []
+        self.metrics_history = defaultdict(list)
+        self.fallback_strategy = config.get('fallback_strategy', 'conservative')
+
+    def calculate_coupling_metrics(self, edge_admittance, edge_index, partition):
+        """
+        计算耦合指标，带有完整的错误处理
+
+        返回:
+            dict: 包含指标值、置信度和来源信息
+        """
+        try:
+            # 输入验证
+            validation_result = self._validate_coupling_inputs(
+                edge_admittance, edge_index, partition
+            )
+
+            if not validation_result['valid']:
+                return self._handle_invalid_coupling_inputs(validation_result)
+
+            # 正常计算
+            cross_partition_admittance = 0.0
+            total_admittance = edge_admittance.sum().item()
+
+            for i in range(edge_index.shape[1]):
+                node1, node2 = edge_index[:, i]
+                if (node1 < len(partition) and node2 < len(partition) and
+                    partition[node1] != partition[node2] and
+                    partition[node1] > 0 and partition[node2] > 0):
+                    cross_partition_admittance += edge_admittance[i].item()
+
+            coupling_ratio = cross_partition_admittance / (total_admittance + 1e-10)
+            edge_decoupling_ratio = 1.0 - coupling_ratio
+
+            # 结果验证
+            if not (0 <= coupling_ratio <= 1):
+                return self._handle_out_of_range_coupling(coupling_ratio)
+
+            # 记录成功的计算
+            self._record_successful_calculation('coupling_ratio', coupling_ratio)
+            self._record_successful_calculation('edge_decoupling_ratio', edge_decoupling_ratio)
+
+            return {
+                'coupling_ratio': coupling_ratio,
+                'edge_decoupling_ratio': edge_decoupling_ratio,
+                'confidence': 1.0,
+                'source': 'calculated'
+            }
+
+        except Exception as e:
+            return self._handle_coupling_calculation_error(e)
+
+    def _validate_coupling_inputs(self, edge_admittance, edge_index, partition):
+        """验证耦合计算的输入"""
+        issues = []
+
+        # 检查张量有效性
+        if torch.isnan(edge_admittance).any():
+            issues.append('edge_admittance contains NaN')
+        if torch.isinf(edge_admittance).any():
+            issues.append('edge_admittance contains Inf')
+
+        # 检查维度匹配
+        if edge_admittance.shape[0] != edge_index.shape[1]:
+            issues.append(f'dimension mismatch: admittance {edge_admittance.shape[0]} vs edges {edge_index.shape[1]}')
+
+        # 检查分区有效性
+        if partition.min() < 0:
+            issues.append('negative partition labels')
+
+        # 检查导纳值合理性
+        if (edge_admittance <= 0).any():
+            issues.append('non-positive admittance values')
+
+        return {
+            'valid': len(issues) == 0,
+            'issues': issues
+        }
+
+    def _handle_invalid_coupling_inputs(self, validation_result):
+        """处理无效的耦合计算输入"""
+        # 记录错误
+        error_entry = {
+            'metric': 'coupling_metrics',
+            'timestamp': time.time(),
+            'issues': validation_result['issues']
+        }
+        self.error_history.append(error_entry)
+
+        # 根据策略选择处理方式
+        if self.fallback_strategy == 'conservative':
+            # 基于历史数据的保守估计
+            coupling_estimate = self._get_historical_estimate('coupling_ratio', 0.3)
+            edge_decoupling_estimate = 1.0 - coupling_estimate
+
+            return {
+                'coupling_ratio': coupling_estimate,
+                'edge_decoupling_ratio': edge_decoupling_estimate,
+                'confidence': 0.2,  # 低置信度
+                'source': 'fallback_historical',
+                'issues': validation_result['issues']
+            }
+
+        elif self.fallback_strategy == 'abort':
+            # 抛出详细异常
+            raise ValueError(
+                f"无法计算耦合指标:\n" +
+                "\n".join(f"  - {issue}" for issue in validation_result['issues'])
+            )
+
+        else:  # propagate_nan
+            return {
+                'coupling_ratio': float('nan'),
+                'edge_decoupling_ratio': float('nan'),
+                'confidence': 0.0,
+                'source': 'error',
+                'issues': validation_result['issues']
+            }
+
+    def _handle_out_of_range_coupling(self, coupling_ratio):
+        """处理超出范围的耦合比率"""
+        # 记录异常值
+        warning_msg = f"耦合比率超出范围: {coupling_ratio:.3f}, 将被裁剪到[0,1]"
+        warnings.warn(warning_msg)
+
+        # 裁剪到合理范围
+        clipped_ratio = np.clip(coupling_ratio, 0.0, 1.0)
+
+        return {
+            'coupling_ratio': clipped_ratio,
+            'edge_decoupling_ratio': 1.0 - clipped_ratio,
+            'confidence': 0.7,  # 中等置信度
+            'source': 'clipped',
+            'warning': warning_msg
+        }
+
+    def _handle_coupling_calculation_error(self, exception):
+        """处理耦合计算异常"""
+        error_entry = {
+            'metric': 'coupling_metrics',
+            'timestamp': time.time(),
+            'exception': str(exception),
+            'exception_type': type(exception).__name__
+        }
+        self.error_history.append(error_entry)
+
+        # 使用历史数据回退
+        coupling_estimate = self._get_historical_estimate('coupling_ratio', 0.4)
+
+        return {
+            'coupling_ratio': coupling_estimate,
+            'edge_decoupling_ratio': 1.0 - coupling_estimate,
+            'confidence': 0.1,  # 很低的置信度
+            'source': 'exception_fallback',
+            'exception': str(exception)
+        }
+
+    def _get_historical_estimate(self, metric_name, default_value):
+        """基于历史数据获取估计值"""
+        if metric_name in self.metrics_history:
+            valid_history = [
+                entry['value'] for entry in self.metrics_history[metric_name][-10:]
+                if entry['confidence'] > 0.8
+            ]
+            if valid_history:
+                return np.mean(valid_history)
+
+        return default_value
+
+    def _record_successful_calculation(self, metric_name, value):
+        """记录成功的计算结果"""
+        self.metrics_history[metric_name].append({
+            'value': value,
+            'confidence': 1.0,
+            'timestamp': time.time()
+        })
+
+        # 限制历史长度
+        if len(self.metrics_history[metric_name]) > 50:
+            self.metrics_history[metric_name] = self.metrics_history[metric_name][-50:]
+
+
+class DataIntegrityManager:
+    """
+    数据完整性管理器，确保数据质量和系统鲁棒性
+    """
+
+    def __init__(self, config=None):
+        self.config = config or {}
+        self.missing_data_policy = config.get('missing_data_policy', 'adaptive')
+        self.validation_rules = self._setup_validation_rules()
+        self.completion_log = []
+
+    def validate_hetero_data(self, hetero_data):
+        """
+        全面验证异构图数据
+        """
+        validation_report = {
+            'valid': True,
+            'errors': [],
+            'warnings': [],
+            'data_quality_score': 1.0,
+            'missing_features': []
+        }
+
+        # 检查必需的节点类型
+        required_node_types = self.config.get('required_node_types', ['bus'])
+        for node_type in required_node_types:
+            if node_type not in hetero_data.x_dict:
+                validation_report['errors'].append(
+                    f"缺少必需的节点类型: {node_type}"
+                )
+                validation_report['valid'] = False
+
+        # 检查节点特征完整性
+        if 'bus' in hetero_data.x_dict:
+            feature_report = self._validate_bus_features(hetero_data.x_dict['bus'])
+            validation_report['warnings'].extend(feature_report['warnings'])
+            validation_report['missing_features'].extend(feature_report['missing_features'])
+            validation_report['data_quality_score'] *= feature_report['quality_score']
+
+        # 检查边数据
+        edge_report = self._validate_edge_data(hetero_data)
+        validation_report['warnings'].extend(edge_report['warnings'])
+        validation_report['data_quality_score'] *= edge_report['quality_score']
+
+        return validation_report
+
+    def handle_missing_data(self, hetero_data, validation_report):
+        """
+        根据策略处理缺失数据
+        """
+        if validation_report['valid'] and validation_report['data_quality_score'] > 0.8:
+            # 数据质量良好，直接返回
+            return hetero_data, 'original'
+
+        if self.missing_data_policy == 'strict':
+            # 严格模式：拒绝处理
+            raise ValueError(
+                "数据质量不满足要求:\n" +
+                "\n".join(validation_report['errors']) +
+                "\n建议：检查输入数据或使用 'adaptive' 策略"
+            )
+
+        elif self.missing_data_policy == 'adaptive':
+            # 自适应模式：智能补全
+            return self._intelligent_data_completion(hetero_data, validation_report)
+
+        elif self.missing_data_policy == 'fallback':
+            # 回退模式：使用备选数据源
+            return self._use_fallback_data(hetero_data, validation_report)
+
+    def _intelligent_data_completion(self, hetero_data, validation_report):
+        """
+        智能数据补全
+        """
+        completed_data = hetero_data.clone() if hasattr(hetero_data, 'clone') else hetero_data
+        completion_log = []
+
+        # 处理缺失的负荷数据
+        if 'active_load' in validation_report['missing_features']:
+            completed_data, log = self._estimate_missing_loads(completed_data)
+            completion_log.extend(log)
+
+        # 处理缺失的发电数据
+        if 'active_generation' in validation_report['missing_features']:
+            completed_data, log = self._estimate_missing_generation(completed_data)
+            completion_log.extend(log)
+
+        # 生成补全报告
+        self._generate_completion_report(completion_log)
+
+        return completed_data, 'completed'
+
+    def _validate_bus_features(self, bus_features):
+        """验证母线特征数据"""
+        report = {
+            'warnings': [],
+            'missing_features': [],
+            'quality_score': 1.0
+        }
+
+        expected_features = {
+            0: 'active_load',      # 有功负载
+            1: 'reactive_load',    # 无功负载
+            2: 'active_generation', # 有功发电
+        }
+
+        # 检查特征维度
+        if bus_features.shape[1] < 3:
+            report['warnings'].append(
+                f"母线特征维度不足: {bus_features.shape[1]} < 3"
+            )
+            report['quality_score'] *= 0.7
+
+        # 检查每个特征的质量
+        for col_idx, feature_name in expected_features.items():
+            if col_idx < bus_features.shape[1]:
+                feature_data = bus_features[:, col_idx]
+
+                # 检查是否全为零（可能表示缺失）
+                if torch.all(feature_data == 0):
+                    report['missing_features'].append(feature_name)
+                    report['warnings'].append(f"{feature_name}: 所有值为零，可能缺失")
+                    report['quality_score'] *= 0.5
+
+                # 检查NaN值
+                nan_count = torch.isnan(feature_data).sum().item()
+                if nan_count > 0:
+                    report['warnings'].append(
+                        f"{feature_name}: {nan_count}/{len(feature_data)} 个NaN值"
+                    )
+                    report['quality_score'] *= (1 - nan_count / len(feature_data))
+            else:
+                report['missing_features'].append(feature_name)
+                report['quality_score'] *= 0.8
+
+        return report
+
+    def _validate_edge_data(self, hetero_data):
+        """验证边数据"""
+        report = {
+            'warnings': [],
+            'quality_score': 1.0
+        }
+
+        edge_type = ('bus', 'connects', 'bus')
+
+        # 检查边索引
+        if edge_type not in hetero_data.edge_index_dict:
+            report['warnings'].append("缺少边索引数据")
+            report['quality_score'] = 0.1
+            return report
+
+        # 检查边属性
+        if edge_type not in hetero_data.edge_attr_dict:
+            report['warnings'].append("缺少边属性数据")
+            report['quality_score'] *= 0.5
+
+        return report
+
+    def _estimate_missing_loads(self, hetero_data):
+        """基于统计模型估算缺失的负荷数据"""
+        completion_log = []
+
+        if 'bus' in hetero_data.x_dict:
+            bus_features = hetero_data.x_dict['bus']
+            num_buses = bus_features.shape[0]
+
+            # 基于节点度数估算负荷
+            node_degrees = self._calculate_node_degrees(hetero_data)
+
+            # 典型负荷密度：10-50 MW per node
+            base_load = 20.0  # MW
+
+            # 基于度数的负荷分配
+            estimated_loads = base_load * (node_degrees / node_degrees.mean())
+
+            # 添加随机扰动
+            noise = torch.randn_like(estimated_loads) * 5.0
+            estimated_loads = torch.clamp(estimated_loads + noise, 5.0, 100.0)
+
+            # 更新特征
+            if bus_features.shape[1] > 0:
+                bus_features[:, 0] = estimated_loads
+
+            completion_log.append({
+                'type': 'load_estimation',
+                'method': 'degree_based',
+                'count': num_buses,
+                'mean_value': estimated_loads.mean().item()
+            })
+
+        return hetero_data, completion_log
+
+    def _estimate_missing_generation(self, hetero_data):
+        """估算缺失的发电数据"""
+        completion_log = []
+
+        if 'bus' in hetero_data.x_dict:
+            bus_features = hetero_data.x_dict['bus']
+            num_buses = bus_features.shape[0]
+
+            # 假设20%的节点有发电机
+            num_generators = max(1, num_buses // 5)
+
+            # 随机选择发电机节点
+            generator_indices = torch.randperm(num_buses)[:num_generators]
+
+            # 估算发电容量
+            total_load = bus_features[:, 0].sum() if bus_features.shape[1] > 0 else num_buses * 20.0
+            total_generation = total_load * 1.2  # 120%的负荷覆盖
+
+            generation_per_unit = total_generation / num_generators
+
+            # 初始化发电数据
+            if bus_features.shape[1] > 2:
+                bus_features[:, 2] = 0.0  # 清零
+                bus_features[generator_indices, 2] = generation_per_unit
+
+            completion_log.append({
+                'type': 'generation_estimation',
+                'method': 'random_allocation',
+                'generator_count': num_generators,
+                'total_generation': total_generation.item() if hasattr(total_generation, 'item') else total_generation
+            })
+
+        return hetero_data, completion_log
+
+    def _calculate_node_degrees(self, hetero_data):
+        """计算节点度数"""
+        edge_type = ('bus', 'connects', 'bus')
+
+        if edge_type not in hetero_data.edge_index_dict:
+            # 如果没有边数据，返回均匀度数
+            num_nodes = hetero_data.x_dict['bus'].shape[0]
+            return torch.ones(num_nodes) * 2.0
+
+        edge_index = hetero_data.edge_index_dict[edge_type]
+        num_nodes = hetero_data.x_dict['bus'].shape[0]
+
+        degrees = torch.zeros(num_nodes)
+        for i in range(edge_index.shape[1]):
+            degrees[edge_index[0, i]] += 1
+            degrees[edge_index[1, i]] += 1
+
+        return degrees
+
+    def _generate_completion_report(self, completion_log):
+        """生成数据补全报告"""
+        if not completion_log:
+            return
+
+        print("📋 数据补全报告:")
+        for entry in completion_log:
+            print(f"  - {entry['type']}: {entry['method']}")
+            if 'count' in entry:
+                print(f"    处理节点数: {entry['count']}")
+            if 'mean_value' in entry:
+                print(f"    平均值: {entry['mean_value']:.2f}")
+
+    def _setup_validation_rules(self):
+        """设置验证规则"""
+        return {
+            'min_data_quality_score': self.config.get('min_data_quality_score', 0.5),
+            'required_features': self.config.get('required_features', ['active_load']),
+            'allow_missing_generation': self.config.get('allow_missing_generation', True)
+        }
 
 
 class RewardFunction:
@@ -56,8 +515,39 @@ class RewardFunction:
             device: 计算设备
         """
         self.device = device or torch.device('cpu')
-        self.hetero_data = hetero_data.to(self.device)
         self.config = config or {}
+
+        # 数据完整性检查和处理
+        self.data_manager = DataIntegrityManager(
+            config=self.config.get('data_integrity', {
+                'missing_data_policy': 'adaptive',
+                'min_data_quality_score': 0.3
+            })
+        )
+
+        # 验证和处理数据
+        validation_report = self.data_manager.validate_hetero_data(hetero_data)
+
+        if validation_report['data_quality_score'] < 0.2:
+            raise ValueError(
+                f"数据质量分数 {validation_report['data_quality_score']:.2f} 过低\n"
+                f"错误: {validation_report['errors']}\n"
+                f"警告: {validation_report['warnings']}"
+            )
+
+        # 处理缺失数据
+        self.hetero_data, data_source = self.data_manager.handle_missing_data(
+            hetero_data, validation_report
+        )
+        self.hetero_data = self.hetero_data.to(self.device)
+
+        # 记录数据来源
+        if data_source != 'original':
+            warning_msg = (
+                f"使用 {data_source} 数据源，"
+                f"质量分数: {validation_report['data_quality_score']:.2f}"
+            )
+            warnings.warn(warning_msg)
 
         # 从配置中获取权重和自适应质量配置
         self.weights = self._load_weights()
@@ -73,6 +563,13 @@ class RewardFunction:
         # 当前步数（用于效率奖励计算）
         self.current_step = 0
         self.max_steps = self.config.get('max_steps', 200)
+
+        # 鲁棒指标计算器
+        self.metrics_calculator = RobustMetricsCalculator(
+            config=self.config.get('error_handling', {
+                'fallback_strategy': 'conservative'
+            })
+        )
 
         # 预计算常用数据
         self._setup_cached_data()
@@ -140,39 +637,319 @@ class RewardFunction:
         )
         
     def _setup_cached_data(self):
-        """预计算频繁使用的数据"""
-        # 节点负载和发电数据
-        if 'bus' in self.hetero_data.x_dict:
-            bus_features = self.hetero_data.x_dict['bus']
-            # 假设特征顺序：[Pd, Qd, Pg, Qg, ...]
-            self.node_loads = bus_features[:, 0]  # 有功负载
-            self.node_generation = bus_features[:, 2] if bus_features.shape[1] > 2 else torch.zeros_like(self.node_loads)
-        else:
-            # 如果没有bus数据，创建默认值
-            num_nodes = sum(x.shape[0] for x in self.hetero_data.x_dict.values())
-            self.node_loads = torch.ones(num_nodes, device=self.device)
-            self.node_generation = torch.zeros(num_nodes, device=self.device)
-            
+        """预计算频繁使用的数据 - 改进的数据处理"""
+        # 安全提取节点负载和发电数据
+        self._safe_extract_power_data()
+
         # 边信息（用于计算导纳）
         self._extract_edge_info()
-        
+
+    def _safe_extract_power_data(self):
+        """安全提取功率数据，避免创建虚假默认数据"""
+        if 'bus' not in self.hetero_data.x_dict:
+            raise ValueError(
+                "缺少必需的'bus'节点数据。"
+                "数据完整性检查应该在此之前捕获此问题。"
+            )
+
+        bus_features = self.hetero_data.x_dict['bus']
+        num_nodes = bus_features.shape[0]
+
+        # 提取有功负载（第0列）
+        if bus_features.shape[1] > 0:
+            self.node_loads = bus_features[:, 0]
+
+            # 验证负载数据的合理性
+            if torch.all(self.node_loads == 0):
+                warnings.warn(
+                    "所有节点负载为零，这可能表示数据缺失。"
+                    "建议检查数据源或使用数据补全功能。"
+                )
+        else:
+            raise ValueError("母线特征数据为空，无法提取负载信息")
+
+        # 提取有功发电（第2列，如果存在）
+        if bus_features.shape[1] > 2:
+            self.node_generation = bus_features[:, 2]
+        else:
+            # 如果没有发电数据，使用零值但发出警告
+            self.node_generation = torch.zeros_like(self.node_loads)
+            warnings.warn(
+                "缺少发电数据，使用零值。这可能影响功率平衡计算的准确性。"
+            )
+
+        # 数据质量检查
+        self._validate_power_data_quality()
+
+    def _validate_power_data_quality(self):
+        """验证功率数据质量"""
+        quality_issues = []
+
+        # 检查负载数据
+        load_nan_count = torch.isnan(self.node_loads).sum().item()
+        if load_nan_count > 0:
+            quality_issues.append(f"负载数据包含 {load_nan_count} 个NaN值")
+
+        load_inf_count = torch.isinf(self.node_loads).sum().item()
+        if load_inf_count > 0:
+            quality_issues.append(f"负载数据包含 {load_inf_count} 个Inf值")
+
+        # 检查发电数据
+        gen_nan_count = torch.isnan(self.node_generation).sum().item()
+        if gen_nan_count > 0:
+            quality_issues.append(f"发电数据包含 {gen_nan_count} 个NaN值")
+
+        # 检查功率平衡
+        total_load = self.node_loads.sum().item()
+        total_generation = self.node_generation.sum().item()
+
+        if total_load > 0 and total_generation > 0:
+            imbalance_ratio = abs(total_generation - total_load) / total_load
+            if imbalance_ratio > 0.5:  # 50%以上的不平衡
+                quality_issues.append(
+                    f"功率严重不平衡: 负载={total_load:.1f}, 发电={total_generation:.1f}, "
+                    f"不平衡率={imbalance_ratio:.1%}"
+                )
+
+        # 记录质量问题
+        if quality_issues:
+            warning_msg = "功率数据质量问题:\n" + "\n".join(f"  - {issue}" for issue in quality_issues)
+            warnings.warn(warning_msg)
+
+            # 记录到数据管理器
+            if hasattr(self.data_manager, 'completion_log'):
+                self.data_manager.completion_log.append({
+                    'type': 'power_data_quality_check',
+                    'issues': quality_issues,
+                    'total_load': total_load,
+                    'total_generation': total_generation
+                })
+
     def _extract_edge_info(self):
-        """提取边信息用于导纳计算"""
+        """智能提取边信息用于导纳计算"""
         if ('bus', 'connects', 'bus') in self.hetero_data.edge_index_dict:
             self.edge_index = self.hetero_data.edge_index_dict[('bus', 'connects', 'bus')]
 
-            # 如果有边属性，提取导纳信息
-            if ('bus', 'connects', 'bus') in self.hetero_data.edge_attr_dict:
-                edge_attr = self.hetero_data.edge_attr_dict[('bus', 'connects', 'bus')]
-                # 假设导纳在边属性的某个位置，这里需要根据实际数据调整
-                self.edge_admittance = edge_attr[:, 0] if edge_attr.shape[1] > 0 else torch.ones(self.edge_index.shape[1], device=self.device)
-            else:
-                # 默认导纳为1
-                self.edge_admittance = torch.ones(self.edge_index.shape[1], device=self.device)
+            # 智能提取导纳数据
+            self.edge_admittance, admittance_source = self._extract_admittance_data()
+
+            # 记录数据来源
+            if hasattr(self, 'logger'):
+                if admittance_source != 'extracted':
+                    self.logger.warning(f"导纳数据来源: {admittance_source}")
+            elif admittance_source != 'extracted':
+                print(f"⚠️ 导纳数据来源: {admittance_source}")
+
         else:
             # 如果没有边信息，创建空的
             self.edge_index = torch.empty((2, 0), dtype=torch.long, device=self.device)
             self.edge_admittance = torch.empty(0, device=self.device)
+
+    def _extract_admittance_data(self):
+        """
+        智能提取导纳数据，按优先级尝试多种方法
+
+        返回:
+            admittance: 导纳张量
+            source: 数据来源标识
+        """
+        edge_type = ('bus', 'connects', 'bus')
+
+        # 方法1: 从边属性直接提取
+        if edge_type in self.hetero_data.edge_attr_dict:
+            edge_attr = self.hetero_data.edge_attr_dict[edge_type]
+
+            # 尝试识别导纳数据
+            admittance = self._identify_admittance_from_attributes(edge_attr)
+            if admittance is not None:
+                return admittance, 'extracted'
+
+        # 方法2: 从阻抗计算导纳
+        if edge_type in self.hetero_data.edge_attr_dict:
+            edge_attr = self.hetero_data.edge_attr_dict[edge_type]
+            admittance = self._calculate_admittance_from_impedance(edge_attr)
+            if admittance is not None:
+                return admittance, 'calculated'
+
+        # 方法3: 基于物理模型估算
+        admittance = self._estimate_admittance_from_topology()
+        if admittance is not None:
+            return admittance, 'estimated'
+
+        # 方法4: 保守默认值（带警告）
+        return self._get_conservative_admittance_defaults(), 'default'
+
+    def _identify_admittance_from_attributes(self, edge_attr):
+        """
+        从边属性中智能识别导纳数据
+
+        根据data_processing.py中的特征顺序：
+        [r, x, b, z_magnitude, y, rateA, angle_diff, is_transformer, status]
+        导纳y在第4列（索引4）
+        """
+        if edge_attr.shape[1] <= 4:
+            return None
+
+        # 提取导纳列（第4列）
+        admittance_candidate = edge_attr[:, 4]
+
+        # 检查导纳值的合理性
+        # 导纳应该是正值，且在合理范围内
+        if self._validate_admittance_values(admittance_candidate):
+            # 取绝对值确保为正
+            return torch.abs(admittance_candidate)
+
+        # 如果第4列不合理，尝试其他可能的列
+        for col_idx in [3, 5]:  # z_magnitude, rateA
+            if edge_attr.shape[1] > col_idx:
+                candidate = edge_attr[:, col_idx]
+                if self._validate_admittance_values(candidate):
+                    return torch.abs(candidate)
+
+        return None
+
+    def _calculate_admittance_from_impedance(self, edge_attr):
+        """
+        从阻抗参数计算导纳
+
+        特征顺序：[r, x, b, z_magnitude, y, ...]
+        """
+        if edge_attr.shape[1] < 2:
+            return None
+
+        # 提取电阻和电抗
+        r = edge_attr[:, 0]  # 电阻
+        x = edge_attr[:, 1]  # 电抗
+
+        # 计算阻抗模长
+        z_squared = r**2 + x**2
+
+        # 避免除零，设置最小阻抗值
+        min_impedance = 1e-6
+        z_magnitude = torch.sqrt(z_squared.clamp(min=min_impedance**2))
+
+        # 计算导纳 Y = 1/Z
+        admittance = 1.0 / z_magnitude
+
+        # 验证结果
+        if self._validate_admittance_values(admittance):
+            return admittance
+
+        return None
+
+    def _estimate_admittance_from_topology(self):
+        """
+        基于网络拓扑估算导纳
+        """
+        num_edges = self.edge_index.shape[1]
+        if num_edges == 0:
+            return torch.empty(0, device=self.device)
+
+        # 计算节点度数
+        node_degrees = self._calculate_node_degrees()
+
+        # 基于连接的节点度数估算导纳
+        admittance_estimates = torch.zeros(num_edges, device=self.device)
+
+        for i in range(num_edges):
+            node1, node2 = self.edge_index[:, i]
+
+            # 基于节点度数的启发式估算
+            # 高度数节点间的连接通常有更高的导纳
+            avg_degree = (node_degrees[node1] + node_degrees[node2]) / 2.0
+
+            # 典型导纳范围：0.5-5.0，基于度数调整
+            base_admittance = 2.0
+            degree_factor = torch.clamp(avg_degree / 3.0, 0.5, 2.0)
+
+            admittance_estimates[i] = base_admittance * degree_factor
+
+        # 添加随机扰动以避免完全相同的值
+        noise = torch.randn_like(admittance_estimates) * 0.1
+        admittance_estimates = torch.clamp(admittance_estimates + noise, 0.5, 5.0)
+
+        return admittance_estimates
+
+    def _calculate_node_degrees(self):
+        """计算节点度数"""
+        num_nodes = max(self.edge_index.max().item() + 1,
+                       len(self.hetero_data.x_dict.get('bus', torch.empty(0))))
+
+        degrees = torch.zeros(num_nodes, device=self.device)
+
+        for i in range(self.edge_index.shape[1]):
+            node1, node2 = self.edge_index[:, i]
+            degrees[node1] += 1
+            degrees[node2] += 1
+
+        return degrees
+
+    def _get_conservative_admittance_defaults(self):
+        """
+        获取保守的默认导纳值，并记录详细警告
+        """
+        num_edges = self.edge_index.shape[1]
+
+        # 记录详细警告
+        warning_msg = (
+            f"无法提取或计算导纳数据，使用保守默认值。"
+            f"边数: {num_edges}。"
+            f"这可能影响电气解耦计算的准确性。"
+            f"建议检查输入数据格式或提供导纳信息。"
+        )
+
+        if hasattr(self, 'logger'):
+            self.logger.warning(warning_msg)
+        else:
+            print(f"⚠️ {warning_msg}")
+
+        if num_edges == 0:
+            return torch.empty(0, device=self.device)
+
+        # 使用基于网络规模的合理默认值
+        # 典型输电线路导纳范围：1-3 S
+        mean_admittance = 2.0
+        std_admittance = 0.3
+
+        # 生成正态分布的导纳值
+        admittance = torch.normal(
+            mean=mean_admittance,
+            std=std_admittance,
+            size=(num_edges,),
+            device=self.device
+        )
+
+        # 确保在合理范围内
+        admittance = torch.clamp(torch.abs(admittance), 0.8, 4.0)
+
+        return admittance
+
+    def _validate_admittance_values(self, admittance):
+        """
+        验证导纳值的物理合理性
+        """
+        # 检查NaN和Inf
+        if torch.isnan(admittance).any() or torch.isinf(admittance).any():
+            return False
+
+        # 检查是否全为零
+        if torch.all(admittance == 0):
+            return False
+
+        # 取绝对值进行范围检查
+        abs_admittance = torch.abs(admittance)
+
+        # 检查物理合理范围（放宽范围以适应不同的标幺化）
+        # 允许更大的范围：0.001-1000
+        if (abs_admittance < 0.001).any() or (abs_admittance > 1000).any():
+            return False
+
+        # 检查是否有足够的非零值
+        non_zero_count = torch.sum(abs_admittance > 0.001).item()
+        if non_zero_count < len(admittance) * 0.5:  # 至少50%的值应该是有意义的
+            return False
+
+        return True
 
     def _compute_quality_score(self, partition: torch.Tensor) -> float:
         """
@@ -281,50 +1058,29 @@ class RewardFunction:
             
         metrics['cv'] = cv.item() if torch.is_tensor(cv) else cv
         
-        # 2. 计算电气解耦指标
+        # 2. 计算电气解耦指标 - 使用鲁棒计算器
         if self.edge_index.shape[1] > 0:
-            # 计算跨区线路的导纳和
-            cross_partition_admittance = 0.0
-            total_admittance = self.edge_admittance.sum().item()
-            
-            # 数值稳定性检查
-            if torch.isnan(self.edge_admittance).any() or torch.isinf(self.edge_admittance).any():
-                # 如果导纳数据有问题，使用默认值
-                metrics['coupling_ratio'] = 0.5
-                metrics['edge_decoupling_ratio'] = 0.5
-            else:
-                for i in range(self.edge_index.shape[1]):
-                    node1, node2 = self.edge_index[:, i]
-                    # 添加边界检查
-                    if (node1 < len(partition) and node2 < len(partition) and 
-                        partition[node1] != partition[node2] and 
-                        partition[node1] > 0 and partition[node2] > 0):
-                        admittance_val = self.edge_admittance[i].item()
-                        if not (np.isnan(admittance_val) or np.isinf(admittance_val)):
-                            cross_partition_admittance += admittance_val
-                        
-                # 计算耦合比率，添加保护
-                if total_admittance <= 0 or np.isnan(total_admittance) or np.isinf(total_admittance):
-                    coupling_ratio = 0.0
-                else:
-                    coupling_ratio = cross_partition_admittance / (total_admittance + self.epsilon)
-                    coupling_ratio = np.clip(coupling_ratio, 0.0, 1.0)
-                metrics['coupling_ratio'] = coupling_ratio
-                
-                # 计算拓扑解耦率
-                cross_edges = 0
-                total_edges = self.edge_index.shape[1]
-                for i in range(total_edges):
-                    node1, node2 = self.edge_index[:, i]
-                    if (node1 < len(partition) and node2 < len(partition) and
-                        partition[node1] != partition[node2] and 
-                        partition[node1] > 0 and partition[node2] > 0):
-                        cross_edges += 1
-                        
-                edge_decoupling_ratio = 1.0 - (cross_edges / (total_edges + self.epsilon))
-                edge_decoupling_ratio = np.clip(edge_decoupling_ratio, 0.0, 1.0)
-                metrics['edge_decoupling_ratio'] = edge_decoupling_ratio
+            # 使用鲁棒指标计算器
+            coupling_result = self.metrics_calculator.calculate_coupling_metrics(
+                self.edge_admittance, self.edge_index, partition
+            )
+
+            # 提取结果
+            metrics['coupling_ratio'] = coupling_result['coupling_ratio']
+            metrics['edge_decoupling_ratio'] = coupling_result['edge_decoupling_ratio']
+
+            # 记录置信度和来源信息（用于调试）
+            if hasattr(self, 'logger'):
+                if coupling_result['confidence'] < 0.8:
+                    self.logger.warning(
+                        f"耦合指标置信度较低: {coupling_result['confidence']:.2f}, "
+                        f"来源: {coupling_result['source']}"
+                    )
+            elif coupling_result['confidence'] < 0.8:
+                print(f"⚠️ 耦合指标置信度较低: {coupling_result['confidence']:.2f}, "
+                      f"来源: {coupling_result['source']}")
         else:
+            # 没有边的情况
             metrics['coupling_ratio'] = 0.0
             metrics['edge_decoupling_ratio'] = 1.0
             
@@ -568,21 +1324,21 @@ class RewardFunction:
 
     def _compute_decoupling_reward(self, edge_decoupling_ratio: float, coupling_ratio: float) -> float:
         """
-        计算电气解耦奖励
+        计算电气解耦奖励 - 改进的错误处理
 
         公式：R_decoupling = 0.5 * σ(5*(r_edge - 0.5)) + 0.5 * σ(5*(r_admittance - 0.5))
         其中 σ 是sigmoid函数，r_admittance = 1 - coupling_ratio
         """
-        # 数值稳定性检查
-        if np.isnan(edge_decoupling_ratio) or np.isinf(edge_decoupling_ratio):
-            edge_decoupling_ratio = 0.5
-        else:
-            edge_decoupling_ratio = np.clip(edge_decoupling_ratio, 0.0, 1.0)
+        # 智能数值稳定性检查
+        edge_decoupling_ratio = self._robust_value_check(
+            edge_decoupling_ratio, 'edge_decoupling_ratio',
+            expected_range=(0.0, 1.0), default_strategy='historical'
+        )
 
-        if np.isnan(coupling_ratio) or np.isinf(coupling_ratio):
-            coupling_ratio = 0.5
-        else:
-            coupling_ratio = np.clip(coupling_ratio, 0.0, 1.0)
+        coupling_ratio = self._robust_value_check(
+            coupling_ratio, 'coupling_ratio',
+            expected_range=(0.0, 1.0), default_strategy='historical'
+        )
 
         # 计算导纳解耦率
         admittance_decoupling_ratio = 1.0 - coupling_ratio
@@ -596,14 +1352,88 @@ class RewardFunction:
 
             # 检查结果
             if np.isnan(decoupling_reward) or np.isinf(decoupling_reward):
-                decoupling_reward = 0.5
+                # 使用历史数据回退
+                decoupling_reward = self._get_historical_reward_estimate('decoupling_reward', 0.5)
             else:
                 decoupling_reward = np.clip(decoupling_reward, 0.0, 1.0)
+                # 记录成功的计算
+                self._record_reward_calculation('decoupling_reward', decoupling_reward)
 
-        except Exception:
-            decoupling_reward = 0.5
+        except Exception as e:
+            # 记录异常并使用智能回退
+            self._record_calculation_error('decoupling_reward', e)
+            decoupling_reward = self._get_historical_reward_estimate('decoupling_reward', 0.4)
 
         return decoupling_reward
+
+    def _robust_value_check(self, value, value_name, expected_range, default_strategy='historical'):
+        """
+        鲁棒的数值检查，支持多种回退策略
+        """
+        # 检查NaN和Inf
+        if np.isnan(value) or np.isinf(value):
+            if default_strategy == 'historical':
+                return self._get_historical_value_estimate(value_name, expected_range[0] + 0.5 * (expected_range[1] - expected_range[0]))
+            else:
+                return expected_range[0] + 0.5 * (expected_range[1] - expected_range[0])  # 中点
+
+        # 检查范围
+        if not (expected_range[0] <= value <= expected_range[1]):
+            # 记录超出范围的警告
+            if hasattr(self, 'logger'):
+                self.logger.warning(f"{value_name} 超出范围 {expected_range}: {value:.3f}")
+
+            # 裁剪到合理范围
+            return np.clip(value, expected_range[0], expected_range[1])
+
+        return value
+
+    def _get_historical_value_estimate(self, value_name, default_value):
+        """获取历史数值估计"""
+        if hasattr(self.metrics_calculator, 'metrics_history') and value_name in self.metrics_calculator.metrics_history:
+            valid_history = [
+                entry['value'] for entry in self.metrics_calculator.metrics_history[value_name][-5:]
+                if entry['confidence'] > 0.7
+            ]
+            if valid_history:
+                return np.mean(valid_history)
+
+        return default_value
+
+    def _get_historical_reward_estimate(self, reward_name, default_value):
+        """获取历史奖励估计"""
+        if hasattr(self, 'reward_history') and reward_name in self.reward_history:
+            recent_rewards = self.reward_history[reward_name][-5:]
+            if recent_rewards:
+                return np.mean(recent_rewards)
+
+        return default_value
+
+    def _record_reward_calculation(self, reward_name, value):
+        """记录成功的奖励计算"""
+        if not hasattr(self, 'reward_history'):
+            self.reward_history = defaultdict(list)
+
+        self.reward_history[reward_name].append(value)
+
+        # 限制历史长度
+        if len(self.reward_history[reward_name]) > 20:
+            self.reward_history[reward_name] = self.reward_history[reward_name][-20:]
+
+    def _record_calculation_error(self, calculation_name, exception):
+        """记录计算错误"""
+        if not hasattr(self, 'calculation_errors'):
+            self.calculation_errors = []
+
+        self.calculation_errors.append({
+            'name': calculation_name,
+            'exception': str(exception),
+            'timestamp': time.time()
+        })
+
+        # 限制错误历史长度
+        if len(self.calculation_errors) > 50:
+            self.calculation_errors = self.calculation_errors[-50:]
 
     def _compute_power_reward(self, power_imbalance_normalized: float) -> float:
         """

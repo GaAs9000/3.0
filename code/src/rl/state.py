@@ -9,9 +9,176 @@
 """
 
 import torch
+import torch.nn as nn
 import numpy as np
+import time
+from collections import defaultdict
 from typing import Dict, List, Tuple, Optional, Set, Any
 from torch_geometric.data import HeteroData
+
+
+class IntelligentRegionEmbedding:
+    """
+    智能区域嵌入生成器，优雅处理空分区
+    """
+
+    def __init__(self, embedding_dim, device, config=None):
+        self.embedding_dim = embedding_dim
+        self.device = device
+        self.config = config or {}
+
+        # 学习的空分区表示（可训练参数）
+        self.empty_partition_embedding = nn.Parameter(
+            torch.randn(2 * embedding_dim, device=device) * 0.1
+        )
+
+        # 分区历史信息
+        self.partition_history = {}
+        self.current_step = 0
+
+        # 配置参数
+        self.use_learned_empty_embedding = config.get('use_learned_empty_embedding', True)
+        self.use_positional_encoding = config.get('use_positional_encoding', True)
+        self.use_historical_decay = config.get('use_historical_decay', True)
+
+    def compute_region_embedding(self, partition_id, partition_nodes, node_embeddings):
+        """
+        计算区域嵌入，智能处理空分区
+        """
+        if len(partition_nodes) > 0:
+            # 非空分区：正常计算
+            partition_embeddings = node_embeddings[partition_nodes]
+
+            # 多种聚合方式
+            mean_embedding = torch.mean(partition_embeddings, dim=0)
+            max_embedding = torch.max(partition_embeddings, dim=0)[0]
+
+            # 可选：添加更多统计信息
+            if self.config.get('use_advanced_pooling', False):
+                min_embedding = torch.min(partition_embeddings, dim=0)[0]
+                std_embedding = torch.std(partition_embeddings, dim=0)
+
+                region_embedding = torch.cat([
+                    mean_embedding, max_embedding,
+                    min_embedding, std_embedding
+                ], dim=0)
+            else:
+                region_embedding = torch.cat([mean_embedding, max_embedding], dim=0)
+
+            # 更新历史
+            self._update_history(partition_id, region_embedding, 'active')
+
+            return region_embedding
+
+        else:
+            # 空分区：智能处理
+            return self._handle_empty_partition(partition_id)
+
+    def _handle_empty_partition(self, partition_id):
+        """
+        智能处理空分区
+        """
+        # 策略1: 使用学习的空分区嵌入
+        if self.use_learned_empty_embedding:
+            base_embedding = self.empty_partition_embedding
+        else:
+            base_embedding = torch.zeros(2 * self.embedding_dim, device=self.device)
+
+        # 策略2: 基于历史信息调整
+        if self.use_historical_decay and partition_id in self.partition_history:
+            history = self.partition_history[partition_id]
+
+            # 如果分区最近是活跃的，使用衰减的历史嵌入
+            if history['last_active_step'] is not None:
+                steps_since_active = self.current_step - history['last_active_step']
+                decay_factor = np.exp(-steps_since_active / 10.0)  # 指数衰减
+
+                if decay_factor > 0.1 and history['last_embedding'] is not None:
+                    # 混合历史嵌入和空嵌入
+                    embedding = (decay_factor * history['last_embedding'] +
+                               (1 - decay_factor) * base_embedding)
+
+                    self._update_history(partition_id, embedding, 'decayed')
+                    return embedding
+
+        # 策略3: 添加位置编码信息
+        if self.use_positional_encoding:
+            position_encoding = self._get_partition_position_encoding(partition_id)
+            embedding = base_embedding + 0.1 * position_encoding
+        else:
+            embedding = base_embedding
+
+        self._update_history(partition_id, embedding, 'empty')
+        return embedding
+
+    def _get_partition_position_encoding(self, partition_id):
+        """
+        为分区ID生成位置编码
+        """
+        # 简单的正弦位置编码
+        pe = torch.zeros(2 * self.embedding_dim, device=self.device)
+
+        position = partition_id
+        div_term = torch.exp(
+            torch.arange(0, 2 * self.embedding_dim, 2).float() *
+            (-np.log(10000.0) / (2 * self.embedding_dim))
+        ).to(self.device)
+
+        pe[0::2] = torch.sin(position * div_term)
+        pe[1::2] = torch.cos(position * div_term)
+
+        return pe
+
+    def _update_history(self, partition_id, embedding, status):
+        """
+        更新分区历史
+        """
+        if partition_id not in self.partition_history:
+            self.partition_history[partition_id] = {
+                'last_embedding': None,
+                'last_active_step': None,
+                'status_history': []
+            }
+
+        history = self.partition_history[partition_id]
+
+        if status == 'active':
+            history['last_embedding'] = embedding.detach()
+            history['last_active_step'] = self.current_step
+
+        history['status_history'].append({
+            'step': self.current_step,
+            'status': status
+        })
+
+        # 限制历史长度
+        if len(history['status_history']) > 100:
+            history['status_history'] = history['status_history'][-100:]
+
+    def update_step(self, step):
+        """更新当前步数"""
+        self.current_step = step
+
+    def get_embedding_statistics(self):
+        """获取嵌入统计信息"""
+        stats = {
+            'total_partitions': len(self.partition_history),
+            'active_partitions': 0,
+            'empty_partitions': 0,
+            'decayed_partitions': 0
+        }
+
+        for history in self.partition_history.values():
+            if history['status_history']:
+                last_status = history['status_history'][-1]['status']
+                if last_status == 'active':
+                    stats['active_partitions'] += 1
+                elif last_status == 'empty':
+                    stats['empty_partitions'] += 1
+                elif last_status == 'decayed':
+                    stats['decayed_partitions'] += 1
+
+        return stats
 
 
 class StateManager:
@@ -56,10 +223,23 @@ class StateManager:
         self._setup_node_embeddings(node_embeddings)
         self._setup_adjacency_info()
 
+        # 创建智能区域嵌入生成器
+        self.region_embedder = IntelligentRegionEmbedding(
+            self.embedding_dim,
+            self.device,
+            config=config.get('region_embedding', {
+                'use_learned_empty_embedding': True,
+                'use_positional_encoding': True,
+                'use_historical_decay': True,
+                'use_advanced_pooling': False
+            }) if config else {}
+        )
+
         # 状态变量
         self.current_partition = None
         self.boundary_nodes = None
         self.region_embeddings = None
+        self.current_step = 0
         
     def _setup_node_mappings(self):
         """设置局部和全局节点索引之间的映射"""
@@ -231,49 +411,49 @@ class StateManager:
         self.boundary_nodes = torch.tensor(list(boundary_set), dtype=torch.long, device=self.device)
         
     def _compute_region_embeddings(self):
-        """计算所有分区的区域聚合嵌入"""
+        """计算所有分区的区域聚合嵌入 - 使用智能嵌入生成器"""
         num_partitions = self.current_partition.max().item()
         self.region_embeddings = {}
-        
+
+        # 更新嵌入生成器的步数
+        self.region_embedder.update_step(self.current_step)
+
         for partition_id in range(1, num_partitions + 1):
             # 找到该分区中的节点
             partition_mask = (self.current_partition == partition_id)
             partition_nodes = torch.where(partition_mask)[0]
-            
-            if len(partition_nodes) > 0:
-                # 获取该分区中节点的嵌入
-                partition_embeddings = self.node_embeddings[partition_nodes]
-                
-                # 计算均值和最大池化
-                mean_embedding = torch.mean(partition_embeddings, dim=0)
-                max_embedding = torch.max(partition_embeddings, dim=0)[0]
-                
-                # 连接均值和最大值
-                region_embedding = torch.cat([mean_embedding, max_embedding], dim=0)
-                self.region_embeddings[partition_id] = region_embedding
-            else:
-                # 空分区 - 使用零嵌入
-                zero_embedding = torch.zeros(2 * self.embedding_dim, device=self.device)
-                self.region_embeddings[partition_id] = zero_embedding
+
+            # 使用智能嵌入生成器
+            self.region_embeddings[partition_id] = self.region_embedder.compute_region_embedding(
+                partition_id, partition_nodes, self.node_embeddings
+            )
                 
     def _update_region_embeddings_incremental(self, old_partition: int, new_partition: int):
-        """增量更新受影响分区的区域嵌入"""
-        # 为简单起见，重新计算受影响分区的嵌入
-        # 对于非常大的图，这可以进一步优化
+        """增量更新受影响分区的区域嵌入 - 使用智能嵌入生成器"""
+        # 更新嵌入生成器的步数
+        self.region_embedder.update_step(self.current_step)
+
         for partition_id in [old_partition, new_partition]:
             partition_mask = (self.current_partition == partition_id)
             partition_nodes = torch.where(partition_mask)[0]
-            
-            if len(partition_nodes) > 0:
-                partition_embeddings = self.node_embeddings[partition_nodes]
-                mean_embedding = torch.mean(partition_embeddings, dim=0)
-                max_embedding = torch.max(partition_embeddings, dim=0)[0]
-                region_embedding = torch.cat([mean_embedding, max_embedding], dim=0)
-                self.region_embeddings[partition_id] = region_embedding
-            else:
-                zero_embedding = torch.zeros(2 * self.embedding_dim, device=self.device)
-                self.region_embeddings[partition_id] = zero_embedding
-                
+
+            # 使用智能嵌入生成器
+            self.region_embeddings[partition_id] = self.region_embedder.compute_region_embedding(
+                partition_id, partition_nodes, self.node_embeddings
+            )
+
+    def update_step(self, step):
+        """更新当前步数"""
+        self.current_step = step
+        if hasattr(self, 'region_embedder'):
+            self.region_embedder.update_step(step)
+
+    def get_embedding_statistics(self):
+        """获取嵌入统计信息"""
+        if hasattr(self, 'region_embedder'):
+            return self.region_embedder.get_embedding_statistics()
+        return {}
+
     def get_observation(self) -> Dict[str, torch.Tensor]:
         """
         获取RL智能体的当前状态观察
