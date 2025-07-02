@@ -15,7 +15,7 @@ system:
 data:
   case_name: ieee57
   normalize: true
-  cache_dir: cache
+  cache_dir: data/cache
   available_cases:
     - ieee14
     - ieee30
@@ -197,8 +197,8 @@ adaptive_curriculum:
 # ==================== 日志和可视化配置 ====================
 logging:
   use_tensorboard: true
-  log_dir: logs
-  checkpoint_dir: checkpoints
+  log_dir: data/logs
+  checkpoint_dir: data/checkpoints
   console_log_interval: 10
   metrics_save_interval: 50
   plot_save_interval: 100
@@ -223,7 +223,7 @@ logging:
 visualization:
   enabled: true
   save_figures: true
-  figures_dir: output/figures
+  figures_dir: data/figures
   interactive: true
   figure_settings:
     dpi: 300

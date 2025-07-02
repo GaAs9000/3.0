@@ -71,14 +71,14 @@ class PowerGridDataProcessor:
                 if os.path.exists(cache_file):
                     if show_cache_loading and not only_show_errors:
                         try:
-                            from rich_output import rich_debug
+                            from code.src.rich_output import rich_debug
                             rich_debug(f"从缓存加载简化异构图: {cache_file}", "cache")
                         except ImportError:
                             pass
                     return torch.load(cache_file, map_location="cpu", weights_only=False)
             except Exception as e:
                 try:
-                    from rich_output import rich_warning
+                    from code.src.rich_output import rich_warning
                     rich_warning(f"缓存加载失败: {e}，重新构建...")
                 except ImportError:
                     print(f"⚠️ 缓存加载失败: {e}，重新构建...")
@@ -86,7 +86,7 @@ class PowerGridDataProcessor:
         # 3. 首次构建简化异构图数据
         if not only_show_errors:
             try:
-                from rich_output import rich_debug
+                from code.src.rich_output import rich_debug
                 rich_debug("首次构建简化异构图数据...", "cache")
             except ImportError:
                 pass
@@ -102,7 +102,7 @@ class PowerGridDataProcessor:
             torch.save(data, cache_file, pickle_protocol=pickle.DEFAULT_PROTOCOL)
             if not only_show_errors:
                 try:
-                    from rich_output import rich_debug
+                    from code.src.rich_output import rich_debug
                     rich_debug(f"已缓存简化异构图到: {cache_file}", "cache")
                 except ImportError:
                     pass
@@ -112,7 +112,7 @@ class PowerGridDataProcessor:
                 os.remove(lock_file)
         except Exception as e:
             try:
-                from rich_output import rich_warning
+                from code.src.rich_output import rich_warning
                 rich_warning(f"缓存保存失败: {e}")
             except ImportError:
                 print(f"⚠️ 缓存保存失败: {e}")
@@ -205,7 +205,7 @@ class PowerGridDataProcessor:
         
         # --- 1. 处理节点：统一类型 + 独热编码 ---
         try:
-            from rich_output import rich_debug
+            from code.src.rich_output import rich_debug
             rich_debug(f"节点类型分布: {df_nodes['bus_type'].value_counts().to_dict()}", "cache")
         except ImportError:
             pass
@@ -241,7 +241,7 @@ class PowerGridDataProcessor:
         data['bus'].feature_index_map = feature_index_map
         
         try:
-            from rich_output import rich_debug
+            from code.src.rich_output import rich_debug
             rich_debug(f"bus: {len(df_nodes)} 个节点，特征维度: {combined_features.shape[1]}", "cache")
             rich_debug(f"原始数值特征: {original_features.shape[1]}", "cache")
             rich_debug(f"独热编码类型特征: {bus_type_dummies.shape[1]}", "cache")
@@ -251,7 +251,7 @@ class PowerGridDataProcessor:
         
         # --- 2. 处理边：统一关系类型 ---
         try:
-            from rich_output import rich_debug
+            from code.src.rich_output import rich_debug
             rich_debug(f"边类型分布: is_transformer = {df_edge_features['is_transformer'].value_counts().to_dict()}", "cache")
         except ImportError:
             pass
@@ -273,7 +273,7 @@ class PowerGridDataProcessor:
         data['bus', 'connects', 'bus'].edge_feature_index_map = edge_feature_index_map
         
         try:
-            from rich_output import rich_debug
+            from code.src.rich_output import rich_debug
             rich_debug(f"('bus', 'connects', 'bus'): {edge_index.shape[1]} 条边，特征维度: {edge_attr.shape[1]}", "cache")
             rich_debug(f"边特征顺序: {edge_feature_names}", "cache")
         except ImportError:
@@ -284,14 +284,14 @@ class PowerGridDataProcessor:
             from torch_geometric.transforms import ToUndirected
             data = ToUndirected()(data)
             try:
-                from rich_output import rich_success, rich_debug
+                from code.src.rich_output import rich_success, rich_debug
                 rich_success("成功创建无向简化异构图")
                 rich_debug(f"无向化后边数: {data['bus', 'connects', 'bus'].edge_index.shape[1]}", "cache")
             except ImportError:
                 pass
         except Exception as e:
             try:
-                from rich_output import rich_warning
+                from code.src.rich_output import rich_warning
                 rich_warning(f"无法使用ToUndirected转换: {e}")
             except ImportError:
                 print(f"⚠️ 警告：无法使用ToUndirected转换: {e}")

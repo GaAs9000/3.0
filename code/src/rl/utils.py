@@ -347,7 +347,7 @@ class MetisInitializer:
             edge_count = sum(len(neighbors) for neighbors in self.adjacency_list) // 2
             non_isolated = sum(1 for neighbors in self.adjacency_list if len(neighbors) > 0)
             try:
-                from rich_output import rich_debug
+                from code.src.rich_output import rich_debug
                 rich_debug(f"构建邻接列表: {edge_count} 条边, {non_isolated} 个非孤立节点", "metis")
             except ImportError:
                 pass
@@ -376,13 +376,13 @@ class MetisInitializer:
             partition_labels = self._metis_partition(num_partitions)
             if show_metis_details and not only_show_errors:
                 try:
-                    from rich_output import rich_debug
+                    from code.src.rich_output import rich_debug
                     rich_debug("METIS 分区成功", "metis")
                 except ImportError:
                     pass
         except (ImportError, Exception) as e:
             try:
-                from rich_output import rich_warning
+                from code.src.rich_output import rich_warning
                 rich_warning(f"METIS 初始化失败: {e}，回退到谱聚类...")
             except ImportError:
                 print(f"⚠️ METIS 初始化失败: {e}，回退到谱聚类...")
@@ -390,13 +390,13 @@ class MetisInitializer:
                 # 2. 尝试谱聚类
                 partition_labels = self._spectral_partition(num_partitions)
                 try:
-                    from rich_output import rich_debug
+                    from code.src.rich_output import rich_debug
                     rich_debug("谱聚类分区成功", "metis")
                 except ImportError:
                     pass
             except Exception as e_spectral:
                 try:
-                    from rich_output import rich_error
+                    from code.src.rich_output import rich_error
                     rich_error(f"谱聚类也失败: {e_spectral}")
                 except ImportError:
                     print(f"❌ 谱聚类也失败: {e_spectral}")

@@ -468,13 +468,25 @@ class DataIntegrityManager:
         if not completion_log:
             return
 
-        print("📋 数据补全报告:")
-        for entry in completion_log:
-            print(f"  - {entry['type']}: {entry['method']}")
-            if 'count' in entry:
-                print(f"    处理节点数: {entry['count']}")
-            if 'mean_value' in entry:
-                print(f"    平均值: {entry['mean_value']:.2f}")
+        # 检查是否启用简洁模式
+        try:
+            from code.src.rich_output import rich_debug
+            rich_debug("数据补全报告:", category="scenario")
+            for entry in completion_log:
+                rich_debug(f"  - {entry['type']}: {entry['method']}", category="scenario")
+                if 'count' in entry:
+                    rich_debug(f"    处理节点数: {entry['count']}", category="scenario")
+                if 'mean_value' in entry:
+                    rich_debug(f"    平均值: {entry['mean_value']:.2f}", category="scenario")
+        except ImportError:
+            # 备用标准输出
+            print("📋 数据补全报告:")
+            for entry in completion_log:
+                print(f"  - {entry['type']}: {entry['method']}")
+                if 'count' in entry:
+                    print(f"    处理节点数: {entry['count']}")
+                if 'mean_value' in entry:
+                    print(f"    平均值: {entry['mean_value']:.2f}")
 
     def _setup_validation_rules(self):
         """设置验证规则"""
@@ -1153,7 +1165,38 @@ class RewardFunction:
         except Exception as e:
             print(f"警告：质量分数计算出现异常: {e}")
             return 0.0
-            
+
+    def _compute_simple_relative_reward(self, prev_quality: float, curr_quality: float) -> float:
+        """
+        简单相对改进奖励 - 解决跨场景训练偏向问题
+
+        核心思想：相同的相对努力应该获得相同的奖励幅度
+        - 故障场景: (0.42-0.40)/0.40 = 5%改进 → 奖励+0.05
+        - 正常场景: (0.714-0.68)/0.68 = 5%改进 → 奖励+0.05
+
+        这确保算法不会偏向简单场景，在困难场景(故障、高负荷)下也能获得公平激励
+
+        Args:
+            prev_quality: 前一步质量分数
+            curr_quality: 当前质量分数
+
+        Returns:
+            相对改进奖励 [-1.0, 1.0]
+        """
+        try:
+            if prev_quality > 0.01:  # 避免除零，处理边界情况
+                relative_improvement = (curr_quality - prev_quality) / prev_quality
+            else:
+                # 从零开始的情况，直接用绝对改进
+                relative_improvement = curr_quality - prev_quality
+
+            # 轻微裁剪避免极端值，保持训练稳定性
+            return np.clip(relative_improvement, -1.0, 1.0)
+
+        except Exception as e:
+            print(f"警告：相对奖励计算出现异常: {e}")
+            return 0.0
+
     def _compute_core_metrics(self, partition: torch.Tensor) -> Dict[str, float]:
         """
         中心化的核心指标计算方法
@@ -1276,8 +1319,8 @@ class RewardFunction:
         """
         计算自适应质量导向即时奖励
 
-        实现基于质量分数的势函数奖励：
-        主奖励 = γ * Q(s_{t+1}) - Q(s_t)
+        实现基于相对改进的奖励系统，解决跨场景训练偏向问题：
+        主奖励 = 相对改进奖励 = (Q(s_{t+1}) - Q(s_t)) / Q(s_t)
         效率奖励 = λ * (max_steps - current_step) / max_steps (仅在平台期激活)
 
         Args:
@@ -1303,9 +1346,11 @@ class RewardFunction:
             return 0.0, plateau_result
 
         try:
-            # 1. 计算主奖励（势函数奖励）
-            gamma = 0.99  # 折扣因子
-            main_reward = gamma * current_quality_score - self.previous_quality_score
+            # 1. 计算主奖励（相对改进奖励）
+            main_reward = self._compute_simple_relative_reward(
+                self.previous_quality_score,
+                current_quality_score
+            )
 
             # 数值稳定性保护
             if np.isnan(main_reward) or np.isinf(main_reward):

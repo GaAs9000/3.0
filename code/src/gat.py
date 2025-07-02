@@ -257,7 +257,7 @@ class HeteroGraphEncoder(nn.Module):
         # 在定义了确切的依赖关系后，我们确信 to_hetero 会稳定工作
         self.hetero_encoder = to_hetero(gnn_encoder, metadata, aggr='sum')
         try:
-            from rich_output import rich_debug
+            from code.src.rich_output import rich_debug
             rich_debug("使用 to_hetero 转换的异构编码器", "attention")
         except ImportError:
             pass
@@ -393,7 +393,7 @@ class HeteroGraphEncoder(nn.Module):
 
         if show_attention_collection and not only_show_errors:
             try:
-                from rich_output import rich_debug
+                from code.src.rich_output import rich_debug
                 rich_debug("开始收集注意力权重...", "attention")
             except ImportError:
                 pass
@@ -454,7 +454,7 @@ class HeteroGraphEncoder(nn.Module):
             edge_type_key: 格式化的边类型键，如 "bus_pv__connects_line__bus_slack"
         """
         try:
-            from rich_output import rich_debug
+            from code.src.rich_output import rich_debug
             rich_debug(f"尝试从模块名提取边类型: {module_name}", "attention")
         except ImportError:
             pass
@@ -471,7 +471,7 @@ class HeteroGraphEncoder(nn.Module):
             if (src_type in module_name and dst_type in module_name and
                 relation in module_name):
                 try:
-                    from rich_output import rich_debug
+                    from code.src.rich_output import rich_debug
                     rich_debug(f"匹配到边类型: {edge_type_key}", "attention")
                 except ImportError:
                     pass
@@ -495,7 +495,7 @@ class HeteroGraphEncoder(nn.Module):
                 src_type, relation, dst_type = edge_type
                 edge_type_key = f"{src_type}__{relation}__{dst_type}"
                 try:
-                    from rich_output import rich_debug
+                    from code.src.rich_output import rich_debug
                     rich_debug(f"通过索引匹配到边类型: {edge_type_key} (索引: {edge_type_idx})", "attention")
                 except ImportError:
                     pass
@@ -505,14 +505,14 @@ class HeteroGraphEncoder(nn.Module):
         if "conv" in module_name:
             fallback_key = f"unknown_edge_type_{module_name.replace('.', '_')}"
             try:
-                from rich_output import rich_debug
+                from code.src.rich_output import rich_debug
                 rich_debug(f"使用备用键: {fallback_key}", "attention")
             except ImportError:
                 pass
             return fallback_key
 
         try:
-            from rich_output import rich_debug
+            from code.src.rich_output import rich_debug
             rich_debug("无法提取边类型", "attention")
         except ImportError:
             pass

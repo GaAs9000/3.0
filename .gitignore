@@ -136,9 +136,13 @@ experiments/
 .DS_Store
 Thumbs.db
 
-# Output directories
-output/model/*.pt
-output/model/*.pth
-output/figures/*.png
-output/figures/*.jpg
-output/figures/*.pdf 
+# Data directories
+data/cache/
+data/logs/
+data/checkpoints/
+data/experiments/
+data/models/*.pt
+data/models/*.pth
+data/figures/*.png
+data/figures/*.jpg
+data/figures/*.pdf 

@@ -5,17 +5,17 @@ from torch_geometric.data import HeteroData
 import copy
 
 try:
-    from .state import StateManager
-    from .action_space import ActionSpace, ActionMask
-    from .reward import RewardFunction
-    from .utils import MetisInitializer, PartitionEvaluator
+    from code.src.rl.state import StateManager
+    from code.src.rl.action_space import ActionSpace, ActionMask
+    from code.src.rl.reward import RewardFunction
+    from code.src.rl.utils import MetisInitializer, PartitionEvaluator
 except ImportError:
     # 如果相对导入失败，尝试绝对导入
     try:
-        from rl.state import StateManager
-        from rl.action_space import ActionSpace, ActionMask
-        from rl.reward import RewardFunction
-        from rl.utils import MetisInitializer, PartitionEvaluator
+        from code.src.rl.state import StateManager
+        from code.src.rl.action_space import ActionSpace, ActionMask
+        from code.src.rl.reward import RewardFunction
+        from code.src.rl.utils import MetisInitializer, PartitionEvaluator
     except ImportError:
         print("警告：无法导入RL模块的某些组件")
 
@@ -63,7 +63,7 @@ class PowerGridPartitioningEnv:
         self.action_space = ActionSpace(hetero_data, num_partitions, device)
 
         # 【新增】确保ActionMask处理器被初始化
-        from .action_space import ActionMask
+        from code.src.rl.action_space import ActionMask
         self.action_space.mask_handler = ActionMask(hetero_data, device)
 
         # 奖励函数支持 - 统一使用自适应质量导向奖励系统
