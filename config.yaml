@@ -120,6 +120,58 @@ scenario_generation:
     - none
   scale_range: [0.8, 1.2]
 
+# ==================== 场景感知奖励系统配置 ====================
+scenario_aware_reward:
+  enabled: false  # 默认关闭，可通过命令行参数启用
+
+  # 场景分类配置
+  scenario_classification:
+    load_scale_bins: [0.8, 1.0, 1.2]  # 负荷缩放分段
+    fault_types: ['none', 'n1']        # 故障类型
+    min_samples_per_scenario: 5        # 每个场景最小样本数
+    max_scenarios: 20                  # 最大场景数限制
+
+  # 历史库配置
+  history_tracking:
+    window_size: 15                    # 最近窗口大小
+    min_samples_for_percentile: 5      # 百分位计算最小样本数
+    max_history_per_scenario: 1000     # 每个场景最大历史记录数
+    min_samples_threshold: 3           # 数据不足阈值
+    ema_alpha: 0.1                     # EMA更新系数
+
+  # 平台期检测配置
+  detection_config:
+    window_size: 15                    # 检测窗口大小
+    min_improvement_rate: 0.005        # 最小改善率阈值
+    stability_threshold: 0.8           # 稳定性阈值
+    min_percentile: 0.7                # 历史百分位阈值
+    confidence_threshold: 0.8          # 置信度阈值
+
+  # 相对奖励配置
+  relative_reward:
+    enabled: false                     # 相对奖励开关
+    method: 'relative_improvement'     # 方法: 'relative_improvement', 'range_normalized', 'popart'
+    use_difficulty_scaling: true       # 是否使用难度缩放
+    ema_alpha: 0.1                     # EMA更新系数
+    clip_range: [-1.0, 1.0]           # 奖励裁剪范围
+    switch_episode: 500                # 切换到相对奖励的回合数
+
+    # PopArt标准化配置（当method='popart'时使用）
+    popart:
+      beta: 0.99                       # 动量系数
+      epsilon: 1e-8                    # 数值稳定性参数
+
+    # 范围归一化配置（当method='range_normalized'时使用）
+    range_normalized:
+      min_range_span: 0.1              # 最小范围跨度
+
+  # 实验配置
+  experiment:
+    enable_ab_testing: false           # A/B测试开关
+    collect_stats_episodes: 200        # 统计收集回合数
+    log_scenario_details: true         # 是否记录场景详情
+    save_history_interval: 100         # 历史数据保存间隔
+
 # ==================== 并行训练配置 ====================
 parallel_training:
   enabled: false
