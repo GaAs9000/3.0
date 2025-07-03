@@ -883,4 +883,184 @@ class HTMLDashboardGenerator:
         # 转换为稳定性评分（0-100）
         stability_score = max(0, min(100, (1 - cv) * 100))
         
-        return stability_score 
+        return stability_score
+
+    def generate_performance_dashboard(self, performance_data: Dict[str, Any],
+                                     output_filename: Optional[str] = None) -> Path:
+        """
+        生成性能分析仪表板
+
+        Args:
+            performance_data: 性能测试数据
+            output_filename: 输出文件名，如果为None则自动生成
+
+        Returns:
+            生成的HTML文件路径
+        """
+        print("🎨 开始生成性能分析HTML仪表板...")
+
+        # 设置输出路径
+        if output_filename is None:
+            timestamp = time.strftime('%Y%m%d_%H%M%S')
+            output_filename = f"performance_analysis_{timestamp}.html"
+
+        output_path = self.output_dir / output_filename
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        # 创建图表工厂
+        chart_factory = PlotlyChartFactory(self.config.get('chart_factory', {}))
+
+        # 生成性能分析图表
+        charts = self._create_performance_charts(performance_data, chart_factory)
+
+        # 生成HTML内容
+        html_content = self._generate_performance_html(performance_data, charts)
+
+        # 写入文件
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write(html_content)
+
+        print(f"✅ 性能分析仪表板生成完成: {output_path}")
+        return output_path
+
+    def _create_performance_charts(self, performance_data: Dict[str, Any],
+                                 chart_factory: 'PlotlyChartFactory') -> Dict[str, str]:
+        """创建性能分析图表"""
+        charts = {}
+
+        try:
+            # 1. 跨网络成功率对比图
+            if 'test_networks' in performance_data and 'success_rates' in performance_data:
+                networks = performance_data['test_networks']
+                success_rates = performance_data['success_rates']
+
+                # 使用现有的comparison_chart方法
+                comparison_data = {
+                    'networks': networks,
+                    'success_rates': [rate * 100 for rate in success_rates]  # 转换为百分比
+                }
+                charts['success_rate_comparison'] = chart_factory.create_comparison_chart(comparison_data).to_json()
+
+            # 2. 平均奖励对比图 - 使用简单的文本表格代替复杂图表
+            if 'test_networks' in performance_data and 'avg_rewards' in performance_data:
+                networks = performance_data['test_networks']
+                avg_rewards = performance_data['avg_rewards']
+
+                # 创建简单的HTML表格
+                table_html = "<table style='width:100%; border-collapse: collapse;'>"
+                table_html += "<tr style='background:#f0f0f0;'><th style='padding:10px; border:1px solid #ddd;'>网络</th><th style='padding:10px; border:1px solid #ddd;'>平均奖励</th></tr>"
+                for network, reward in zip(networks, avg_rewards):
+                    table_html += f"<tr><td style='padding:10px; border:1px solid #ddd;'>{network}</td><td style='padding:10px; border:1px solid #ddd;'>{reward:.3f}</td></tr>"
+                table_html += "</table>"
+                charts['reward_comparison'] = table_html
+
+        except Exception as e:
+            print(f"⚠️ 创建性能图表时出错: {e}")
+
+        return charts
+
+    def _generate_performance_html(self, performance_data: Dict[str, Any],
+                                 charts: Dict[str, str]) -> str:
+        """生成性能分析HTML内容"""
+
+        # 基础HTML模板
+        html_template = """
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>性能分析仪表板</title>
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; padding: 20px; background: #f5f5f5; }
+        .container { max-width: 1200px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        .header { text-align: center; margin-bottom: 30px; }
+        .header h1 { color: #2c3e50; margin-bottom: 10px; }
+        .summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin-bottom: 30px; }
+        .metric-card { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; border-radius: 8px; text-align: center; }
+        .metric-value { font-size: 2em; font-weight: bold; margin-bottom: 5px; }
+        .metric-label { font-size: 0.9em; opacity: 0.9; }
+        .chart-container { margin: 30px 0; padding: 20px; background: #fafafa; border-radius: 8px; }
+        .chart-title { font-size: 1.2em; font-weight: bold; margin-bottom: 15px; color: #34495e; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🎯 模型性能分析仪表板</h1>
+            <p>训练网络: {{ train_network }} | 测试时间: {{ test_time }}</p>
+        </div>
+
+        <div class="summary">
+            <div class="metric-card">
+                <div class="metric-value">{{ overall_success_rate }}%</div>
+                <div class="metric-label">总体成功率</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-value">{{ overall_avg_reward }}</div>
+                <div class="metric-label">平均奖励</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-value">{{ test_count }}</div>
+                <div class="metric-label">测试网络数</div>
+            </div>
+        </div>
+
+        {{ charts_html }}
+    </div>
+</body>
+</html>
+        """
+
+        # 准备模板变量
+        template_vars = {
+            'train_network': performance_data.get('train_network', 'Unknown'),
+            'test_time': time.strftime('%Y-%m-%d %H:%M:%S'),
+            'overall_success_rate': f"{performance_data.get('overall_success_rate', 0) * 100:.1f}",
+            'overall_avg_reward': f"{performance_data.get('overall_avg_reward', 0):.3f}",
+            'test_count': len(performance_data.get('test_networks', [])),
+            'charts_html': self._format_charts_html(charts)
+        }
+
+        # 替换模板变量
+        html_content = html_template
+        for key, value in template_vars.items():
+            html_content = html_content.replace(f"{{{{ {key} }}}}", str(value))
+
+        return html_content
+
+    def _format_charts_html(self, charts: Dict[str, str]) -> str:
+        """格式化图表HTML"""
+        charts_html = ""
+
+        for chart_id, chart_content in charts.items():
+            if chart_id == 'success_rate_comparison' and chart_content.startswith('{'):
+                # Plotly图表
+                charts_html += f"""
+                <div class="chart-container">
+                    <div class="chart-title">跨网络泛化成功率对比</div>
+                    <div id="{chart_id}" style="height: 500px;"></div>
+                    <script>
+                        Plotly.newPlot('{chart_id}', {chart_content});
+                    </script>
+                </div>
+                """
+            elif chart_id == 'reward_comparison':
+                # HTML表格
+                charts_html += f"""
+                <div class="chart-container">
+                    <div class="chart-title">跨网络平均奖励对比</div>
+                    {chart_content}
+                </div>
+                """
+            else:
+                # 其他类型的图表
+                charts_html += f"""
+                <div class="chart-container">
+                    <div class="chart-title">{chart_id}</div>
+                    <div>{chart_content}</div>
+                </div>
+                """
+
+        return charts_html

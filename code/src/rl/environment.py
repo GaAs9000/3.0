@@ -6,10 +6,10 @@ import copy
 from .scenario_context import ScenarioContext
 
 try:
-    from code.src.rl.state import StateManager
-    from code.src.rl.action_space import ActionSpace, ActionMask
-    from code.src.rl.reward import RewardFunction
-    from code.src.rl.utils import MetisInitializer, PartitionEvaluator
+    from .state import StateManager
+    from .action_space import ActionSpace, ActionMask
+    from .reward import RewardFunction
+    from .utils import MetisInitializer, PartitionEvaluator
 except ImportError:
     # 如果相对导入失败，尝试绝对导入
     try:

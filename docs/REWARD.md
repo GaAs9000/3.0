@@ -151,30 +151,39 @@ OUTPUT: plateau_detected, confidence
    )
 ### 平台期检测实现
 
-<augment_code_snippet path="code/src/rl/reward.py" mode="EXCERPT">
+<augment_code_snippet path="code/src/rl/plateau_detector.py" mode="EXCERPT">
 ````python
-def detect_plateau(self, current_score: float, scenario_context=None):
-    """检测质量平台期"""
-    # 更新历史记录
-    self.quality_history.append(current_score)
+def update(self, quality_score: float) -> PlateauResult:
+    """更新质量分数并检测平台期"""
+    # 输入验证和数据更新
+    quality_score = np.clip(quality_score, 0.0, 1.0)
+    self.recent_scores.append(quality_score)
+    self.all_history_scores.append(quality_score)
 
-    # 计算改善率
-    recent_scores = self.quality_history[-self.window_size:]
-    improvement_rate = self._calculate_improvement_rate(recent_scores)
-
-    # 计算稳定性
-    stability_score = self._calculate_stability(recent_scores)
+    # 执行三层检测
+    improvement_rate = self._compute_improvement_rate()
+    stability_score = self._compute_stability_score()
+    historical_percentile = self._compute_historical_percentile()
 
     # 综合判断
     plateau_detected = (
-        improvement_rate < self.min_improvement_threshold and
-        stability_score > self.stability_threshold
+        improvement_rate < self.min_improvement_rate and
+        stability_score > self.stability_threshold and
+        historical_percentile > self.min_percentile
+    )
+
+    # 计算置信度
+    confidence = self._compute_confidence(
+        improvement_rate, stability_score, historical_percentile
     )
 
     return PlateauResult(
-        is_plateau=plateau_detected,
-        confidence=stability_score,
-        improvement_rate=improvement_rate
+        plateau_detected=plateau_detected,
+        confidence=confidence,
+        improvement_rate=improvement_rate,
+        stability_score=stability_score,
+        historical_percentile=historical_percentile,
+        details={}
     )
 ````
 </augment_code_snippet>
@@ -211,9 +220,12 @@ def _safe_exp(self, x: float) -> float:
 1. **跨场景公平性**: 相同努力获得相同奖励
 2. **自动适应性**: 无需针对不同网络调参
 3. **训练稳定性**: 避免奖励尺度差异导致的不稳定
-2. **_compute_quality_score()**: 统一质量分数计算，支持跨网络适应性
-3. **plateau_detector**: 平台期检测器实例，管理检测状态
-4. **adaptive_quality_config**: 自适应质量配置，控制检测参数
+
+### 核心组件
+
+1. **_compute_quality_score()**: 统一质量分数计算，支持跨网络适应性
+2. **plateau_detector**: 平台期检测器实例，管理检测状态
+3. **adaptive_quality_config**: 自适应质量配置，控制检测参数
 
 ## ⚙️ 配置参数设计
 

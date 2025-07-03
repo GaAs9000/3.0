@@ -136,13 +136,31 @@ experiments/
 .DS_Store
 Thumbs.db
 
-# Data directories
+# Data directories - 训练生成的数据文件
 data/cache/
 data/logs/
 data/checkpoints/
 data/experiments/
-data/models/*.pt
-data/models/*.pth
-data/figures/*.png
-data/figures/*.jpg
-data/figures/*.pdf 
+data/models/
+data/figures/
+data/output/
+
+# Output directories - 生成的输出文件
+output/
+figures/
+
+# Model files - 模型文件
+*.pt
+*.pth
+*.ckpt
+*.model
+
+# Training artifacts - 训练产物
+*.json
+!config.yaml
+!requirements.txt
+!**/config.json
+
+# HTML dashboards and reports - 生成的仪表板和报告
+*.html
+!docs/**/*.html

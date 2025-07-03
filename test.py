@@ -370,6 +370,57 @@ class QuickTester:
             overall_success_rate = total_success_rate / valid_count if valid_count > 0 else 0
             print(f"   总体泛化能力: {overall_success_rate:.1%}")
 
+    def generate_performance_dashboard(self, test_results: List[Dict], output_filename: Optional[str] = None) -> Optional[Path]:
+        """
+        生成性能分析HTML仪表板
+
+        Args:
+            test_results: 测试结果数据
+            output_filename: 输出文件名，如果为None则自动生成
+
+        Returns:
+            生成的HTML文件路径，失败则返回None
+        """
+        try:
+            from code.src.html_dashboard_generator import HTMLDashboardGenerator
+
+            # 创建HTML仪表板生成器
+            dashboard_config = self.config.get('html_dashboard', {})
+            generator = HTMLDashboardGenerator(dashboard_config)
+
+            # 准备测试数据
+            networks = [result['network'] for result in test_results]
+            success_rates = [result['success_rate'] for result in test_results if 'error' not in result]
+            avg_rewards = [result['avg_reward'] for result in test_results if 'error' not in result]
+
+            # 计算总体指标
+            overall_success_rate = np.mean(success_rates) if success_rates else 0
+            overall_avg_reward = np.mean(avg_rewards) if avg_rewards else 0
+
+            performance_data = {
+                'test_type': 'cross_network_generalization',
+                'train_network': self.config['data']['case_name'],
+                'test_networks': networks,
+                'success_rates': success_rates,
+                'avg_rewards': avg_rewards,
+                'overall_success_rate': overall_success_rate,
+                'overall_avg_reward': overall_avg_reward,
+                'test_results': test_results,
+                'config': self.config,
+                'session_name': f"Performance_Test_{time.strftime('%Y%m%d_%H%M%S')}"
+            }
+
+            # 生成HTML仪表板
+            html_path = generator.generate_performance_dashboard(
+                performance_data, output_filename
+            )
+
+            return html_path
+
+        except Exception as e:
+            print(f"⚠️ 性能分析仪表板生成失败: {e}")
+            return None
+
 
 def main():
     """主函数"""
@@ -389,7 +440,13 @@ def main():
             # 快速泛化测试
             tester = QuickTester(config_path=args.config)
             results = tester.run_generalization_test(num_episodes=args.episodes)
-            
+
+            # 生成性能分析HTML仪表板
+            print(f"\n📊 生成性能分析仪表板...")
+            html_path = tester.generate_performance_dashboard(results)
+            if html_path:
+                print(f"✅ 性能分析仪表板已生成: {html_path}")
+
             print(f"\n✅ 快速测试完成！")
             print(f"💡 使用 'python test.py --help' 查看更多测试选项")
             

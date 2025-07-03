@@ -55,7 +55,7 @@ R_t = 区域聚合嵌入
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                    训练控制层                                │
-│  AdaptiveCurriculumDirector + PlateauDetector              │
+│  AdaptiveDirector + QualityPlateauDetector                 │
 └─────────────────────────────────────────────────────────────┘
 ┌─────────────────────────────────────────────────────────────┐
 │                    强化学习层                                │
@@ -139,7 +139,7 @@ Episode长度被限制在2-3步
 5. ActionSpace → 验证动作有效性（软约束）
 6. Environment → 执行状态转换 s_t → s_{t+1}
 7. RewardFunction → 计算奖励 R_t = Φ(s_{t+1}) - Φ(s_t)
-8. AdaptiveCurriculumDirector → 调整训练参数
+8. AdaptiveDirector → 调整训练参数
 ```
 
 ### 关键接口设计

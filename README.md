@@ -9,9 +9,6 @@
 # 基础依赖
 pip install torch torch-geometric numpy matplotlib pyyaml tqdm
 
-# TUI前端界面和可视化依赖
-pip install textual plotly jinja2
-
 # 可选依赖（电力系统分析）
 pip install pandapower networkx seaborn
 ```

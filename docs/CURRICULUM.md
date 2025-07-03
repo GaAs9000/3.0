@@ -134,24 +134,38 @@ def smooth_parameter_transition(self, current_params, target_params, transition_
 
 <augment_code_snippet path="code/src/rl/plateau_detector.py" mode="EXCERPT">
 ````python
-def check_plateau_and_suggest_action(self, recent_scores, window=50):
-    """检测平台期并建议行动"""
-    # 改善率检测
-    improvement_rate = self._calculate_improvement_rate(recent_scores)
-    
-    # 稳定性检测  
-    stability = self._calculate_stability(recent_scores)
-    
-    # 综合置信度
-    plateau_confidence = stability * np.exp(-abs(improvement_rate))
-    
-    if plateau_confidence > 0.8:
-        if improvement_rate < -0.01:  # 性能下降
-            return "ROLLBACK"  # 回退到上一阶段
-        else:
-            return "ADVANCE"   # 进入下一阶段
-    
-    return "MAINTAIN"  # 保持当前阶段
+def update(self, quality_score: float) -> PlateauResult:
+    """更新质量分数并检测平台期"""
+    # 输入验证和数据更新
+    quality_score = np.clip(quality_score, 0.0, 1.0)
+    self.recent_scores.append(quality_score)
+    self.all_history_scores.append(quality_score)
+
+    # 执行三层检测
+    improvement_rate = self._compute_improvement_rate()
+    stability_score = self._compute_stability_score()
+    historical_percentile = self._compute_historical_percentile()
+
+    # 综合判断
+    plateau_detected = (
+        improvement_rate < self.min_improvement_rate and
+        stability_score > self.stability_threshold and
+        historical_percentile > self.min_percentile
+    )
+
+    # 计算置信度
+    confidence = self._compute_confidence(
+        improvement_rate, stability_score, historical_percentile
+    )
+
+    return PlateauResult(
+        plateau_detected=plateau_detected,
+        confidence=confidence,
+        improvement_rate=improvement_rate,
+        stability_score=stability_score,
+        historical_percentile=historical_percentile,
+        details={}
+    )
 ````
 </augment_code_snippet>
 

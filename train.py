@@ -316,7 +316,7 @@ def convert_pandapower_to_matpower(net) -> Dict:
 
 
 class TrainingLogger:
-    """训练日志记录器 - 支持TensorBoard和HTML仪表板生成"""
+    """训练日志记录器 - 支持TensorBoard监控"""
 
     def __init__(self, config: Dict[str, Any], total_episodes: int):
         """初始化日志记录器"""
@@ -341,64 +341,27 @@ class TrainingLogger:
         log_config = config.get('logging', {})
         self.metrics_save_interval = log_config.get('metrics_save_interval', 100)
 
-        # 检查是否使用Rich状态面板
-        self.use_rich_panel = config.get('debug', {}).get('training_output', {}).get('use_rich_status_panel', True)
+        # 移除Rich状态面板，简化输出
         
-        # 使用现代化训练监控器
+        # 使用简单进度条
         try:
-            from code.src.rich_output import set_output_manager
-            set_output_manager(config)
-            self.use_rich = True
-            
-            if self.use_rich_panel:
-                # 使用Rich状态面板
-                from rich.live import Live
-                from rich.console import Console
-                self.console = Console()
-                self.live_panel = None
-                self.progress_bar = None
-                print("🚀 启动简洁模式训练监控...")
-            else:
-                # 使用传统进度条
-                from code.src.rich_output import rich_progress
-                self.progress_bar = rich_progress("🚀 训练进度", total_episodes)
-                self.progress_bar.__enter__()
-                self.live_panel = None
-                
-        except ImportError:
             from tqdm import tqdm
-            self.progress_bar = tqdm(total=total_episodes, desc="🚀 训练进度")
+            self.progress_bar = tqdm(total=total_episodes, desc="🚀 训练进度",
+                                   bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]')
             self.use_rich = False
-            self.live_panel = None
+        except ImportError:
+            # 如果tqdm也不可用，使用最基本的进度显示
+            self.progress_bar = None
+            self.use_rich = False
 
         # 设置TensorBoard
         self.use_tensorboard = log_config.get('use_tensorboard', False)
         self.tensorboard_writer = self._setup_tensorboard() if self.use_tensorboard else None
 
-        # 设置HTML仪表板生成器
-        self.use_html_dashboard = log_config.get('generate_html_dashboard', True)
-        self.html_dashboard_generator = None
-        if self.use_html_dashboard:
-            try:
-                from code.src.html_dashboard_generator import HTMLDashboardGenerator
-                self.html_dashboard_generator = HTMLDashboardGenerator(config.get('html_dashboard', {}))
-            except ImportError as e:
-                from code.src.rich_output import rich_warning
-                rich_warning(f"HTML仪表板生成器不可用: {e}")
-                self.use_html_dashboard = False
+        # HTML仪表板已移动到test.py中用于性能分析
 
-        # TUI集成
-        self.use_tui = config.get('tui', {}).get('enabled', False)
-        self.tui_update_queue = None
-        if self.use_tui:
-            try:
-                from code.src.tui_monitor import TrainingMonitorApp
-                self.tui_update_queue = queue.Queue()
-                self.tui_app = TrainingMonitorApp(self.tui_update_queue, total_episodes)
-            except (ImportError, Exception) as e:
-                from code.src.rich_output import rich_warning
-                rich_warning(f"无法加载TUI监控器，回退到标准输出: {e}")
-                self.use_tui = False
+        # 移除TUI集成，简化为基本输出
+        self.use_tui = False
 
 
 
@@ -643,44 +606,20 @@ class TrainingLogger:
             # 注释掉提前返回，让代码继续执行TensorBoard记录
             # return # TUI接管显示，直接返回
 
-        # 使用Rich状态面板或传统进度条
-        if self.use_rich and self.use_rich_panel:
-            # 更新Rich状态面板（降低刷新频率避免输出混乱）
-            if episode == 0:
-                # 首次显示，启动Live
-                from rich.live import Live
-                panel = self._create_status_panel(episode, reward, info)
-                self.live_panel = Live(panel, console=self.console, refresh_per_second=0.5)  # 降低刷新频率
-                self.live_panel.start()
-            elif episode % 2 == 0 or episode == self.total_episodes - 1:  # 每2个episode或最后一个episode更新
-                # 更新面板内容
-                panel = self._create_status_panel(episode, reward, info)
-                if self.live_panel:
-                    self.live_panel.update(panel)
-        elif self.use_rich and self.progress_bar:
-            # 使用传统Rich进度条
-            avg_reward = sum(self.episode_rewards[-10:]) / min(len(self.episode_rewards), 10)
-            positive_rewards = sum(1 for r in self.episode_rewards if r > 0)
+        # 使用简单进度条
+        if self.progress_bar:
+            # 计算一些基本统计信息
+            avg_reward = sum(self.episode_rewards[-10:]) / min(len(self.episode_rewards), 10) if self.episode_rewards else reward
 
-            update_kwargs = {
-                "奖励": f"{reward:.2f}",
-                "最佳": f"{self.best_reward:.2f}",
-                "平均": f"{avg_reward:.2f}",
-                "正奖励": f"{positive_rewards}"
-            }
-
-            # 添加质量指标（如果可用）
-            if info and 'reward_components' in info:
-                components = info['reward_components']
-                if 'quality_score' in components:
-                    update_kwargs["质量"] = f"{components['quality_score']:.3f}"
-
-            self.progress_bar.update(1, **update_kwargs)
+            # 更新进度条描述
+            desc = f"🚀 训练进度 | 当前: {reward:.3f} | 最佳: {self.best_reward:.3f} | 平均: {avg_reward:.3f}"
+            self.progress_bar.set_description(desc)
+            self.progress_bar.update(1)
         else:
-            # 使用简单日志输出
-            if hasattr(self, 'modern_logger') and hasattr(self.modern_logger, 'log'):
-                self.modern_logger.log(episode, reward, self.best_reward, 
-                                     sum(self.episode_rewards) / len(self.episode_rewards) if self.episode_rewards else reward)
+            # 如果没有进度条，使用简单的文本输出
+            if episode % 100 == 0 or episode == self.total_episodes - 1:
+                avg_reward = sum(self.episode_rewards[-10:]) / min(len(self.episode_rewards), 10) if self.episode_rewards else reward
+                print(f"Episode {episode+1}/{self.total_episodes} | 奖励: {reward:.3f} | 最佳: {self.best_reward:.3f} | 平均: {avg_reward:.3f}")
 
         # 记录额外信息 - 【修复】适配新系统指标名称
         if info:
@@ -757,75 +696,14 @@ class TrainingLogger:
 
         return stats
 
-    def generate_html_dashboard(self, output_filename: Optional[str] = None) -> Optional[Path]:
-        """
-        生成HTML训练仪表板
-        
-        Args:
-            output_filename: 输出文件名，如果为None则自动生成
-            
-        Returns:
-            生成的HTML文件路径，失败则返回None
-        """
-        if not self.use_html_dashboard or not self.html_dashboard_generator:
-            return None
-            
-        try:
-            # 准备训练数据
-            episodes = list(range(len(self.episode_rewards)))
-            
-            training_data = {
-                'episodes': episodes,
-                'rewards': self.episode_rewards,
-                'actor_losses': self.actor_losses,
-                'critic_losses': self.critic_losses,
-                'entropies': self.entropies,
-                'cv_values': self.load_cvs,
-                'coupling_ratios': self.coupling_edges,
-                'stages': self.curriculum_stages,
-                'transitions': self.stage_transitions,
-                'success_rates': self.success_rates,
-                'training_time': time.time() - self.start_time,
-                'config': self.config,
-                'session_name': f"Training_{time.strftime('%Y%m%d_%H%M%S')}"
-            }
-            
-            # 生成HTML仪表板
-            html_path = self.html_dashboard_generator.generate_training_dashboard(
-                training_data, output_filename
-            )
-            
-            return html_path
-            
-        except Exception as e:
-            from code.src.rich_output import rich_error
-            rich_error(f"HTML仪表板生成失败: {e}")
-            return None
+    # HTML仪表板生成功能已移动到test.py中用于性能分析
 
     def close(self):
         """关闭日志记录器"""
-        # 生成HTML仪表板
-        if self.use_html_dashboard and len(self.episode_rewards) > 0:
-            try:
-                html_path = self.generate_html_dashboard()
-                if html_path:
-                    from code.src.rich_output import rich_success
-                    rich_success(f"✅ HTML训练仪表板已生成: {html_path}")
-            except Exception as e:
-                from code.src.rich_output import rich_warning
-                rich_warning(f"⚠️ HTML仪表板生成失败: {e}")
-        
-        # 关闭TUI应用
-        if self.use_tui and hasattr(self, 'tui_app') and self.tui_app._running:
-            self.tui_app.action_quit()
-            
-        if self.use_rich and self.live_panel:
-            self.live_panel.stop()
-        elif self.use_rich and self.progress_bar:
-            self.progress_bar.__exit__(None, None, None)
-        elif hasattr(self, 'progress_bar') and self.progress_bar:
+        # 关闭进度条
+        if hasattr(self, 'progress_bar') and self.progress_bar:
             self.progress_bar.close()
-        
+
         if self.tensorboard_writer:
             self.tensorboard_writer.close()
 
@@ -1878,78 +1756,16 @@ class UnifiedTrainingSystem:
         director_decisions = []
         stage_transitions = []
 
-        # 创建实时状态表格
+        # 移除复杂的Rich表格，使用简单进度条
+        use_rich_table = False
+
+        # 创建简单的进度条
         try:
-            from rich.console import Console
-            from rich.table import Table
-            from rich.live import Live
-            from rich.panel import Panel
-            from rich.columns import Columns
-            from rich.text import Text
-            console = Console()
-            use_rich_table = True
+            from tqdm import tqdm
+            progress_bar = tqdm(total=num_episodes, desc="🧠 智能自适应训练",
+                              bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]')
         except ImportError:
-            use_rich_table = False
-
-        def create_status_table(episode, director_decision, episode_reward, best_reward):
-            """创建智能导演状态表格"""
-            if not use_rich_table:
-                return None
-
-            # 主状态表格
-            base_mode = 'unknown'
-            if director_decision and 'stage_info' in director_decision:
-                base_mode = director_decision['stage_info'].get('base_mode', 'unknown')
-            table = Table(title=f"🧠 智能自适应训练状态 ({base_mode.upper()})", show_header=True, header_style="bold magenta")
-            table.add_column("指标", style="cyan", width=15)
-            table.add_column("当前值", style="green", width=20)
-            table.add_column("说明", style="yellow", width=25)
-
-            # 基础信息
-            table.add_row("Episode", f"{episode}/{num_episodes}", "当前训练进度")
-            table.add_row("当前奖励", f"{episode_reward:.3f}", "本轮episode奖励")
-            table.add_row("最佳奖励", f"{best_reward:.3f}", "历史最佳奖励")
-
-            if director_decision and 'stage_info' in director_decision:
-                stage_info = director_decision['stage_info']
-                stage_name = stage_info['stage_name']
-                stage_progress = stage_info['stage_progress']
-
-                # 阶段信息
-                stage_emoji = {
-                    'exploration': '🔍',
-                    'transition': '🔄',
-                    'refinement': '⚡',
-                    'fine_tuning': '🎯',
-                    'emergency_recovery': '🚨'
-                }.get(stage_name, '❓')
-
-                table.add_row("当前阶段", f"{stage_emoji} {stage_name}", f"进度: {stage_progress:.1%}")
-
-                # 参数信息
-                if 'reward_weights' in director_decision:
-                    weights = director_decision['reward_weights']
-                    balance_w = weights.get('balance_weight', 0)
-                    decoupling_w = weights.get('decoupling_weight', 0)
-                    power_w = weights.get('power_weight', 0)
-                    table.add_row("奖励权重", f"B:{balance_w:.1f} D:{decoupling_w:.1f} P:{power_w:.1f}", "平衡/解耦/功率")
-
-                if 'learning_rate_factor' in director_decision:
-                    lr_factor = director_decision['learning_rate_factor']
-                    table.add_row("学习率因子", f"{lr_factor:.3f}", "相对于基础学习率")
-
-            # 统计信息
-            emergency_count = sum(1 for t in stage_transitions if t.get('stage_name') == 'emergency_recovery')
-            normal_count = len(stage_transitions) - emergency_count
-            table.add_row("阶段转换", f"正常:{normal_count} 紧急:{emergency_count}", "智能转换统计")
-
-            return Panel(table, border_style="blue")
-
-        # 初始化Live显示
-        if use_rich_table:
-            initial_table = create_status_table(0, None, 0.0, -float('inf'))
-            live = Live(initial_table, console=console, refresh_per_second=2)
-            live.start()
+            progress_bar = None
 
         try:
             for episode in range(num_episodes):
@@ -2012,11 +1828,18 @@ class UnifiedTrainingSystem:
                             'stage_name': stage_info['stage_name']
                         })
 
-                # 更新实时表格
-                if use_rich_table and episode % 2 == 0:  # 每2个episode更新一次表格
+                # 更新进度条
+                if progress_bar:
+                    # 获取当前阶段信息
+                    stage_name = "unknown"
+                    if director_decision and 'stage_info' in director_decision:
+                        stage_name = director_decision['stage_info'].get('stage_name', 'unknown')
+
+                    # 更新进度条描述
                     current_best = max([r for r in logger.episode_rewards if r is not None] + [-float('inf')])
-                    updated_table = create_status_table(episode, director_decision, episode_reward, current_best)
-                    live.update(updated_table)
+                    desc = f"🧠 智能自适应训练 | 阶段: {stage_name} | 当前: {episode_reward:.3f} | 最佳: {current_best:.3f}"
+                    progress_bar.set_description(desc)
+                    progress_bar.update(1)
 
                 # 记录训练日志
                 logger.log_episode(episode, episode_reward, episode_length, episode_info)
@@ -2043,34 +1866,22 @@ class UnifiedTrainingSystem:
             final_stats = logger.get_statistics()
             director_summary = director.get_status_summary()
 
-            # 关闭Live显示
-            if use_rich_table:
-                live.stop()
+            # 关闭进度条
+            if progress_bar:
+                progress_bar.close()
 
             # 统计阶段转换信息
             emergency_transitions = sum(1 for t in stage_transitions if t['stage_name'] == 'emergency_recovery')
             normal_transitions = len(stage_transitions) - emergency_transitions
 
-            # 创建最终结果表格
-            if use_rich_table:
-                final_table = Table(title="🎯 智能自适应训练完成", show_header=True, header_style="bold green")
-                final_table.add_column("指标", style="cyan", width=15)
-                final_table.add_column("结果", style="green", width=20)
-
-                final_table.add_row("总回合数", str(final_stats.get('total_episodes', 0)))
-                final_table.add_row("最佳奖励", f"{final_stats.get('best_reward', 0):.4f}")
-                final_table.add_row("平均奖励", f"{final_stats.get('mean_reward', 0):.4f}")
-                final_table.add_row("最终阶段", str(director_summary['current_stage']))
-                final_table.add_row("智能转换", f"{normal_transitions}次正常 + {emergency_transitions}次紧急恢复")
-
-                console.print(Panel(final_table, border_style="green"))
-            else:
-                print(f"\n🎯 智能自适应训练完成:")
-                print(f"   - 总回合数: {final_stats.get('total_episodes', 0)}")
-                print(f"   - 最佳奖励: {final_stats.get('best_reward', 0):.4f}")
-                print(f"   - 平均奖励: {final_stats.get('mean_reward', 0):.4f}")
-                print(f"   - 最终阶段: {director_summary['current_stage']}")
-                print(f"   - 智能转换: {normal_transitions}次正常 + {emergency_transitions}次紧急恢复")
+            # 简单的文本输出训练结果
+            print("\n🎯 智能自适应训练完成")
+            print("=" * 50)
+            print(f"总回合数: {final_stats.get('total_episodes', 0)}")
+            print(f"最佳奖励: {final_stats.get('best_reward', 0):.4f}")
+            print(f"平均奖励: {final_stats.get('mean_reward', 0):.4f}")
+            print(f"最终阶段: {director_summary['current_stage']}")
+            print(f"智能转换: {normal_transitions}次正常 + {emergency_transitions}次紧急恢复")
 
             return {
                 'success': True,
@@ -2083,9 +1894,9 @@ class UnifiedTrainingSystem:
             }
 
         except Exception as e:
-            # 确保关闭Live显示
-            if use_rich_table and 'live' in locals():
-                live.stop()
+            # 确保关闭进度条
+            if progress_bar:
+                progress_bar.close()
             print(f"❌ 智能自适应训练过程中出错: {e}")
             import traceback
             traceback.print_exc()
@@ -2093,13 +1904,11 @@ class UnifiedTrainingSystem:
 
         finally:
             # 清理资源
-            if use_rich_table and 'live' in locals():
+            if progress_bar:
                 try:
-                    live.stop()
+                    progress_bar.close()
                 except:
                     pass
-            if hasattr(logger, 'progress_bar'):
-                logger.progress_bar.__exit__(None, None, None)
 
     def _apply_director_decision(self, env, agent, decision: Dict[str, Any]):
         """应用智能导演的决策到环境和智能体 - 增强版支持动态约束"""

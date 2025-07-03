@@ -19,9 +19,10 @@ import time
 
 logger = logging.getLogger(__name__)
 
-# 导入增强平台期检测系统
+# 导入平台期检测系统
 try:
-    from .plateau_detector import PlateauDetectorIntegration, PlateauDetectionConfig
+    from .plateau_detector import QualityPlateauDetector, PlateauResult
+    from .scenario_aware_plateau_detector import ScenarioAwarePlateauDetector
     _plateau_detector_available = True
 except ImportError:
     _plateau_detector_available = False
@@ -391,15 +392,23 @@ class AdaptiveDirector:
         # 简化日志输出
         self.verbose = config.get('debug', {}).get('adaptive_curriculum_verbose', False)
 
-        # 初始化增强平台期检测系统
-        self.plateau_detector_integration = None
+        # 初始化平台期检测系统
+        self.plateau_detector = None
         if _plateau_detector_available and curriculum_config.get('plateau_detection', {}).get('enabled', False):
             try:
-                self.plateau_detector_integration = PlateauDetectorIntegration(self)
-                logger.info(f"增强平台期检测系统已启用")
+                # 从配置创建平台期检测器
+                plateau_config = curriculum_config.get('plateau_detection', {})
+                self.plateau_detector = QualityPlateauDetector(
+                    window_size=plateau_config.get('stability_window', 40),
+                    min_improvement_rate=plateau_config.get('min_improvement_rate', 0.03),
+                    stability_threshold=plateau_config.get('stability_cv_threshold', 0.2),
+                    min_percentile=plateau_config.get('fallback_performance_threshold', 0.75),
+                    confidence_threshold=plateau_config.get('confidence_threshold', 0.75)
+                )
+                logger.info(f"平台期检测系统已启用")
             except Exception as e:
                 logger.warning(f"平台期检测系统初始化失败: {e}")
-                self.plateau_detector_integration = None
+                self.plateau_detector = None
 
         logger.info(f"智能自适应训练导演已初始化 (基础模式: {base_mode})")
 
@@ -445,9 +454,18 @@ class AdaptiveDirector:
         # 4. 阶段转换判定
         self._check_stage_transition(performance)
 
-        # 4.5. 检查是否需要回退（如果启用了增强检测）
-        if self.plateau_detector_integration:
-            self.plateau_detector_integration.check_and_handle_fallback()
+        # 4.5. 平台期检测（如果启用）
+        plateau_result = None
+        if self.plateau_detector:
+            # 计算质量分数用于平台期检测
+            quality_score = self._compute_quality_score(performance)
+            plateau_result = self.plateau_detector.update(quality_score)
+
+            # 如果检测到平台期且置信度足够高，可以考虑阶段转换
+            if plateau_result.plateau_detected and plateau_result.confidence > self.plateau_detector.confidence_threshold:
+                if self.verbose:
+                    logger.info(f"检测到平台期 (置信度: {plateau_result.confidence:.3f})")
+                # 这里可以添加平台期处理逻辑，比如触发阶段转换
 
         # 5. 更新参数调度
         self.parameter_scheduler.update_progress(episode)
@@ -585,3 +603,52 @@ class AdaptiveDirector:
             'emergency_count': self.emergency_count,
             'normal_stage_count': self.normal_stage_count
         }
+
+    def _compute_quality_score(self, performance: Dict[str, Any]) -> float:
+        """
+        计算质量分数用于平台期检测
+
+        Args:
+            performance: 性能分析结果
+
+        Returns:
+            质量分数 [0, 1]，越大越好
+        """
+        try:
+            # 获取关键指标
+            cv = performance.get('cv', 1.0)  # 负载平衡系数，越小越好
+            coupling_ratio = performance.get('coupling_ratio', 1.0)  # 耦合比，越小越好
+            connectivity_rate = performance.get('connectivity_rate', 0.0)  # 连通性，越大越好
+            episode_length = performance.get('episode_length', 1)  # episode长度，适中为好
+
+            # 归一化处理
+            # CV分数：使用指数函数，CV越小分数越高
+            cv_score = np.exp(-2.0 * max(0, cv))
+
+            # 耦合分数：使用指数函数，耦合比越小分数越高
+            coupling_score = np.exp(-3.0 * max(0, coupling_ratio))
+
+            # 连通性分数：直接使用连通率
+            connectivity_score = max(0, min(1, connectivity_rate))
+
+            # episode长度分数：适中长度得分最高
+            target_length = 10  # 目标长度
+            length_score = np.exp(-0.1 * abs(episode_length - target_length) / target_length)
+
+            # 加权平均计算综合质量分数
+            weights = [0.3, 0.3, 0.3, 0.1]  # [CV, 耦合, 连通性, 长度]
+            quality_score = (
+                weights[0] * cv_score +
+                weights[1] * coupling_score +
+                weights[2] * connectivity_score +
+                weights[3] * length_score
+            )
+
+            # 确保结果在 [0, 1] 范围内
+            quality_score = np.clip(quality_score, 0.0, 1.0)
+
+            return quality_score
+
+        except Exception as e:
+            logger.warning(f"计算质量分数时出错: {e}")
+            return 0.0
