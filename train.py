@@ -24,7 +24,6 @@ from typing import Dict, List, Tuple, Optional, Any
 from collections import deque
 import matplotlib.pyplot as plt
 from tqdm import tqdm
-import wandb
 import queue
 import threading
 
@@ -317,7 +316,7 @@ def convert_pandapower_to_matpower(net) -> Dict:
 
 
 class TrainingLogger:
-    """训练日志记录器 - 现在支持TensorBoard和W&B"""
+    """训练日志记录器 - 支持TensorBoard和HTML仪表板生成"""
 
     def __init__(self, config: Dict[str, Any], total_episodes: int):
         """初始化日志记录器"""
@@ -376,11 +375,17 @@ class TrainingLogger:
         self.use_tensorboard = log_config.get('use_tensorboard', False)
         self.tensorboard_writer = self._setup_tensorboard() if self.use_tensorboard else None
 
-        # 设置Weights & Biases
-        wandb_config = config.get('wandb', {})
-        self.use_wandb = wandb_config.get('enabled', False)
-        if self.use_wandb:
-            self._setup_wandb(wandb_config)
+        # 设置HTML仪表板生成器
+        self.use_html_dashboard = log_config.get('generate_html_dashboard', True)
+        self.html_dashboard_generator = None
+        if self.use_html_dashboard:
+            try:
+                from code.src.html_dashboard_generator import HTMLDashboardGenerator
+                self.html_dashboard_generator = HTMLDashboardGenerator(config.get('html_dashboard', {}))
+            except ImportError as e:
+                from code.src.rich_output import rich_warning
+                rich_warning(f"HTML仪表板生成器不可用: {e}")
+                self.use_html_dashboard = False
 
         # TUI集成
         self.use_tui = config.get('tui', {}).get('enabled', False)
@@ -395,21 +400,7 @@ class TrainingLogger:
                 rich_warning(f"无法加载TUI监控器，回退到标准输出: {e}")
                 self.use_tui = False
 
-    def _setup_wandb(self, wandb_config: Dict[str, Any]):
-        """初始化Weights & Biases"""
-        try:
-            wandb.init(
-                project=wandb_config.get('project', 'power-grid-partitioning'),
-                entity=wandb_config.get('entity'), # entity可以为None
-                config=self.config, # 记录所有超参数
-                reinit=True
-            )
-            from code.src.rich_output import rich_success
-            rich_success(f"W&B: 项目: {wandb.run.project}, 名称: {wandb.run.name}")
-        except Exception as e:
-            from code.src.rich_output import rich_error
-            rich_error(f"W&B: 初始化失败: {e}")
-            self.use_wandb = False
+
 
     def _create_status_panel(self, episode: int, reward: float, info: Dict = None):
         """创建简洁的状态面板"""
@@ -715,14 +706,7 @@ class TrainingLogger:
             if episode % 10 == 0:
                 self.tensorboard_writer.flush()
 
-        # W&B日志
-        if self.use_wandb:
-            log_data = {'Episode/Reward': reward, 'Episode/Length': length}
-            if info:
-                for key, value in info.items():
-                    if isinstance(value, (int, float)):
-                        log_data[f'Episode/{key}'] = value
-            wandb.log(log_data, step=episode)
+
 
     def log_training_step(self, episode: int, actor_loss: float = None,
                          critic_loss: float = None, entropy: float = None):
@@ -746,17 +730,7 @@ class TrainingLogger:
         if self.use_tensorboard and self.tensorboard_writer:
             self.tensorboard_writer.flush()
 
-        # W&B日志
-        if self.use_wandb:
-            log_data = {}
-            if actor_loss is not None:
-                log_data['Training/ActorLoss'] = actor_loss
-            if critic_loss is not None:
-                log_data['Training/CriticLoss'] = critic_loss
-            if entropy is not None:
-                log_data['Training/Entropy'] = entropy
-            if log_data:
-                wandb.log(log_data, step=episode)
+
 
     def get_statistics(self) -> Dict[str, Any]:
         """获取训练统计信息"""
@@ -783,8 +757,64 @@ class TrainingLogger:
 
         return stats
 
+    def generate_html_dashboard(self, output_filename: Optional[str] = None) -> Optional[Path]:
+        """
+        生成HTML训练仪表板
+        
+        Args:
+            output_filename: 输出文件名，如果为None则自动生成
+            
+        Returns:
+            生成的HTML文件路径，失败则返回None
+        """
+        if not self.use_html_dashboard or not self.html_dashboard_generator:
+            return None
+            
+        try:
+            # 准备训练数据
+            episodes = list(range(len(self.episode_rewards)))
+            
+            training_data = {
+                'episodes': episodes,
+                'rewards': self.episode_rewards,
+                'actor_losses': self.actor_losses,
+                'critic_losses': self.critic_losses,
+                'entropies': self.entropies,
+                'cv_values': self.load_cvs,
+                'coupling_ratios': self.coupling_edges,
+                'stages': self.curriculum_stages,
+                'transitions': self.stage_transitions,
+                'success_rates': self.success_rates,
+                'training_time': time.time() - self.start_time,
+                'config': self.config,
+                'session_name': f"Training_{time.strftime('%Y%m%d_%H%M%S')}"
+            }
+            
+            # 生成HTML仪表板
+            html_path = self.html_dashboard_generator.generate_training_dashboard(
+                training_data, output_filename
+            )
+            
+            return html_path
+            
+        except Exception as e:
+            from code.src.rich_output import rich_error
+            rich_error(f"HTML仪表板生成失败: {e}")
+            return None
+
     def close(self):
         """关闭日志记录器"""
+        # 生成HTML仪表板
+        if self.use_html_dashboard and len(self.episode_rewards) > 0:
+            try:
+                html_path = self.generate_html_dashboard()
+                if html_path:
+                    from code.src.rich_output import rich_success
+                    rich_success(f"✅ HTML训练仪表板已生成: {html_path}")
+            except Exception as e:
+                from code.src.rich_output import rich_warning
+                rich_warning(f"⚠️ HTML仪表板生成失败: {e}")
+        
         # 关闭TUI应用
         if self.use_tui and hasattr(self, 'tui_app') and self.tui_app._running:
             self.tui_app.action_quit()
@@ -798,8 +828,6 @@ class TrainingLogger:
         
         if self.tensorboard_writer:
             self.tensorboard_writer.close()
-        if self.use_wandb:
-            wandb.finish()
 
 
 class UnifiedTrainer:
@@ -1355,124 +1383,53 @@ class UnifiedTrainingSystem:
     def get_training_configs(self) -> Dict[str, Dict[str, Any]]:
         """获取不同训练模式的配置"""
         base_config = self.config.copy()
+        
+        # 智能自适应默认启用
+        base_config['adaptive_curriculum'] = {'enabled': True}
 
         configs = {
             'fast': {
                 **base_config,
+                **base_config.get('fast', {}),
                 'training': {
                     **base_config['training'],
-                    'mode': 'fast',
-                    'num_episodes': 1500
-                },
-                'parallel_training': {
-                    **base_config['parallel_training'],
-                    'enabled': False
-                },
-                'scenario_generation': {
-                    **base_config['scenario_generation'],
-                    'enabled': True
+                    **base_config.get('fast', {}).get('training', {}),
+                    'mode': 'fast'
                 }
             },
             'full': {
                 **base_config,
+                **base_config.get('full', {}),
                 'training': {
                     **base_config['training'],
-                    'num_episodes': 5000,
-                    'max_steps_per_episode': 500,
-                    'update_interval': 20
+                    **base_config.get('full', {}).get('training', {}),
+                    'mode': 'full'
                 },
                 'parallel_training': {
                     **base_config['parallel_training'],
-                    'enabled': True
-                },
-                'scenario_generation': {
-                    **base_config['scenario_generation'],
-                    'enabled': True
+                    **base_config.get('full', {}).get('parallel_training', {})
                 }
             },
             'ieee118': {
                 **base_config,
-                'data': {
-                    **base_config['data'],
-                    'case_name': 'ieee118'
-                },
-                'environment': {
-                    **base_config['environment'],
-                    'num_partitions': 8,
-                    'max_steps': 500
-                },
-                'gat': {
-                    **base_config['gat'],
-                    'hidden_channels': 128,
-                    'gnn_layers': 4,
-                    'heads': 8,
-                    'output_dim': 256
-                },
+                **base_config.get('ieee118', {}),
                 'training': {
                     **base_config['training'],
-                    'num_episodes': 3000,
-                    'max_steps_per_episode': 500
+                    **base_config.get('ieee118', {}).get('training', {}),
+                    'mode': 'ieee118'
                 },
                 'parallel_training': {
                     **base_config['parallel_training'],
-                    'enabled': True
-                },
-                'scenario_generation': {
-                    **base_config['scenario_generation'],
-                    'enabled': True
-                }
-            },
-            'parallel': {
-                **base_config,
-                'parallel_training': {
-                    **base_config['parallel_training'],
-                    'enabled': True
-                },
-                'scenario_generation': {
-                    **base_config['scenario_generation'],
-                    'enabled': True
-                }
-            },
-            'curriculum': {
-                **base_config,
-                'adaptive_curriculum': {
-                    **base_config.get('adaptive_curriculum', {}),
-                    'enabled': True
-                }
-            },
-            'adaptive': {
-                **base_config,
-                'training': {
-                    **base_config['training'],
-                    'num_episodes': 2000,
-                    'max_steps_per_episode': 200,
-                    'success_criteria': {
-                        **base_config['training'].get('success_criteria', {}),
-                        'cv_threshold': 0.25,  # 【修复】使用新系统的指标名称
-                        'connectivity_threshold': 0.95
-                    }
-                },
-                'adaptive_curriculum': {
-                    **base_config.get('adaptive_curriculum', {}),
-                    'enabled': True
-                },
-                'parallel_training': {
-                    **base_config['parallel_training'],
-                    'enabled': False
-                },
-                'scenario_generation': {
-                    **base_config['scenario_generation'],
-                    'enabled': True
+                    **base_config.get('ieee118', {}).get('parallel_training', {})
                 }
             }
         }
 
         return configs
 
-    def run_training(self, mode: str = 'standard', **kwargs) -> Dict[str, Any]:
+    def run_training(self, mode: str = 'fast', **kwargs) -> Dict[str, Any]:
         """运行训练"""
         print(f"\n🚀 开始{mode.upper()}模式训练")
-        print("=" * 60)
 
         # 获取模式配置
         configs = self.get_training_configs()
@@ -1485,7 +1442,6 @@ class UnifiedTrainingSystem:
         # 应用命令行参数覆盖
         for key, value in kwargs.items():
             if '.' in key:
-                # 支持嵌套配置，如 training.num_episodes
                 keys = key.split('.')
                 current = config
                 for k in keys[:-1]:
@@ -1501,12 +1457,11 @@ class UnifiedTrainingSystem:
         np.random.seed(config['system']['seed'])
 
         try:
-            if mode == 'parallel' or config['parallel_training']['enabled']:
+            # 根据配置选择训练流程
+            if config['parallel_training']['enabled']:
                 return self._run_parallel_training(config)
-            elif mode == 'curriculum' or config.get('adaptive_curriculum', {}).get('enabled', False):
-                return self._run_curriculum_training(config)
             elif config.get('adaptive_curriculum', {}).get('enabled', False):
-                return self._run_curriculum_training(config)  # 智能自适应也使用课程学习流程
+                return self._run_curriculum_training(config)
             else:
                 return self._run_standard_training(config)
 

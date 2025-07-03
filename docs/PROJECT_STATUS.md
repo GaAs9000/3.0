@@ -61,9 +61,10 @@
 
 | 模式 | 状态 | 推荐度 | 说明 |
 |------|------|--------|------|
-| `fast -a` | 🟢 **推荐** | ⭐⭐⭐⭐⭐ | 智能自适应快速训练 |
-| `full -a` | 🟢 **推荐** | ⭐⭐⭐⭐⭐ | 智能自适应完整训练 |
-| `ieee118 -a` | 🟢 **推荐** | ⭐⭐⭐⭐⭐ | 智能自适应大规模训练 |
+| `adaptive` | 🟢 **推荐** | ⭐⭐⭐⭐⭐ | 智能自适应训练 |
+| `fast` | 🟢 **稳定** | ⭐⭐⭐⭐ | 快速训练 |
+| `full` | 🟢 **稳定** | ⭐⭐⭐⭐ | 完整训练 |
+| `ieee118` | 🟢 **稳定** | ⭐⭐⭐⭐ | 大规模训练 |
 
 ### 传统模式 (仅用于对比)
 
@@ -107,7 +108,7 @@
 ```yaml
 # 智能自适应课程学习 (核心功能)
 adaptive_curriculum:
-  enabled: true  # 通过 -a 参数自动启用
+  enabled: true  # 通过 --mode adaptive 参数自动启用
   plateau_detection:
     enabled: true  # 平台化检测
     confidence_threshold: 0.75
@@ -135,15 +136,15 @@ adaptive_curriculum:
 
 ```bash
 # 强烈推荐：智能自适应快速训练
-python train.py --mode fast -a
+python train.py --mode adaptive
 
 # 最佳效果：智能自适应完整训练
-python train.py --mode full -a
+python train.py --mode full
 ```
 
 ### 💡 最佳实践
 
-1. **始终使用 `-a` 参数** 启用智能自适应训练
+1. **始终使用 `--mode adaptive` 参数** 启用智能自适应训练
 2. **监控Episode/Length** 验证软约束系统效果
 3. **观察阶段转换** 了解智能导演工作状态
 4. **对比传统模式** 验证改善效果
@@ -177,7 +178,7 @@ python train.py --mode full -a
 4. 检查依赖版本: `pip list`
 
 ### 常见问题
-- **训练不收敛**: 使用 `-a` 参数启用智能自适应
+- **训练不收敛**: 使用 `--mode adaptive` 参数启用智能自适应
 - **Episode过短**: 已通过软约束系统解决
 - **内存不足**: 减少batch_size或使用CPU模式
 

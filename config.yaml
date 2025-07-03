@@ -1,38 +1,26 @@
-# 电力网络分区强化学习统一配置文件
-# 智能自适应作为功能开关，而非独立模式
+# 电力网络分区强化学习配置文件
 
-# ==================== 系统配置 ====================
+# 系统配置
 system:
-  name: "unified_power_grid_partitioning"
-  version: "2.0"
-  description: "电力网络分区强化学习统一训练系统"
   device: auto
   seed: 42
-  num_threads: 18
-  warnings: ignore
 
-# ==================== 数据配置 ====================
+# 数据配置
 data:
   case_name: ieee57
   normalize: true
   cache_dir: data/cache
-  available_cases:
-    - ieee14
-    - ieee30
-    - ieee57
-    - ieee118
-    - custom
 
-# ==================== 基础训练配置 ====================
+# 训练配置
 training:
-  mode: standard
+  mode: fast
   num_episodes: 1000
   max_steps_per_episode: 200
   update_interval: 10
   save_interval: 100
   eval_interval: 50
   success_criteria:
-    cv_threshold: 0.3  # 【修复】使用新系统的指标名称
+    cv_threshold: 0.3
     connectivity_threshold: 0.9
     min_length_threshold: 10
   convergence:
@@ -41,12 +29,11 @@ training:
   gradient_clipping:
     max_norm: 0.5
 
-# ==================== 环境配置 ====================
+# 环境配置
 environment:
   num_partitions: 3
   max_steps: 200
   reward_weights:
-    # 保留基础权重配置以向后兼容
     load_balance: 0.4
     electrical_decoupling: 0.4
     power_balance: 0.2
@@ -54,28 +41,7 @@ environment:
     final_decoupling_weight: 0.4
     final_power_weight: 0.2
 
-# ==================== 自适应质量导向训练配置 ====================
-adaptive_quality:
-  # 平台期检测参数
-  plateau_detection:
-    window_size: 15                    # 观察窗口大小
-    min_improvement_rate: 0.005        # 最小改善率阈值
-    stability_threshold: 0.8           # 稳定性要求
-    min_percentile: 0.7                # 历史表现要求(前70%)
-    confidence_threshold: 0.8          # 早停置信度要求
-
-  # 效率奖励参数
-  efficiency_reward:
-    lambda: 0.5                        # 效率奖励权重
-    early_stop_confidence: 0.85        # 早停置信度阈值
-
-  # 质量分数权重(替代原有固定阈值)
-  quality_weights:
-    cv_weight: 0.4
-    coupling_weight: 0.3
-    power_weight: 0.3
-
-# ==================== GAT编码器配置 ====================
+# GAT编码器配置
 gat:
   hidden_channels: 64
   gnn_layers: 3
@@ -87,7 +53,7 @@ gat:
   temperature: 1.0
   physics_weight: 1.0
 
-# ==================== PPO智能体配置 ====================
+# PPO智能体配置
 agent:
   type: ppo
   lr_actor: 3.0e-4
@@ -109,7 +75,7 @@ agent:
     warmup_updates: 50
     total_training_updates: 1000
 
-# ==================== 场景生成配置 ====================
+# 场景生成配置
 scenario_generation:
   enabled: true
   perturb_prob: 0.7
@@ -120,62 +86,53 @@ scenario_generation:
     - none
   scale_range: [0.8, 1.2]
 
-# ==================== 场景感知奖励系统配置 ====================
-scenario_aware_reward:
-  enabled: false  # 默认关闭，可通过命令行参数启用
+# 智能自适应配置
+adaptive_curriculum:
+  enabled: true
+  stage_transition:
+    episode_length_target: 10
+    episode_length_window: 30
+    episode_length_stability: 0.6
+    coupling_improvement_threshold: 0.05
+    coupling_trend_window: 100
+    composite_score_target: 0.5
+    composite_score_window: 80
+    connectivity_rate_threshold: 0.9
+    plateau_detection_enabled: true
+  parameter_evolution:
+    connectivity_penalty_range: [0.1, 1.5]
+    action_mask_relaxation_range: [0.0, 0.7]
+    balance_weight_range: [0.6, 0.8]
+    decoupling_weight_range: [0.2, 0.6]
+    power_weight_range: [0.0, 0.3]
+    learning_rate_decay_factor: 0.1
+  safety_monitoring:
+    min_episode_length: 1
+    max_reward_threshold: -1000
+    max_loss_threshold: 100
+    performance_deterioration_patience: 500
+    performance_deterioration_threshold: 0.1
+  plateau_detection:
+    enabled: true
+    confidence_threshold: 0.75
+    stability_window: 40
+    stability_cv_threshold: 0.2
+    trend_window_short: 15
+    trend_window_medium: 40
+    trend_window_long: 80
+    trend_consistency_threshold: 0.6
+    stability_weight: 0.4
+    trend_weight: 0.3
+    performance_weight: 0.3
+    fallback_enabled: true
+    fallback_performance_threshold: 0.75
+    fallback_observation_window: 25
+    min_improvement_rate: 0.03
 
-  # 场景分类配置
-  scenario_classification:
-    load_scale_bins: [0.8, 1.0, 1.2]  # 负荷缩放分段
-    fault_types: ['none', 'n1']        # 故障类型
-    min_samples_per_scenario: 5        # 每个场景最小样本数
-    max_scenarios: 20                  # 最大场景数限制
-
-  # 历史库配置
-  history_tracking:
-    window_size: 15                    # 最近窗口大小
-    min_samples_for_percentile: 5      # 百分位计算最小样本数
-    max_history_per_scenario: 1000     # 每个场景最大历史记录数
-    min_samples_threshold: 3           # 数据不足阈值
-    ema_alpha: 0.1                     # EMA更新系数
-
-  # 平台期检测配置
-  detection_config:
-    window_size: 15                    # 检测窗口大小
-    min_improvement_rate: 0.005        # 最小改善率阈值
-    stability_threshold: 0.8           # 稳定性阈值
-    min_percentile: 0.7                # 历史百分位阈值
-    confidence_threshold: 0.8          # 置信度阈值
-
-  # 相对奖励配置
-  relative_reward:
-    enabled: false                     # 相对奖励开关
-    method: 'relative_improvement'     # 方法: 'relative_improvement', 'range_normalized', 'popart'
-    use_difficulty_scaling: true       # 是否使用难度缩放
-    ema_alpha: 0.1                     # EMA更新系数
-    clip_range: [-1.0, 1.0]           # 奖励裁剪范围
-    switch_episode: 500                # 切换到相对奖励的回合数
-
-    # PopArt标准化配置（当method='popart'时使用）
-    popart:
-      beta: 0.99                       # 动量系数
-      epsilon: 1e-8                    # 数值稳定性参数
-
-    # 范围归一化配置（当method='range_normalized'时使用）
-    range_normalized:
-      min_range_span: 0.1              # 最小范围跨度
-
-  # 实验配置
-  experiment:
-    enable_ab_testing: false           # A/B测试开关
-    collect_stats_episodes: 200        # 统计收集回合数
-    log_scenario_details: true         # 是否记录场景详情
-    save_history_interval: 100         # 历史数据保存间隔
-
-# ==================== 并行训练配置 ====================
+# 并行训练配置
 parallel_training:
   enabled: false
-  num_cpus: 20
+  num_cpus: 8
   total_timesteps: 5000000
   scenario_generation: true
   sb3_ppo_params:
@@ -188,67 +145,11 @@ parallel_training:
     vf_coef: 0.5
     max_grad_norm: 0.5
     learning_rate: 3.0e-4
-  policy_network:
-    net_arch:
-      pi: [512, 512, 256]
-      vf: [512, 512, 256]
-    activation_fn: relu
 
-# ==================== 智能自适应课程学习配置 ====================
-# 全局配置 - 当使用 -a 或 --adaptive 参数时启用
-adaptive_curriculum:
-  enabled: false        # 默认关闭，通过命令行参数启用
-
-  # 阶段转换条件
-  stage_transition:
-    episode_length_target: 10              # 降低目标长度，避免转换过慢
-    episode_length_window: 30              # 缩小评估窗口
-    episode_length_stability: 0.6          # 降低稳定性要求
-    coupling_improvement_threshold: 0.05
-    coupling_trend_window: 100
-    composite_score_target: 0.5            # 降低质量要求
-    composite_score_window: 80             # 缩小评估窗口
-    connectivity_rate_threshold: 0.9
-    plateau_detection_enabled: true
-
-  # 参数演化策略
-  parameter_evolution:
-    connectivity_penalty_range: [0.1, 1.5]
-    action_mask_relaxation_range: [0.0, 0.7]
-    balance_weight_range: [0.6, 0.8]
-    decoupling_weight_range: [0.2, 0.6]
-    power_weight_range: [0.0, 0.3]
-    learning_rate_decay_factor: 0.1
-
-  # 安全监控配置 - 极宽松参数，避免频繁紧急模式
-  safety_monitoring:
-    min_episode_length: 1                    # 极宽松的最小长度
-    max_reward_threshold: -1000              # 极宽松的奖励阈值
-    max_loss_threshold: 100                  # 极宽松的损失阈值
-    performance_deterioration_patience: 500  # 极大的容忍度
-    performance_deterioration_threshold: 0.1 # 极宽松的性能恶化阈值
-
-  # 增强平台期检测配置 - "从急性子变成老司机"
-  plateau_detection:
-    enabled: true                           # 启用增强平台期检测
-    confidence_threshold: 0.75              # 转换置信度阈值（0.75为平衡点）
-    stability_window: 40                    # 稳定性检测窗口（适中）
-    stability_cv_threshold: 0.2             # 变异系数阈值（宽松）
-    trend_window_short: 15                  # 短期趋势窗口
-    trend_window_medium: 40                 # 中期趋势窗口
-    trend_window_long: 80                   # 长期趋势窗口
-    trend_consistency_threshold: 0.6        # 趋势一致性阈值
-    stability_weight: 0.4                   # 稳定性权重
-    trend_weight: 0.3                       # 趋势权重
-    performance_weight: 0.3                 # 性能水平权重
-    fallback_enabled: true                  # 启用自动回退
-    fallback_performance_threshold: 0.75    # 回退性能阈值
-    fallback_observation_window: 25         # 回退观察窗口
-    min_improvement_rate: 0.03              # 最小改善率（宽松）
-
-# ==================== 日志和可视化配置 ====================
+# 日志配置
 logging:
   use_tensorboard: true
+  generate_html_dashboard: true
   log_dir: data/logs
   checkpoint_dir: data/checkpoints
   console_log_interval: 10
@@ -259,19 +160,16 @@ logging:
     - episode_rewards
     - episode_lengths
     - success_rates
-    - cv  # 【修复】使用新系统的指标名称
-    - coupling_ratio  # 【修复】使用新系统的指标名称
+    - cv
+    - coupling_ratio
     - actor_losses
     - critic_losses
     - entropies
     - explained_variance
     - approx_kl
     - reward_components
-  wandb:
-    enabled: true
-    project: "power-grid-partitioning"
-    entity: null
 
+# 可视化配置
 visualization:
   enabled: true
   save_figures: true
@@ -280,32 +178,34 @@ visualization:
   figure_settings:
     dpi: 300
     format: png
-    bbox_inches: tight
   training_curves:
     figsize: [12, 10]
     moving_average_window: 20
-    grid_alpha: 0.3
   partition_plot:
     figsize: [16, 10]
     node_size_scale: 500
-    edge_alpha: 0.2
-    coupling_edge_width: 2
-    coupling_edge_alpha: 0.6
     font_size: 8
-    show_metrics: true
   interactive_viz:
     enabled: true
-    plotly_available: true
     save_html: true
     template: plotly_white
     height: 800
-  colors:
-    palette_type: husl
-    unassigned_color: "#E0E0E0"
-  heatmap:
-    colorscale: YlOrRd
-    text_font_size: 10
 
+# HTML仪表板配置
+html_dashboard:
+  output_dir: output/dashboards
+  max_data_points: 2000
+  enable_compression: true
+  chart_factory:
+    color_scheme: professional
+    moving_average_windows: [5, 20, 50]
+    anomaly_detection: true
+  analyzer:
+    default_window_size: 50
+    convergence_threshold: 0.1
+    stability_threshold: 0.05
+
+# 评估配置
 evaluation:
   num_episodes: 20
   include_baselines: true
@@ -315,18 +215,21 @@ evaluation:
   metrics_to_track:
     - episode_reward
     - episode_length
-    - cv  # 【修复】使用新系统的指标名称
-    - coupling_ratio  # 【修复】使用新系统的指标名称
+    - cv
+    - coupling_ratio
     - connectivity
     - success_rate
     - robustness_score
 
+# TUI前端配置
+tui:
+  enabled: false  # 通过--tui参数启用
+
+# 调试配置
 debug:
   enabled: false
   verbose_logging: false
   save_intermediate_results: false
-  profile_training: false
-  memory_monitoring: false
   training_output:
     show_cache_loading: false
     show_attention_collection: false
@@ -337,16 +240,13 @@ debug:
     use_rich_output: true
     show_training_summary: true
 
-
-# ==================== 训练模式预设配置 ====================
-# 基础训练模式，可搭配 -a 参数启用智能自适应
-
+# 训练模式预设
 fast:
   training:
-    num_episodes: 1500
+    num_episodes: 1000
     max_steps_per_episode: 200
     success_criteria:
-      load_cv_threshold: 0.3
+      cv_threshold: 0.3
       connectivity_threshold: 0.9
   parallel_training:
     enabled: false
@@ -361,7 +261,7 @@ full:
     save_interval: 100
     eval_interval: 50
     success_criteria:
-      load_cv_threshold: 0.25
+      cv_threshold: 0.25
       connectivity_threshold: 0.9
   parallel_training:
     enabled: true
@@ -390,7 +290,7 @@ ieee118:
     num_episodes: 3000
     max_steps_per_episode: 500
     success_criteria:
-      cv_threshold: 0.35  # 【修复】使用新系统的指标名称
+      cv_threshold: 0.35
       connectivity_threshold: 0.95
   parallel_training:
     enabled: true

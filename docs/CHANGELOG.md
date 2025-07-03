@@ -76,19 +76,19 @@
 **推荐命令**:
 ```bash
 # 🔥 智能自适应快速训练 (强烈推荐)
-python train.py --mode fast -a
+python train.py --mode adaptive
 
 # 🔥 智能自适应完整训练 (最佳效果)
-python train.py --mode full -a
+python train.py --mode full
 
 # 🔥 智能自适应大规模训练
-python train.py --mode ieee118 -a
+python train.py --mode ieee118
 ```
 
 **配置要点**:
 ```yaml
 adaptive_curriculum:
-  enabled: true  # 通过 -a 参数自动启用
+  enabled: true  # 通过 --mode adaptive 参数自动启用
   plateau_detection:
     enabled: true
     confidence_threshold: 0.75

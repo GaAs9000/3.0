@@ -1,271 +1,136 @@
 # 🔋 电力网络分区强化学习系统 2.0
 
-基于图注意力网络(GAT)和强化学习(PPO)的电力网络智能分区系统，采用基于势函数理论的奖励机制和场景生成。
-
-## 🚀 重大更新 (2025-06-30)
-
-**完成硬约束到智能软约束系统的全面重构！**
-
-### 🎯 核心突破
-- **智能软约束系统**: 彻底移除硬约束逻辑，实现动态软惩罚机制
-- **智能导演模式**: 4阶段自适应课程学习 (探索→过渡→精炼→微调)
-- **平台化检测**: 智能阶段转换和自动回退机制
-- **奖励尺度优化**: 修复过度惩罚问题，实现合理的奖励平衡
-- **Episode长度解放**: 不再被硬约束限制在2-3步，支持真正的长期学习
+基于图注意力网络(GAT)和强化学习(PPO)的电力网络智能分区系统，采用智能自适应训练。
 
 ## 🚀 快速开始
 
 ### 安装依赖
-
 ```bash
+# 基础依赖
 pip install torch torch-geometric numpy matplotlib pyyaml tqdm
-pip install pandapower networkx plotly seaborn  # 可选依赖
+
+# TUI前端界面和可视化依赖
+pip install textual plotly jinja2
+
+# 可选依赖（电力系统分析）
+pip install pandapower networkx seaborn
 ```
 
 ### 立即开始训练
-
 ```bash
-# 🔥 智能自适应快速训练（强烈推荐！）
-python train.py --mode fast -a
+# 默认快速训练（推荐）
+python train.py
 
-# 🔥 智能自适应完整训练（最佳效果）
-python train.py --mode full -a
+# 指定训练模式
+python train.py --mode fast      # 快速训练 - 1000回合
+python train.py --mode full      # 完整训练 - 5000回合
+python train.py --mode ieee118   # 大规模训练 - IEEE118节点
 
-# 🔥 智能自适应大规模训练（IEEE 118节点）
-python train.py --mode ieee118 -a
+# 调整参数
+python train.py --mode fast --episodes 1500 --case ieee30
 
-# 传统训练模式（仅用于对比）
-python train.py --mode fast      # 快速训练
-python train.py --mode full      # 完整训练
-python train.py --mode ieee118   # 大规模训练
+# 启用TUI前端界面（推荐！）
+python train.py --mode fast --tui
 ```
+# 📈 TensorBoard监控
+tensorboard --logdir=data/logs --port=6006
 
-> **💡 推荐使用 `-a` 参数启用智能自适应训练，获得最佳训练效果！**
+## 📊 训练模式
 
-### 模型评估测试
+| 模式 | 回合数 | 时间 | 特点 |
+|------|--------|------|------|
+| `fast` | 1000 | ~1小时 | 快速训练，智能自适应 |
+| `full` | 5000 | ~4小时 | 完整训练，并行优化 |
+| `ieee118` | 3000 | ~6小时 | 大规模系统训练 |
 
-```bash
-# 完整评估流程（包含所有测试对比）
-python test.py --mode full
-```
+> 💡 所有模式都默认启用智能自适应功能
 
-## 📋 项目结构
+## 🎯 核心特性
 
-```
-power-grid-partitioning/
-├── train.py              # 🚀 主训练脚本
-├── config.yaml           # ⚙️ 配置文件
-├── requirements.txt       # 📦 依赖列表
-├── code/                  # 💻 核心代码
-│   └── src/
-│       ├── rl/           # 强化学习模块
-│       ├── environment/  # 环境模块
-│       └── utils/        # 工具模块
-├── docs/                  # 📚 文档
-├── logs/                  # 📊 训练日志
-├── models/                # 🤖 保存的模型
-└── output/                # 📈 输出结果
-```
-
-### 训练模式对比
-
-| 模式 | 训练时间 | 回合数 | 适用场景 | 特色功能 |
-|------|----------|--------|----------|----------|
-| `fast` | 45分钟 | 1500 | **推荐模式**、日常训练 | 场景生成 |
-| `fast -a` | 1-2小时 | 2000 | **智能训练**、自适应优化 | 🧠智能导演+场景生成 |
-| `full` | 2-4小时 | 5000 | 高质量结果、论文实验 | 并行+场景生成 |
-| `full -a` | 3-5小时 | 5000 | **智能完整训练** | 🧠智能导演+并行+场景生成 |
-| `ieee118` | 4-8小时 | 3000 | 大规模系统训练 | 并行+场景生成 |
-| `ieee118 -a` | 5-10小时 | 3000 | **智能大规模训练** | 🧠智能导演+并行+场景生成 |
-
-
-
-## 🎯 奖励系统
-
-基于势函数理论的双层激励结构，提供理论最优的训练效果：
-
-**核心特性：**
-- 🔬 **理论基础**：严格遵循势函数奖励塑造理论
-- ⚡ **即时奖励**：基于增量改善的密集反馈
-- 🎯 **终局奖励**：基于最终质量的综合评估
-- 🛡️ **数值稳定**：全面的NaN/inf保护机制
-- 📊 **详细分解**：提供奖励组件的详细分析
-
-详细说明请参考：[docs/REWARD.md](docs/REWARD.md)
-
-## 🧠 智能软约束系统 (重大突破!)
-
-**彻底重构硬约束逻辑，实现真正的智能自适应训练**：
-
-### 🎭 智能导演模式
-**从"固定剧本"升级为"智能导演"模式**，4阶段自适应课程学习：
-
-1. **🔍 探索期 (Exploration)**: 高度放松约束，鼓励大胆探索
-2. **🔄 过渡期 (Transition)**: 逐渐收紧约束，平滑参数演化
-3. **⚡ 精炼期 (Refinement)**: 严格约束，追求高质量解
-4. **🎯 微调期 (Fine-tuning)**: 学习率退火，精细优化
-
-### 🔧 动态软约束
-- **软惩罚机制**: 违规动作不再被直接拒绝，而是通过奖励惩罚引导
-- **动态参数**: 根据训练阶段自动调整约束强度 (0.05-1.5)
-- **智能平衡**: 奖励尺度优化，避免过度惩罚 (-10 → -2/-3)
-- **Episode解放**: 不再被硬约束限制在2-3步
-
-### 🔍 平台化检测
-- **智能转换**: 基于性能稳定性和趋势的置信度计算
-- **自动回退**: 性能恶化时智能回退到上一阶段
-- **三层决策**: 基础合规→稳定性确认→安全验证
-
-**核心特性：**
-- 🎯 **性能驱动转换**：基于多维度指标的智能阶段转换
-- 📈 **平滑参数演化**：连续参数调整，避免训练震荡
-- 🛡️ **安全保障机制**：训练崩溃检测与自动恢复
-- 🔄 **向后兼容**：保持现有系统稳定性
-
-**4阶段智能课程：**
-1. **探索期**：高度放松约束，鼓励探索
-2. **过渡期**：逐渐收紧约束，平滑演化
-3. **精炼期**：严格约束，追求高质量
-4. **微调期**：学习率退火，精细优化
-
-```bash
-# 启用智能自适应课程学习（与任何模式组合）
-python train.py --mode fast -a
-python train.py --mode full -a
-python train.py --mode ieee118 -a
-```
-
-详细说明请参考：[docs/ADAPTIVE_CURRICULUM.md](docs/ADAPTIVE_CURRICULUM.md)
-
-### 场景生成功能
-
-**所有训练模式默认启用场景生成**，包括：
-- 🔧 **N-1故障**：随机断开线路模拟设备故障
-- 🔧 **负荷扰动**：随机调整负荷大小模拟需求变化
-- 🎭 **组合场景**：同时应用多种扰动类型
-- 💾 **智能缓存**：自动缓存不同场景的图数据
-
-## 🔧 参数配置
-
-```bash
-# 指定电力系统算例
-python train.py --mode fast --case ieee30 --partitions 5
-
-# 调整训练参数
-python train.py --mode full --episodes 3000 --lr 0.001
-
-# 保存训练结果
-python train.py --mode fast --save-results
-
-# 完整评估（包含所有测试对比）
-python test.py --mode full --output-dir my_evaluation
-```
-
-## 🔄 完整工作流程
-
-### 🎯 推荐的一站式命令
-
-```bash
-# 🚀 训练：快速训练获得高质量结果
-python train.py --mode fast --save-results
-
-# 📊 结果：查看训练日志和模型输出
-# 结果位置：logs/ 和 checkpoints/ 目录
-```
-
-### 💡 使用建议
-
-1. **日常训练**：使用 `fast` 模式进行快速训练
-2. **高质量结果**：使用 `full` 模式获得最佳性能
-3. **大规模训练**：使用 `ieee118` 模式训练大规模系统
-4. **奖励系统详情**：参考 `docs/REWARD.md` 了解奖励系统原理
-
-
+- **🧠 智能自适应**: 4阶段课程学习，自动调优，平台化检测
+- **🎭 场景生成**: N-1故障，负荷扰动，组合场景
+- **📊 数值稳定**: 全面NaN/inf保护，梯度裁剪
+- **🖥️ TUI前端界面**: 基于Textual的现代化交互式监控界面
+- **📈 可视化分析**: TensorBoard监控，Plotly交互式图表，HTML仪表板
+- **🔬 基线对比**: 谱聚类、K-means等基线方法对比
+- **⚙️ 并行训练**: Stable-Baselines3并行优化
+- **🎨 美化输出**: Rich库彩色终端显示
 
 ## 📁 项目结构
 
 ```
-├── train.py                  # 训练模块（专注模型训练功能）
-├── test.py                   # 评估模块（专注模型评估分析）
-├── config.yaml              # 统一配置文件（包含奖励系统配置）
-├── code/                     # 核心代码
-│   ├── src/                  # 源代码
-│   │   ├── data_processing.py    # 数据处理
-│   │   ├── gat.py                # GAT编码器
-│   │   └── rl/                   # 强化学习模块
-│   │       ├── environment.py    # 环境定义
-│   │       ├── agent.py          # PPO智能体
-│   │       └── reward.py         # 奖励系统
-│   └── baseline/             # 基线方法
-├── docs/                     # 文档目录
-│   └── REWARD.md             # 双层奖励系统详细说明
-├── cache/                    # 数据缓存
-├── logs/                     # 训练日志
-├── checkpoints/              # 模型检查点
-├── figures/                  # 可视化图表
-└── test_results/             # 测试结果
+├── train.py              # 主训练脚本
+├── config.yaml           # 配置文件
+├── code/src/             # 核心代码
+│   └── rl/               # 强化学习模块
+├── data/                 # 数据和日志
+└── docs/                 # 文档
 ```
 
-## 🎉 核心特性
+## 🔧 配置说明
 
-- **🧠 智能分区**：基于GAT的图神经网络编码器
-- **🎯 奖励系统**：基于势函数理论的理论最优奖励系统
-- **🛡️ 数值稳定**：全面的NaN/inf保护和异常处理
-- **🎭 场景生成**：自动生成多样化训练场景
-- **📊 基线对比**：完整的基线方法对比框架
-- **📈 性能分析**：可扩展性、鲁棒性和收敛性分析
-- **🔧 易于使用**：简洁的命令行接口
-- **📋 完整评估**：从训练到评估的全流程支持
-- **🎨 美化输出**：使用 Rich 库提供彩色进度条和优雅的终端显示
+所有重要功能都已保留，智能自适应默认启用，可在`config.yaml`中调整：
+
+```yaml
+# 智能自适应配置（默认启用）
+adaptive_curriculum:
+  enabled: true
+  stage_transition:
+    episode_length_target: 10
+    plateau_detection_enabled: true
+
+# 可视化功能（完整保留）
+visualization:
+  enabled: true
+  interactive: true
+  save_figures: true
+  
+html_dashboard:
+  output_dir: output/dashboards
+  enable_compression: true
+
+# 监控和日志
+logging:
+  use_tensorboard: true
+  generate_html_dashboard: true
+  training_metrics:
+    - episode_rewards
+    - cv
+    - coupling_ratio
+
+# 评估功能
+evaluation:
+  num_episodes: 20
+  include_baselines: true
+  baseline_methods: [spectral, kmeans]
+
+# TUI前端界面
+tui:
+  enabled: false  # 通过--tui参数启用
+```
 
 ## 📞 技术支持
 
-如遇问题，请检查：
-1. 依赖安装是否完整：`python train.py --check-deps`
-2. 配置文件是否正确：`config.yaml`
-3. 数据缓存是否正常：`cache/` 目录
-
-## 🎨 终端输出美化
-
-### 输出控制功能
-
-系统使用 **Rich** 库提供美化的终端输出，支持：
-- 🌈 **彩色进度条**：实时显示训练进度和关键指标
-- 📊 **格式化表格**：优雅展示训练摘要和评估结果
-- ⚡ **智能过滤**：只显示重要信息，减少终端冗余输出
-
-### 快速配置
-
-**🔥 推荐设置**（只显示报错和进度条）：
-```yaml
-# config.yaml
-debug:
-  training_output:
-    only_show_errors: true    # 简洁模式，只显示关键信息
-    use_rich_output: true     # 启用彩色美化输出
-```
-
-**🔍 调试设置**（显示详细信息）：
-```yaml
-# config.yaml  
-debug:
-  training_output:
-    only_show_errors: false           # 显示所有信息
-    show_attention_collection: true   # 显示GAT注意力收集过程
-    show_scenario_generation: true    # 显示场景生成详情
-    show_cache_loading: true          # 显示数据缓存过程
-```
-
-### 使用建议
-
-| 场景 | 设置 | 效果 |
-|------|------|------|
-| **日常训练** | `only_show_errors: true` | 干净整洁，只显示进度条和错误 |
-| **问题调试** | `only_show_errors: false` | 显示详细调试信息 |
-| **性能监控** | 保持默认设置 | 平衡信息量和可读性 |
+遇到问题请检查：
+1. 依赖安装：`python train.py --help`
+2. 配置文件：`config.yaml`
+3. 日志目录：`data/logs/`
 
 ---
 
-**开始您的电力网络分区研究之旅！** 🚀
+**一键启动训练：**
+```bash
+python train.py
+```
 
-tensorboard --logdir=logs --port=6006
+**查看训练监控：**
+```bash
+# 🔥 推荐：TUI前端界面（实时交互式监控）
+python train.py --mode fast --tui
+
+# TensorBoard监控
+tensorboard --logdir=data/logs --port=6006
+
+# 查看生成的图表和仪表板
+# 结果位置：data/figures/ 和 output/dashboards/
+```
