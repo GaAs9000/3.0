@@ -32,6 +32,18 @@ python train.py --mode fast --episodes 1500 --case ieee30
 # 启用TUI前端界面（推荐！）
 python train.py --mode fast --tui
 ```
+
+### 模型测试和评估
+```bash
+# 🔬 快速跨网络泛化测试（推荐）
+python test.py --quick
+
+# 详细跨网络测试
+python test.py --quick --episodes 10
+
+# 完整评估系统（开发中）
+python test.py --help
+```
 # 📈 TensorBoard监控
 tensorboard --logdir=data/logs --port=6006
 
@@ -51,8 +63,8 @@ tensorboard --logdir=data/logs --port=6006
 - **🎭 场景生成**: N-1故障，负荷扰动，组合场景
 - **📊 数值稳定**: 全面NaN/inf保护，梯度裁剪
 - **🖥️ TUI前端界面**: 基于Textual的现代化交互式监控界面
+- **🔬 模型测试**: 跨网络泛化测试，性能评估，基线对比
 - **📈 可视化分析**: TensorBoard监控，Plotly交互式图表，HTML仪表板
-- **🔬 基线对比**: 谱聚类、K-means等基线方法对比
 - **⚙️ 并行训练**: Stable-Baselines3并行优化
 - **🎨 美化输出**: Rich库彩色终端显示
 
@@ -60,16 +72,21 @@ tensorboard --logdir=data/logs --port=6006
 
 ```
 ├── train.py              # 主训练脚本
+├── test.py               # 模型测试和评估脚本
 ├── config.yaml           # 配置文件
 ├── code/src/             # 核心代码
-│   └── rl/               # 强化学习模块
+│   ├── rl/               # 强化学习模块
+│   ├── tui_monitor.py    # TUI前端界面
+│   ├── html_dashboard_generator.py  # HTML仪表板
+│   ├── plotly_chart_factory.py      # 交互式图表
+│   └── visualization.py             # 可视化系统
 ├── data/                 # 数据和日志
 └── docs/                 # 文档
 ```
 
 ## 🔧 配置说明
 
-所有重要功能都已保留，智能自适应默认启用，可在`config.yaml`中调整：
+智能自适应默认启用，可在`config.yaml`中调整：
 
 ```yaml
 # 智能自适应配置（默认启用）
@@ -79,12 +96,12 @@ adaptive_curriculum:
     episode_length_target: 10
     plateau_detection_enabled: true
 
-# 可视化功能（完整保留）
+# 可视化功能
 visualization:
   enabled: true
   interactive: true
   save_figures: true
-  
+
 html_dashboard:
   output_dir: output/dashboards
   enable_compression: true
@@ -93,16 +110,6 @@ html_dashboard:
 logging:
   use_tensorboard: true
   generate_html_dashboard: true
-  training_metrics:
-    - episode_rewards
-    - cv
-    - coupling_ratio
-
-# 评估功能
-evaluation:
-  num_episodes: 20
-  include_baselines: true
-  baseline_methods: [spectral, kmeans]
 
 # TUI前端界面
 tui:

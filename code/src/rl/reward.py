@@ -476,24 +476,14 @@ class DataIntegrityManager:
             return
 
         # 检查是否启用简洁模式
-        try:
-            from code.src.rich_output import rich_debug
-            rich_debug("数据补全报告:", category="scenario")
-            for entry in completion_log:
-                rich_debug(f"  - {entry['type']}: {entry['method']}", category="scenario")
-                if 'count' in entry:
-                    rich_debug(f"    处理节点数: {entry['count']}", category="scenario")
-                if 'mean_value' in entry:
-                    rich_debug(f"    平均值: {entry['mean_value']:.2f}", category="scenario")
-        except ImportError:
-            # 备用标准输出
-            print("📋 数据补全报告:")
-            for entry in completion_log:
-                print(f"  - {entry['type']}: {entry['method']}")
-                if 'count' in entry:
-                    print(f"    处理节点数: {entry['count']}")
-                if 'mean_value' in entry:
-                    print(f"    平均值: {entry['mean_value']:.2f}")
+        from code.src.utils_common import safe_rich_debug
+        safe_rich_debug("数据补全报告:", "scenario")
+        for entry in completion_log:
+            safe_rich_debug(f"  - {entry['type']}: {entry['method']}", "scenario")
+            if 'count' in entry:
+                safe_rich_debug(f"    处理节点数: {entry['count']}", "scenario")
+            if 'mean_value' in entry:
+                safe_rich_debug(f"    平均值: {entry['mean_value']:.2f}", "scenario")
 
     def _setup_validation_rules(self):
         """设置验证规则"""

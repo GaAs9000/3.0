@@ -1,151 +1,216 @@
-# 自适应质量导向奖励系统设计文档
+# 势函数奖励系统
 
-## 概述
+## 🎯 核心问题
 
-本文档描述了电力网络分区强化学习系统中的自适应质量导向奖励函数设计。该系统实现了基于势函数理论的自适应质量导向激励结构，具备跨网络适应性、平台期检测和智能早停机制。
+电力网络分区的评价指标复杂且相互耦合，传统稀疏奖励难以有效指导训练。不同场景（正常运行vs故障状态）的难度差异导致训练偏向问题。
 
-## 🎯 核心设计理念
+## 🔬 技术创新：自适应质量导向奖励
 
-### 两层奖励结构 + 平台期检测
-1. **主奖励层**：纯势函数，鼓励质量改善，零固定阈值
-2. **效率奖励层**：仅在质量平台期激活，鼓励快速收敛
-3. **检测机制**：基于相对改善率的自适应判断
+### 设计理念
 
-### 完全相对化设计
-- **零固定阈值依赖**：所有评估基于相对改善，自动适应不同网络规模
-- **跨网络适应性**：同一套配置适用于IEEE14到IEEE118的所有网络
-- **势函数奖励**：基于质量分数的相对变化，理论保证最优策略不变
+1. **势函数理论**: 保持最优策略不变的密集奖励
+2. **相对改进**: 解决跨场景训练偏向问题
+3. **平台期检测**: 智能效率激励机制
+4. **完全自适应**: 零固定阈值，自动适应不同网络规模
 
-### 核心特性
-- **完全相对化**：自动适应不同网络的质量水平
-- **平台期检测**：基于改善率、稳定性和历史表现的综合判断
-- **效率激励**：仅在质量平台期激活，避免质量牺牲
-- **数值稳定性**：全面的NaN/inf保护和异常处理
+## 📊 数学框架
 
-## 📊 核心算法设计
+### 质量分数计算
 
-### 1. 综合质量分数计算
-
+**综合质量函数:**
 ```
-Q(s) = 1 - normalize(w₁·CV + w₂·coupling_ratio + w₃·power_imbalance)
+Q(s) = w₁·R_balance(CV) + w₂·R_decoupling + w₃·R_power
 
 其中:
-- CV ∈ [0, ∞), 越小越好
-- coupling_ratio ∈ [0, 1], 越小越好
-- power_imbalance ∈ [0, ∞), 越小越好
-- normalize(): 映射到 [0, 1], 使Q(s) ∈ [0, 1], 越大越好
+R_balance = exp(-2.0 · CV)
+R_decoupling = 0.5·σ(5(r_edge-0.5)) + 0.5·σ(5(r_admittance-0.5))
+R_power = exp(-3.0 · I_normalized)
+
+CV = std(partition_sizes) / mean(partition_sizes)
+σ(x) = sigmoid函数
 ```
 
-### 2. 相对改进主奖励
+### 势函数主奖励
 
+**相对改进奖励:**
 ```
-主奖励 = 相对改进奖励 = (Q(s_{t+1}) - Q(s_t)) / Q(s_t)
+R_potential = (Q(s_{t+1}) - Q(s_t)) / Q(s_t)
 
-特殊处理:
-- 当 Q(s_t) > 0.01 时: 使用相对改进公式
-- 当 Q(s_t) ≤ 0.01 时: 使用绝对改进 Q(s_{t+1}) - Q(s_t)
-- 结果裁剪到 [-1.0, 1.0] 确保训练稳定性
-```
-
-**核心优势**:
-- **解决跨场景偏向问题**: 相同相对努力获得相同奖励
-- **公平激励**: 困难场景(故障、高负荷)不被忽视
-- **训练均衡**: 避免算法偏向简单场景
-
-#### 🎯 跨场景训练偏向问题
-
-**问题描述**: 在多场景强化学习中，不同场景的难度差异导致训练偏向
-
-```
-场景难度对比:
-正常场景: 0.70→0.72 (改进0.02) → 在宽松条件下实现，容易
-故障场景: 0.40→0.42 (改进0.02) → 在N-1故障约束下实现，困难
-
-传统绝对奖励问题:
-- 算法偏向简单场景(正常、低负荷)
-- 忽略困难场景(故障、高负荷、发电波动)
-- 关键场景下泛化能力差
+数值稳定性处理:
+- 当 Q(s_t) > 0.01: 使用相对改进公式
+- 当 Q(s_t) ≤ 0.01: 使用绝对改进 Q(s_{t+1}) - Q(s_t)
+- 结果裁剪: R_potential ∈ [-2.0, 2.0]
 ```
 
-**相对改进奖励解决方案**:
+### 完整奖励结构
+
+**总奖励组成:**
+```
+R_total = R_potential + λ·η_efficiency(t)
+
+其中:
+R_potential: 势函数主奖励（始终激活）
+η_efficiency: 效率奖励（仅在平台期激活）
+λ: 效率奖励权重
+```
+
+**效率奖励设计:**
+```
+η_efficiency(t) = {
+    0,                           if not in_plateau
+    (max_steps - t) / max_steps, if in_plateau
+}
+
+目的: 在质量平台期鼓励快速收敛
+```
+
+## 🎯 跨场景训练偏向问题
+
+### 问题分析
+
+**场景难度差异:**
+```
+正常场景: 0.70→0.72 (改进0.02) → 宽松条件，容易实现
+故障场景: 0.40→0.42 (改进0.02) → N-1约束，困难实现
+
+传统绝对奖励缺陷:
+- 算法偏向简单场景
+- 忽略困难场景学习
+- 关键场景泛化能力差
+```
+
+### 相对改进解决方案
+
+**公平激励机制:**
 ```
 故障场景: (0.42-0.40)/0.40 = 5%改进 → 奖励+0.05
 正常场景: (0.714-0.68)/0.68 = 5%改进 → 奖励+0.05
 
-结果: 相同相对努力获得相同奖励，训练公平均衡
+结果: 相同相对努力获得相同奖励
 ```
 
-### 3. 平台期检测算法
+## 🔧 实现细节
+
+### 核心奖励计算
+
+<augment_code_snippet path="code/src/rl/reward.py" mode="EXCERPT">
+````python
+def _compute_simple_relative_reward(self, prev_quality: float, curr_quality: float) -> float:
+    """计算相对改进奖励"""
+    if prev_quality > 0.01:
+        # 使用相对改进
+        relative_improvement = (curr_quality - prev_quality) / prev_quality
+    else:
+        # 使用绝对改进（避免除零）
+        relative_improvement = curr_quality - prev_quality
+
+    # 数值稳定性保护
+    return np.clip(relative_improvement, -2.0, 2.0)
+````
+</augment_code_snippet>
+
+### 质量分数计算
+
+<augment_code_snippet path="code/src/rl/reward.py" mode="EXCERPT">
+````python
+def _compute_balance_reward(self, cv: float) -> float:
+    """平衡性奖励: R_balance = exp(-2.0 * CV)"""
+    cv = max(0.0, min(cv, 10.0))  # 防止极值
+    exp_arg = np.clip(-2.0 * cv, -500, 0)  # 防止exp溢出
+    return np.clip(np.exp(exp_arg), 0.0, 1.0)
+
+def _compute_decoupling_reward(self, edge_ratio: float, coupling_ratio: float) -> float:
+    """解耦奖励: 基于边界比例和耦合强度"""
+    edge_score = self._sigmoid_transform(edge_ratio, center=0.5, steepness=5)
+    coupling_score = self._sigmoid_transform(coupling_ratio, center=0.5, steepness=5)
+    return 0.5 * edge_score + 0.5 * coupling_score
+````
+</augment_code_snippet>
+
+## 📈 平台期检测算法
+
+### 检测逻辑
 
 ```
 ALGORITHM: QualityPlateauDetection
 INPUT: recent_scores[window_size], all_history_scores
 OUTPUT: plateau_detected, confidence
 
-// 1. 改善率检测
-slope = linear_regression_slope(recent_scores)
-improvement_rate = |slope|
+1. 改善率检测:
+   slope = linear_regression_slope(recent_scores)
+   improvement_rate = |slope|
 
-// 2. 稳定性检测
-variance = var(recent_scores)
-stability_score = 1 / (1 + variance)
+2. 稳定性检测:
+   variance = var(recent_scores)
+   stability_score = 1 / (1 + variance)
 
-// 3. 相对水平检测
-current_score = recent_scores.last()
-historical_percentile = percentile_rank(all_history_scores, current_score)
+3. 综合判断:
+   plateau_detected = (
+       improvement_rate < threshold AND
+       stability_score > min_stability
+   )
+### 平台期检测实现
 
-// 4. 综合判断
-plateau_detected = (
-    improvement_rate < min_improvement_threshold AND
-    stability_score > stability_threshold AND
-    historical_percentile > min_percentile_threshold
-)
+<augment_code_snippet path="code/src/rl/reward.py" mode="EXCERPT">
+````python
+def detect_plateau(self, current_score: float, scenario_context=None):
+    """检测质量平台期"""
+    # 更新历史记录
+    self.quality_history.append(current_score)
 
-confidence = weighted_average(
-    1 - improvement_rate/max_rate,     # 改善越慢，置信度越高
-    stability_score,                   # 越稳定，置信度越高
-    historical_percentile              # 表现越好，置信度越高
-)
-```
+    # 计算改善率
+    recent_scores = self.quality_history[-self.window_size:]
+    improvement_rate = self._calculate_improvement_rate(recent_scores)
 
-### 4. 效率奖励机制
+    # 计算稳定性
+    stability_score = self._calculate_stability(recent_scores)
 
-```
-IF plateau_detected AND confidence > confidence_threshold:
-    efficiency_reward = λ · (max_steps - current_step) / max_steps
-ELSE:
-    efficiency_reward = 0
+    # 综合判断
+    plateau_detected = (
+        improvement_rate < self.min_improvement_threshold and
+        stability_score > self.stability_threshold
+    )
 
-总奖励 = 主奖励 + efficiency_reward
-```
+    return PlateauResult(
+        is_plateau=plateau_detected,
+        confidence=stability_score,
+        improvement_rate=improvement_rate
+    )
+````
+</augment_code_snippet>
 
-## 🏗️ 系统架构
+## 🛠️ 数值稳定性处理
 
-### RewardFunction类
+### 防止数值异常
 
 ```python
-class RewardFunction:
-    """自适应质量导向奖励函数系统"""
+def _safe_divide(self, numerator: float, denominator: float, fallback: float = 0.0) -> float:
+    """安全除法，防止除零和数值溢出"""
+    if abs(denominator) < 1e-8:
+        return fallback
+    result = numerator / denominator
+    return np.clip(result, -1e6, 1e6)
 
-    def __init__(self, hetero_data, config, device):
-        """初始化自适应质量导向奖励函数"""
-        self.plateau_detector = self._create_plateau_detector()
-        self.adaptive_quality_config = self._load_adaptive_quality_config()
-
-    def compute_incremental_reward(self, partition, action):
-        """计算自适应质量导向即时奖励"""
-        # 返回 (总奖励, 平台期检测结果)
-
-    def _compute_quality_score(self, partition):
-        """计算统一质量分数"""
-
-    def should_early_stop(self, partition):
-        """判断是否应该早停"""
+def _safe_exp(self, x: float) -> float:
+    """安全指数函数，防止溢出"""
+    x = np.clip(x, -500, 500)
+    return np.exp(x)
 ```
 
-### 核心组件
+## 📊 理论保证
 
-1. **QualityPlateauDetector**: 平台期检测器，实现三层检测算法
+### 势函数理论基础
+
+基于Ng等人的势函数理论：
+- **最优策略保持不变**: π*(原环境) = π*(增强环境)
+- **收敛性保证**: Q学习算法仍然收敛到最优Q函数
+- **训练加速**: 提供密集的中间指导信号
+
+### 相对奖励优势
+
+1. **跨场景公平性**: 相同努力获得相同奖励
+2. **自动适应性**: 无需针对不同网络调参
+3. **训练稳定性**: 避免奖励尺度差异导致的不稳定
 2. **_compute_quality_score()**: 统一质量分数计算，支持跨网络适应性
 3. **plateau_detector**: 平台期检测器实例，管理检测状态
 4. **adaptive_quality_config**: 自适应质量配置，控制检测参数

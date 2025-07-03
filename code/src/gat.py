@@ -256,11 +256,8 @@ class HeteroGraphEncoder(nn.Module):
         # 转换为异构模型
         # 在定义了确切的依赖关系后，我们确信 to_hetero 会稳定工作
         self.hetero_encoder = to_hetero(gnn_encoder, metadata, aggr='sum')
-        try:
-            from code.src.rich_output import rich_debug
-            rich_debug("使用 to_hetero 转换的异构编码器", "attention")
-        except ImportError:
-            pass
+        from code.src.utils_common import safe_rich_debug
+        safe_rich_debug("使用 to_hetero 转换的异构编码器", "attention")
         
         self.final_dim = gnn_encoder.final_dim
         
@@ -392,11 +389,8 @@ class HeteroGraphEncoder(nn.Module):
         attention_weights = {}
 
         if show_attention_collection and not only_show_errors:
-            try:
-                from code.src.rich_output import rich_debug
-                rich_debug("开始收集注意力权重...", "attention")
-            except ImportError:
-                pass
+            from code.src.utils_common import safe_rich_debug
+            safe_rich_debug("开始收集注意力权重...", "attention")
 
         def collect_attention_weights_with_names(module, prefix=""):
             """递归收集注意力权重并记录对应的边类型"""
@@ -453,11 +447,8 @@ class HeteroGraphEncoder(nn.Module):
         返回:
             edge_type_key: 格式化的边类型键，如 "bus_pv__connects_line__bus_slack"
         """
-        try:
-            from code.src.rich_output import rich_debug
-            rich_debug(f"尝试从模块名提取边类型: {module_name}", "attention")
-        except ImportError:
-            pass
+        from code.src.utils_common import safe_rich_debug
+        safe_rich_debug(f"尝试从模块名提取边类型: {module_name}", "attention")
 
         # 解析模块名称以提取边类型信息
         # to_hetero会将边类型编码到模块名中
@@ -470,11 +461,8 @@ class HeteroGraphEncoder(nn.Module):
             # 检查模块名称是否包含边类型信息
             if (src_type in module_name and dst_type in module_name and
                 relation in module_name):
-                try:
-                    from code.src.rich_output import rich_debug
-                    rich_debug(f"匹配到边类型: {edge_type_key}", "attention")
-                except ImportError:
-                    pass
+                from code.src.utils_common import safe_rich_debug
+                safe_rich_debug(f"匹配到边类型: {edge_type_key}", "attention")
                 return edge_type_key
 
         # 方法2: 尝试解析to_hetero的编码格式
@@ -494,28 +482,19 @@ class HeteroGraphEncoder(nn.Module):
                 edge_type = self.edge_types[edge_type_idx]
                 src_type, relation, dst_type = edge_type
                 edge_type_key = f"{src_type}__{relation}__{dst_type}"
-                try:
-                    from code.src.rich_output import rich_debug
-                    rich_debug(f"通过索引匹配到边类型: {edge_type_key} (索引: {edge_type_idx})", "attention")
-                except ImportError:
-                    pass
+                from code.src.utils_common import safe_rich_debug
+                safe_rich_debug(f"通过索引匹配到边类型: {edge_type_key} (索引: {edge_type_idx})", "attention")
                 return edge_type_key
 
         # 方法3: 如果无法匹配，返回通用键
         if "conv" in module_name:
             fallback_key = f"unknown_edge_type_{module_name.replace('.', '_')}"
-            try:
-                from code.src.rich_output import rich_debug
-                rich_debug(f"使用备用键: {fallback_key}", "attention")
-            except ImportError:
-                pass
+            from code.src.utils_common import safe_rich_debug
+            safe_rich_debug(f"使用备用键: {fallback_key}", "attention")
             return fallback_key
 
-        try:
-            from code.src.rich_output import rich_debug
-            rich_debug("无法提取边类型", "attention")
-        except ImportError:
-            pass
+        from code.src.utils_common import safe_rich_debug
+        safe_rich_debug("无法提取边类型", "attention")
         return None
 
     def get_attention_weights_legacy(self) -> List[torch.Tensor]:
