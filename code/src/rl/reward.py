@@ -68,7 +68,7 @@ class RobustMetricsCalculator:
 
             for i in range(edge_index.shape[1]):
                 node1, node2 = edge_index[:, i]
-                if (node1 < len(partition) and node2 < len(partition) and
+                if (node1 < partition.shape[0] and node2 < partition.shape[0] and
                     partition[node1] != partition[node2] and
                     partition[node1] > 0 and partition[node2] > 0):
                     cross_partition_admittance += edge_admittance[i].item()

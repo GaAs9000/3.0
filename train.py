@@ -25,6 +25,8 @@ from collections import deque
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 import wandb
+import queue
+import threading
 
 # 添加code/src到路径
 sys.path.append(str(Path(__file__).parent / 'code' / 'src'))
@@ -343,7 +345,7 @@ class TrainingLogger:
         # 检查是否使用Rich状态面板
         self.use_rich_panel = config.get('debug', {}).get('training_output', {}).get('use_rich_status_panel', True)
         
-        # 导入并设置 Rich 输出管理器
+        # 使用现代化训练监控器
         try:
             from code.src.rich_output import set_output_manager
             set_output_manager(config)
@@ -379,6 +381,19 @@ class TrainingLogger:
         self.use_wandb = wandb_config.get('enabled', False)
         if self.use_wandb:
             self._setup_wandb(wandb_config)
+
+        # TUI集成
+        self.use_tui = config.get('tui', {}).get('enabled', False)
+        self.tui_update_queue = None
+        if self.use_tui:
+            try:
+                from code.src.tui_monitor import TrainingMonitorApp
+                self.tui_update_queue = queue.Queue()
+                self.tui_app = TrainingMonitorApp(self.tui_update_queue, total_episodes)
+            except (ImportError, Exception) as e:
+                from code.src.rich_output import rich_warning
+                rich_warning(f"无法加载TUI监控器，回退到标准输出: {e}")
+                self.use_tui = False
 
     def _setup_wandb(self, wandb_config: Dict[str, Any]):
         """初始化Weights & Biases"""
@@ -615,6 +630,28 @@ class TrainingLogger:
         if reward > self.best_reward:
             self.best_reward = reward
 
+        # 如果使用TUI，将更新推送到队列
+        if self.use_tui and self.tui_update_queue:
+            from code.src.tui_monitor import TrainingUpdate
+            
+            avg_reward = np.mean(self.episode_rewards) if self.episode_rewards else 0
+            quality_score = info.get('quality_score', 0.5) if info else 0.5
+            success_rate = np.mean(self.success_rates) * 100 if self.success_rates else 0.0
+
+            update = TrainingUpdate(
+                episode=episode,
+                total_episodes=self.total_episodes,
+                reward=reward,
+                best_reward=self.best_reward,
+                avg_reward=avg_reward,
+                quality_score=quality_score,
+                success_rate=success_rate,
+                log_message=f"[{episode+1}/{self.total_episodes}] Reward: {reward:.3f}"
+            )
+            self.tui_update_queue.put(update)
+            # 注释掉提前返回，让代码继续执行TensorBoard记录
+            # return # TUI接管显示，直接返回
+
         # 使用Rich状态面板或传统进度条
         if self.use_rich and self.use_rich_panel:
             # 更新Rich状态面板（降低刷新频率避免输出混乱）
@@ -649,13 +686,10 @@ class TrainingLogger:
 
             self.progress_bar.update(1, **update_kwargs)
         else:
-            # 使用tqdm进度条
-            if hasattr(self, 'progress_bar') and self.progress_bar:
-                self.progress_bar.update(1)
-                self.progress_bar.set_postfix({
-                    "奖励": f"{reward:.2f}",
-                    "最佳": f"{self.best_reward:.2f}"
-                })
+            # 使用简单日志输出
+            if hasattr(self, 'modern_logger') and hasattr(self.modern_logger, 'log'):
+                self.modern_logger.log(episode, reward, self.best_reward, 
+                                     sum(self.episode_rewards) / len(self.episode_rewards) if self.episode_rewards else reward)
 
         # 记录额外信息 - 【修复】适配新系统指标名称
         if info:
@@ -751,6 +785,10 @@ class TrainingLogger:
 
     def close(self):
         """关闭日志记录器"""
+        # 关闭TUI应用
+        if self.use_tui and hasattr(self, 'tui_app') and self.tui_app._running:
+            self.tui_app.action_quit()
+            
         if self.use_rich and self.live_panel:
             self.live_panel.stop()
         elif self.use_rich and self.progress_bar:
@@ -779,10 +817,18 @@ class UnifiedTrainer:
         else:
             self.device = torch.device(device_config)
         self.logger = None # 将在train方法中初始化
+        self.tui_thread = None
 
     def train(self, num_episodes: int, max_steps_per_episode: int, update_interval: int = 10):
         """训练智能体"""
         self.logger = TrainingLogger(self.config, num_episodes)
+        
+        # 如果启用TUI，在单独的线程中运行它
+        if self.logger.use_tui:
+            self.tui_thread = threading.Thread(target=self.logger.tui_app.run, daemon=True)
+            self.tui_thread.start()
+            # 等待一小段时间以确保TUI启动
+            time.sleep(1)
 
         from code.src.rich_output import rich_info
         if not self.config.get('debug', {}).get('training_output', {}).get('only_show_errors', True):
@@ -1114,55 +1160,60 @@ class UnifiedTrainer:
 class UnifiedTrainingSystem:
     """统一训练系统 - 专注于训练功能"""
 
-    def __init__(self, config_path: Optional[str] = None):
-        """初始化统一训练系统"""
-        self.deps = check_dependencies()
-        self.config = self._load_config(config_path)
+    def __init__(self, config_path: Optional[str] = None, **kwargs):
+        """
+        初始化统一训练系统
+
+        Args:
+            config_path: 自定义配置文件路径
+            **kwargs: 用于覆盖配置的键值对
+        """
+        # 1. 加载和合并配置
+        self.config = self._load_config(config_path, kwargs)
+
+        # 2. 设置设备
         self.device = self._setup_device()
+
         self.setup_directories()
 
-    def _load_config(self, config_path: Optional[str]) -> Dict[str, Any]:
-        """加载配置文件"""
-        # 如果没有指定配置文件，尝试使用默认的 config.yaml
-        if not config_path:
-            default_config_path = 'config.yaml'
-            if os.path.exists(default_config_path):
-                config_path = default_config_path
-                from code.src.rich_output import rich_info
-                rich_info(f"使用默认配置文件: {config_path}")
+    def _load_config(self, config_path: Optional[str], overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """
+        加载配置，优先级如下: 命令行覆盖 > 文件配置 > 默认配置
+        """
+        # 1. 获取默认配置
+        final_config = self._create_default_config()
 
-        # 检查是否是文件路径
-        if config_path and os.path.exists(config_path):
-            with open(config_path, 'r', encoding='utf-8') as f:
-                config = yaml.safe_load(f)
-                from code.src.rich_output import rich_success, rich_info
-                rich_success(f"配置文件加载成功: {config_path}")
-                rich_info(f"案例名称: {config['data']['case_name']}", show_always=True)
-                return config
-
-        # 检查是否是预设配置名称
-        elif config_path and os.path.exists('config.yaml'):
-            with open('config.yaml', 'r', encoding='utf-8') as f:
-                base_config = yaml.safe_load(f)
-
-                # 检查是否存在预设配置
-                if config_path in base_config:
-                    from code.src.rich_output import rich_success, rich_info
-                    rich_success(f"使用预设配置: {config_path}")
-                    preset_config = base_config[config_path]
-
-                    # 深度合并预设配置到基础配置
-                    merged_config = self._deep_merge_config(base_config, preset_config)
-                    rich_info(f"案例名称: {merged_config['data']['case_name']}", show_always=True)
-                    return merged_config
-                else:
-                    from code.src.rich_output import rich_warning
-                    rich_warning(f"未找到预设配置 '{config_path}'，使用默认配置")
-                    return base_config
+        # 2. 确定要加载的配置文件路径
+        # 如果命令行没有指定 --config, 则使用项目根目录的 config.yaml
+        if config_path is None:
+            config_path = 'config.yaml'
+        
+        # 3. 如果配置文件存在，则加载并合并
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    file_config = yaml.safe_load(f)
+                
+                if file_config: # 确保文件不是空的
+                    final_config = self._deep_merge_config(final_config, file_config)
+                    from code.src.rich_output import rich_success
+                    rich_success(f"✅ 配置文件加载成功: {config_path}")
+            except Exception as e:
+                from code.src.rich_output import rich_warning
+                rich_warning(f"⚠️ 加载配置文件 {config_path} 失败: {e}，将使用默认配置。")
         else:
-            from code.src.rich_output import rich_warning
-            rich_warning("未找到配置文件，使用默认配置")
-            return self._create_default_config()
+            # 只在用户明确指定了--config但文件不存在时发出警告
+            if config_path != 'config.yaml':
+                 from code.src.rich_output import rich_warning
+                 rich_warning(f"⚠️ 指定的配置文件不存在: '{config_path}'，将使用默认配置。")
+
+        # 4. 应用来自构造函数的命令行覆盖项
+        if overrides:
+            final_config = self._deep_merge_config(final_config, overrides)
+            from code.src.rich_output import rich_info
+            rich_info("✅ 已应用命令行参数覆盖配置。")
+
+        return final_config
 
     def _deep_merge_config(self, base_config: Dict[str, Any], preset_config: Dict[str, Any]) -> Dict[str, Any]:
         """深度合并配置字典"""
@@ -1189,7 +1240,7 @@ class UnifiedTrainingSystem:
             'data': {
                 'case_name': 'ieee14',
                 'normalize': True,
-                'cache_dir': 'cache'
+                'cache_dir': 'data/cache'
             },
             'training': {
                 'mode': 'standard',  # standard, parallel, curriculum, large_scale
@@ -1252,13 +1303,13 @@ class UnifiedTrainingSystem:
             'visualization': {
                 'enabled': True,
                 'save_figures': True,
-                'figures_dir': 'figures',
+                'figures_dir': 'data/figures',
                 'interactive': True
             },
             'logging': {
                 'use_tensorboard': True,
-                'log_dir': 'logs',
-                'checkpoint_dir': 'checkpoints',
+                'log_dir': 'data/logs',
+                'checkpoint_dir': 'data/checkpoints',
                 'console_log_interval': 10,
                 'metrics_save_interval': 50
             },
@@ -1295,7 +1346,7 @@ class UnifiedTrainingSystem:
             self.config['logging']['log_dir'],
             self.config['logging']['checkpoint_dir'],
             self.config['visualization']['figures_dir'],
-            'models', 'output', 'experiments'
+            'data/models', 'data/output', 'data/experiments'
         ]
 
         for dir_path in dirs:
@@ -2187,7 +2238,7 @@ class UnifiedTrainingSystem:
         except Exception as e:
             print(f"⚠️ 保存智能自适应中间结果失败: {e}")
 
-    def save_results(self, results: Dict[str, Any], output_dir: str = 'experiments'):
+    def save_results(self, results: Dict[str, Any], output_dir: str = 'data/experiments'):
         """保存训练结果"""
         timestamp = time.strftime('%Y%m%d_%H%M%S')
         exp_dir = Path(output_dir) / f"training_{timestamp}"
@@ -2214,96 +2265,41 @@ class UnifiedTrainingSystem:
 
 def main():
     """主函数"""
-    parser = argparse.ArgumentParser(description='电力网络分区强化学习训练系统')
-
-    # 基础参数
-    parser.add_argument('--config', type=str, default=None,
-                       help='配置文件路径或预设配置名称')
-    parser.add_argument('--mode', type=str, default='fast',
-                       choices=['fast', 'full', 'ieee118', 'parallel', 'curriculum'],
-                       help='训练模式')
-    parser.add_argument('-a', '--adaptive', action='store_true',
-                       help='启用智能自适应训练 (可与任何模式组合)')
-    parser.add_argument('-s', '--scenario-aware', action='store_true',
-                       help='启用场景感知奖励系统 (解决跨场景训练问题)')
-    parser.add_argument('--relative-reward', action='store_true',
-                       help='启用相对改进奖励 (需要与--scenario-aware一起使用)')
-
-    # 训练参数
-    parser.add_argument('--episodes', type=int, help='训练回合数')
-    parser.add_argument('--case', type=str, help='电网案例名称')
-    parser.add_argument('--partitions', type=int, help='分区数量')
-    parser.add_argument('--lr', type=float, help='学习率')
-    parser.add_argument('--workers', type=int, help='并行工作进程数')
-
-    # 输出参数
-    parser.add_argument('--save-results', action='store_true', help='保存训练结果')
-    parser.add_argument('--output-dir', type=str, default='experiments', help='输出目录')
-
-    # 系统参数
-    parser.add_argument('--device', type=str, choices=['cpu', 'cuda', 'auto'], help='计算设备')
-    parser.add_argument('--seed', type=int, help='随机种子')
-    parser.add_argument('--check-deps', action='store_true', help='检查依赖')
+    parser = argparse.ArgumentParser(description='电力网络分区强化学习统一训练系统')
+    parser.add_argument('--config', type=str, default=None, help='自定义配置文件路径')
+    parser.add_argument('--mode', type=str, default='standard', help='训练模式')
+    parser.add_argument('--case', type=str, default=None, help='覆盖电网案例')
+    parser.add_argument('--episodes', type=int, default=None, help='覆盖训练回合数')
+    parser.add_argument('--tui', action='store_true', help='启用Textual TUI监控器')
+    parser.add_argument('--device', type=str, default=None, help='覆盖计算设备 (cpu/cuda)')
 
     args = parser.parse_args()
 
-    # 检查依赖
-    if args.check_deps:
-        deps = check_dependencies()
-        print("📦 依赖检查结果:")
-        for dep, available in deps.items():
-            status = "✅" if available else "❌"
-            print(f"   - {dep}: {status}")
-        return
+    # 将所有命令行参数统一处理为配置覆盖项
+    config_overrides = {
+        'training': {'mode': args.mode},
+        'tui': {'enabled': args.tui}
+    }
+    if args.case:
+        config_overrides['data'] = {'case_name': args.case}
+    if args.episodes:
+        config_overrides.setdefault('training', {})['num_episodes'] = args.episodes
+    if args.device:
+        config_overrides['system'] = {'device': args.device}
 
-    # 创建训练系统
     try:
-        system = UnifiedTrainingSystem(config_path=args.config)
-
-        # 准备训练参数
-        train_kwargs = {}
-        if args.episodes:
-            train_kwargs['training.num_episodes'] = args.episodes
-        if args.case:
-            train_kwargs['data.case_name'] = args.case
-        if args.partitions:
-            train_kwargs['environment.num_partitions'] = args.partitions
-        if args.lr:
-            train_kwargs['agent.lr_actor'] = args.lr
-            train_kwargs['agent.lr_critic'] = args.lr * 2
-        if args.workers:
-            train_kwargs['parallel_training.num_cpus'] = args.workers
-        if args.device:
-            train_kwargs['system.device'] = args.device
-        if args.seed:
-            train_kwargs['system.seed'] = args.seed
-
-        # 处理智能自适应参数
-        if args.adaptive:
-            train_kwargs['adaptive_curriculum.enabled'] = True
-            print(f"🧠 启用智能自适应训练 (基础模式: {args.mode})")
-
-        # 处理场景感知奖励参数
-        if args.scenario_aware:
-            train_kwargs['scenario_aware_reward.enabled'] = True
-            print(f"🎯 启用场景感知奖励系统 (解决跨场景训练问题)")
-
-            # 如果同时启用相对奖励
-            if args.relative_reward:
-                train_kwargs['scenario_aware_reward.relative_reward.enabled'] = True
-                print(f"📊 启用相对改进奖励 (统一奖励量纲)")
-            else:
-                print(f"💡 提示：可使用 --relative-reward 启用相对改进奖励以获得更好效果")
-        elif args.relative_reward:
-            print(f"⚠️  警告：--relative-reward 需要与 --scenario-aware 一起使用")
-            args.relative_reward = False
-
-        # 运行训练
-        results = system.run_training(mode=args.mode, **train_kwargs)
+        # 将配置覆盖项统一传递给系统
+        system = UnifiedTrainingSystem(
+            config_path=args.config,
+            **config_overrides
+        )
+        
+        # 直接使用系统内的最终配置来运行训练
+        results = system.run_training(mode=system.config['training']['mode'])
 
         # 保存结果
-        if args.save_results and results.get('success', False):
-            system.save_results(results, args.output_dir)
+        if results.get('success', False):
+            system.save_results(results, 'experiments')
 
         # 输出结果摘要
         if results.get('success', False):

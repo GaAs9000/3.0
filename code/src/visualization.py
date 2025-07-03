@@ -53,7 +53,7 @@ class VisualizationManager:
         self.viz_config = config.get('visualization', {})
         self.enabled = self.viz_config.get('enabled', True)
         self.save_figures = self.viz_config.get('save_figures', True)
-        self.figures_dir = Path(self.viz_config.get('figures_dir', 'figures'))
+        self.figures_dir = Path(self.viz_config.get('figures_dir', 'data/figures'))
         
         # 创建图片目录
         if self.save_figures:

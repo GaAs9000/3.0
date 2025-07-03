@@ -25,7 +25,7 @@ class PowerGridDataProcessor:
     3. 将物理类型信息特征化而非拓扑化
     """
     
-    def __init__(self, normalize: bool = True, cache_dir: str = 'cache'):
+    def __init__(self, normalize: bool = True, cache_dir: str = 'data/cache'):
         self.normalize = normalize
         self.node_scaler = None
         self.edge_scaler = None
