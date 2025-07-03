@@ -402,10 +402,14 @@ class PowerGridPartitioningEnv:
         # 添加动作掩码到观察中
         observation['action_mask'] = self.get_action_mask(use_advanced_constraints=True)
         
-        # 【修复】统一使用新奖励系统计算初始指标，避免双套指标系统冲突
-        initial_metrics = self.reward_function.get_current_metrics(
+        # 【优化】跳过昂贵的绝对指标计算，只计算质量分数
+        initial_quality_score = self.reward_function.get_current_quality_score(
             self.state_manager.current_partition
         )
+        initial_metrics = {
+            'quality_score': initial_quality_score,
+            'num_partitions': self.state_manager.current_partition.max().item() if self.state_manager.current_partition.numel() > 0 else 0
+        }
 
         # 【新增】在回合开始时，计算并存储初始分区的指标
         self.previous_metrics = initial_metrics
@@ -485,21 +489,20 @@ class PowerGridPartitioningEnv:
             current_scenario_context
         )
 
-        # 6. 统一使用新奖励系统的指标（修复双套指标系统冲突）
-        current_metrics = self.reward_function.get_current_metrics(
-            self.state_manager.current_partition
-        )
+        # 6. 【优化】跳过昂贵的绝对指标计算，只计算质量分数用于奖励
+        # 这些绝对指标（cv、coupling_ratio等）在不同场景下没有可比性，且计算昂贵
         quality_score = self.reward_function.get_current_quality_score(
             self.state_manager.current_partition
         )
 
-        # 补充一些环境需要的额外指标
-        # 【修复】改进connectivity计算，不再简单假设为1.0
+        # 创建轻量级指标字典，只包含训练必需的信息
         connectivity_score = self._compute_connectivity_score(self.state_manager.current_partition)
-        current_metrics.update({
+        current_metrics = {
+            'quality_score': quality_score,
+            'num_partitions': self.state_manager.current_partition.max().item() if self.state_manager.current_partition.numel() > 0 else 0,
             'connectivity': connectivity_score,
             'step': self.current_step
-        })
+        }
 
         self.last_reward_components = {
             'incremental_reward': reward,
@@ -819,5 +822,18 @@ class PowerGridPartitioningEnv:
         self.state_manager = None
         self.action_space = None
         self.reward_function = None
-        self.metis_initializer = None
-        self.evaluator = None
+
+    def get_full_metrics(self, partition: torch.Tensor = None) -> Dict[str, float]:
+        """
+        获取完整的评估指标（用于最终评估或调试）
+
+        Args:
+            partition: 分区方案，如果为None则使用当前分区
+
+        Returns:
+            完整的指标字典
+        """
+        if partition is None:
+            partition = self.state_manager.current_partition
+
+        return self.reward_function._compute_core_metrics(partition)

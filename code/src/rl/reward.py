@@ -1727,7 +1727,18 @@ class RewardFunction:
         return 1.0 / (1.0 + np.exp(-x))
 
     def get_current_metrics(self, partition: torch.Tensor) -> Dict[str, float]:
-        """获取当前分区的指标（用于调试和分析）"""
+        """
+        获取当前分区的指标（用于调试和分析）
+
+        注意：为了训练效率，这个方法现在只返回完整的评估指标。
+        训练过程中应该直接使用 get_current_quality_score() 方法。
+
+        Args:
+            partition: 当前分区方案
+
+        Returns:
+            完整的指标字典
+        """
         return self._compute_core_metrics(partition)
 
     def update_weights(self, new_weights: Dict[str, float]):

@@ -22,7 +22,6 @@ import warnings
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Any
 from collections import deque
-import matplotlib.pyplot as plt
 from tqdm import tqdm
 import queue
 import threading
@@ -33,7 +32,7 @@ sys.path.append(str(Path(__file__).parent / 'code' / 'src'))
 sys.path.append(str(Path(__file__).parent / 'code'))
 
 # --- 全局 NaN/Inf 异常检测开关 ---
-torch.autograd.set_detect_anomaly(True)
+torch.autograd.set_detect_anomaly(False)
 warnings.filterwarnings("error", message=".*NaN.*", category=RuntimeWarning)
 warnings.filterwarnings('ignore', category=UserWarning)
 
@@ -633,41 +632,109 @@ class TrainingLogger:
                 coupling_value = info.get('coupling_ratio', info.get('coupling_edges', 0.0))
                 self.coupling_edges.append(coupling_value)
 
-        # TensorBoard日志
+        # TensorBoard日志 - 重新设计的分组记录
         if self.use_tensorboard and self.tensorboard_writer:
-            self.tensorboard_writer.add_scalar('Episode/Reward', reward, episode)
-            self.tensorboard_writer.add_scalar('Episode/Length', length, episode)
-            if info:
-                for key, value in info.items():
-                    if isinstance(value, (int, float)):
-                        self.tensorboard_writer.add_scalar(f'Episode/{key}', value, episode)
-            # 定期刷新以确保数据写入
-            if episode % 10 == 0:
-                self.tensorboard_writer.flush()
+            self._log_tensorboard_metrics(episode, reward, length, info)
 
+    def _log_tensorboard_metrics(self, episode: int, reward: float, length: int, info: dict):
+        """
+        分组记录TensorBoard指标，提供清晰的可视化结构
 
+        指标分组：
+        - Core: 核心训练指标
+        - Reward: 奖励组件详情
+        - Quality: 质量评估指标
+        - Debug: 调试和诊断信息
+        """
+        if not (self.use_tensorboard and self.tensorboard_writer):
+            return
+
+        # === 1. 核心训练指标 (Core Training Metrics) ===
+        self.tensorboard_writer.add_scalar('Core/Episode_Reward', reward, episode)
+        self.tensorboard_writer.add_scalar('Core/Episode_Length', length, episode)
+
+        if info:
+            # 成功率和基础状态
+            if 'success' in info:
+                self.tensorboard_writer.add_scalar('Core/Success_Rate', float(info['success']), episode)
+            if 'step' in info:
+                self.tensorboard_writer.add_scalar('Core/Current_Step', info['step'], episode)
+
+        # === 2. 奖励组件详情 (Reward Components) ===
+        if info:
+            # 终局奖励组件
+            reward_components = {
+                'balance_reward': 'Balance_Component',
+                'decoupling_reward': 'Decoupling_Component',
+                'power_reward': 'Power_Component',
+                'quality_reward': 'Quality_Total',
+                'final_reward': 'Final_Total'
+            }
+
+            for key, display_name in reward_components.items():
+                if key in info and isinstance(info[key], (int, float)):
+                    self.tensorboard_writer.add_scalar(f'Reward/{display_name}', info[key], episode)
+
+            # 奖励调节因子
+            adjustment_factors = {
+                'threshold_bonus': 'Threshold_Bonus',
+                'termination_discount': 'Termination_Discount'
+            }
+
+            for key, display_name in adjustment_factors.items():
+                if key in info and isinstance(info[key], (int, float)):
+                    self.tensorboard_writer.add_scalar(f'Reward/{display_name}', info[key], episode)
+
+        # === 3. 质量评估指标 (Quality Assessment) ===
+        if info:
+            quality_metrics = {
+                'quality_score': 'Unified_Quality_Score',
+                'plateau_confidence': 'Plateau_Confidence'
+            }
+
+            for key, display_name in quality_metrics.items():
+                if key in info and isinstance(info[key], (int, float)):
+                    self.tensorboard_writer.add_scalar(f'Quality/{display_name}', info[key], episode)
+
+        # === 4. 调试和诊断信息 (Debug & Diagnostics) ===
+        if info:
+            debug_metrics = {
+                'reward_mode': 'Current_Reward_Mode'
+            }
+
+            for key, display_name in debug_metrics.items():
+                if key in info:
+                    # 对于字符串类型，转换为数值编码
+                    if isinstance(info[key], str):
+                        # 简单的字符串哈希编码用于可视化
+                        value = hash(info[key]) % 1000
+                        self.tensorboard_writer.add_scalar(f'Debug/{display_name}', value, episode)
+                    elif isinstance(info[key], (int, float)):
+                        self.tensorboard_writer.add_scalar(f'Debug/{display_name}', info[key], episode)
+
+        # 定期刷新以确保数据写入
+        if episode % 10 == 0:
+            self.tensorboard_writer.flush()
 
     def log_training_step(self, episode: int, actor_loss: float = None,
                          critic_loss: float = None, entropy: float = None):
-        """记录训练步骤"""
+        """记录训练步骤 - 使用分组记录"""
         if actor_loss is not None:
             self.actor_losses.append(actor_loss)
             if self.use_tensorboard and self.tensorboard_writer:
-                self.tensorboard_writer.add_scalar('Training/ActorLoss', actor_loss, episode)
+                self.tensorboard_writer.add_scalar('Training/Actor_Loss', actor_loss, episode)
 
         if critic_loss is not None:
             self.critic_losses.append(critic_loss)
             if self.use_tensorboard and self.tensorboard_writer:
-                self.tensorboard_writer.add_scalar('Training/CriticLoss', critic_loss, episode)
+                self.tensorboard_writer.add_scalar('Training/Critic_Loss', critic_loss, episode)
 
         if entropy is not None:
             self.entropies.append(entropy)
             if self.use_tensorboard and self.tensorboard_writer:
-                self.tensorboard_writer.add_scalar('Training/Entropy', entropy, episode)
+                self.tensorboard_writer.add_scalar('Training/Policy_Entropy', entropy, episode)
 
-        # 刷新TensorBoard数据
-        if self.use_tensorboard and self.tensorboard_writer:
-            self.tensorboard_writer.flush()
+        # TensorBoard数据会在_log_tensorboard_metrics中定期刷新
 
 
 
@@ -695,6 +762,15 @@ class TrainingLogger:
             stats['mean_critic_loss'] = np.mean(self.critic_losses)
 
         return stats
+
+    def set_training_mode(self, training: bool = True):
+        """
+        设置训练/评估模式，控制TensorBoard指标记录
+
+        Args:
+            training: True为训练模式（只记录训练相关指标），False为评估模式（记录所有指标）
+        """
+        self.training_mode = training
 
     # HTML仪表板生成功能已移动到test.py中用于性能分析
 
