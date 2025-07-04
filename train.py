@@ -1573,7 +1573,15 @@ class UnifiedTrainingSystem:
             update_interval=training_config['update_interval']
         )
 
-        # 6. 基础评估
+        # 6. 保存训练好的模型
+        model_dir = Path(config['logging']['checkpoint_dir']) / 'models'
+        model_dir.mkdir(parents=True, exist_ok=True)
+        model_path = model_dir / f"agent_{config['data']['case_name']}_best.pth"
+
+        agent.save(str(model_path))
+        rich_info(f"模型已保存: {model_path}", show_always=True)
+
+        # 7. 基础评估
         rich_info("开始评估...", show_always=True)
         eval_stats = trainer.evaluate()
 
@@ -1585,7 +1593,8 @@ class UnifiedTrainingSystem:
             'config': config,
             'history': history,
             'eval_stats': eval_stats,
-            'best_reward': trainer.logger.best_reward
+            'best_reward': trainer.logger.best_reward,
+            'model_path': str(model_path)
         }
 
     def _run_parallel_training(self, config: Dict[str, Any]) -> Dict[str, Any]:
@@ -1938,6 +1947,14 @@ class UnifiedTrainingSystem:
                 if episode % config['training']['save_interval'] == 0 and episode > 0:
                     self._save_adaptive_intermediate_results(episode, director, logger)
 
+            # 保存训练好的模型
+            model_dir = Path(config['logging']['checkpoint_dir']) / 'models'
+            model_dir.mkdir(parents=True, exist_ok=True)
+            model_path = model_dir / f"agent_{config['data']['case_name']}_adaptive_best.pth"
+
+            agent.save(str(model_path))
+            print(f"💾 自适应训练模型已保存: {model_path}")
+
             # 训练完成统计
             final_stats = logger.get_statistics()
             director_summary = director.get_status_summary()
@@ -1966,7 +1983,8 @@ class UnifiedTrainingSystem:
                 'training_stats': final_stats,
                 'director_decisions': director_decisions,
                 'stage_transitions': stage_transitions,
-                'director_summary': director_summary
+                'director_summary': director_summary,
+                'model_path': str(model_path)
             }
 
         except Exception as e:
