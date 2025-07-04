@@ -580,7 +580,10 @@ class PowerGridPartitioningEnv:
         else:
             info_bonus = {}
         
-        # 8. 准备返回信息
+        # 8. 【新增】判断是否成功
+        success = self._evaluate_step_success(reward, current_metrics, quality_score, connectivity_score)
+        
+        # 9. 准备返回信息
         observation = self.state_manager.get_observation()
 
         # 添加动作掩码到观察中
@@ -591,6 +594,7 @@ class PowerGridPartitioningEnv:
             'metrics': current_metrics,
             'reward': reward,
             'reward_mode': 'adaptive_quality',
+            'success': success,  # 新增success字段
             **info_bonus
         }
 
@@ -837,3 +841,44 @@ class PowerGridPartitioningEnv:
             partition = self.state_manager.current_partition
 
         return self.reward_function._compute_core_metrics(partition)
+
+    def _evaluate_step_success(self, reward: float, metrics: Dict[str, Any], 
+                              quality_score: float, connectivity_score: float) -> bool:
+        """
+        评估当前步骤是否成功
+        
+        Args:
+            reward: 当前步骤的奖励
+            metrics: 当前指标字典
+            quality_score: 质量分数
+            connectivity_score: 连通性分数
+            
+        Returns:
+            是否成功
+        """
+        try:
+            # 成功标准1: 质量分数和连通性都达到较高水平
+            if quality_score > 0.4 and connectivity_score > 0.9:
+                return True
+            
+            # 成功标准2: 奖励足够好（表明找到了不错的解决方案）
+            if reward > -1.0:
+                return True
+            
+            # 成功标准3: 质量分数单独达到很高水平
+            if quality_score > 0.6:
+                return True
+            
+            # 成功标准4: 连通性完美且质量分数合理
+            if connectivity_score >= 1.0 and quality_score > 0.3:
+                return True
+            
+            # 成功标准5: 奖励有显著改善（相比于很差的基线）
+            if reward > -2.5 and quality_score > 0.2:
+                return True
+                
+            return False
+            
+        except Exception as e:
+            # 如果评估出错，保守地根据奖励判断
+            return reward > -1.5
