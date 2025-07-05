@@ -24,7 +24,7 @@ class SpectralPartitioner(BasePartitioner):
             # 首先尝试使用 METIS 进行分区
             return self._metis_partition(env)
         except Exception as e:
-            print(f"⚠️ METIS 分区失败: {str(e)}，使用谱聚类...")
+            print(f"WARNING: METIS 分区失败: {str(e)}，使用谱聚类...")
             return self._spectral_clustering_partition(env)
     
     def _metis_partition(self, env: 'PowerGridPartitioningEnv') -> np.ndarray:

@@ -308,8 +308,9 @@ class ActionSpace:
             for target_partition in range(self.num_partitions):
                 if advanced_mask[node_idx, target_partition]:
                     action = (node_idx.item(), target_partition + 1)
-                    if not self.mask_handler.apply_connectivity_constraint(
-                        advanced_mask, current_partition, action):
+                    violation_info = self.mask_handler.check_connectivity_violation(
+                        current_partition, action)
+                    if violation_info['violates_connectivity']:
                         advanced_mask[node_idx, target_partition] = False
 
         # 应用拓扑优化约束
@@ -450,17 +451,7 @@ class ActionMask:
             'affected_partition_size': len(current_partition_nodes)
         }
 
-    def apply_connectivity_constraint(self,
-                                    action_mask: torch.Tensor,
-                                    current_partition: torch.Tensor,
-                                    action: Tuple[int, int]) -> bool:
-        """
-        【已弃用】保留用于向后兼容，建议使用 check_connectivity_violation
 
-        检查动作是否保持分区内部连通性
-        """
-        violation_info = self.check_connectivity_violation(current_partition, action)
-        return not violation_info['violates_connectivity']
         
     def apply_topology_optimization(self,
                                   action_mask: torch.Tensor,

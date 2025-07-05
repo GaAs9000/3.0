@@ -111,7 +111,7 @@ def load_power_grid_data(case_name: str) -> Dict:
         try:
             return load_from_pandapower(case_name)
         except Exception as e:
-            print(f"⚠️ PandaPower加载失败: {e}")
+            print(f"PandaPower加载失败: {e}")
             print("🔄 回退到内置数据...")
 
     # 回退到内置的IEEE标准测试系统数据
@@ -177,7 +177,7 @@ def load_from_pandapower(case_name: str) -> Dict:
     Returns:
         MATPOWER格式的电网数据字典
     """
-    print(f"🔌 从PandaPower加载 {case_name.upper()} 数据...")
+    print(f"从PandaPower加载 {case_name.upper()} 数据...")
 
     # 映射案例名称到PandaPower函数
     case_mapping = {
@@ -1383,7 +1383,7 @@ class UnifiedTrainingSystem:
 
     def run_training(self, mode: str = 'fast', **kwargs) -> Dict[str, Any]:
         """运行训练"""
-        print(f"\n🚀 开始{mode.upper()}模式训练")
+        print(f"\n开始{mode.upper()}模式训练")
 
         # 获取模式配置
         configs = self.get_training_configs()
@@ -1406,6 +1406,8 @@ class UnifiedTrainingSystem:
             else:
                 config[key] = value
 
+
+
         # 设置随机种子
         torch.manual_seed(config['system']['seed'])
         np.random.seed(config['system']['seed'])
@@ -1420,7 +1422,7 @@ class UnifiedTrainingSystem:
                 return self._run_standard_training(config)
 
         except Exception as e:
-            print(f"❌ 训练失败: {str(e)}")
+            print(f"训练失败: {str(e)}")
             import traceback
             traceback.print_exc()
             return {'success': False, 'error': str(e)}
@@ -1576,7 +1578,8 @@ class UnifiedTrainingSystem:
         # 6. 保存训练好的模型
         model_dir = Path(config['logging']['checkpoint_dir']) / 'models'
         model_dir.mkdir(parents=True, exist_ok=True)
-        model_path = model_dir / f"agent_{config['data']['case_name']}_best.pth"
+        timestamp = time.strftime('%Y%m%d_%H%M%S')
+        model_path = model_dir / f"agent_{config['data']['case_name']}_{timestamp}_best.pth"
 
         agent.save(str(model_path))
         rich_info(f"模型已保存: {model_path}", show_always=True)
@@ -1726,7 +1729,7 @@ class UnifiedTrainingSystem:
 
     def _run_adaptive_curriculum_training(self, config: Dict[str, Any]) -> Dict[str, Any]:
         """运行智能自适应课程学习训练"""
-        print("🧠 智能自适应课程学习训练模式")
+        print("智能自适应课程学习训练模式")
         print("=" * 60)
 
         try:
@@ -1738,7 +1741,7 @@ class UnifiedTrainingSystem:
 
             # 初始化智能导演
             director = AdaptiveDirector(config, base_mode)
-            print(f"✅ 智能导演系统已初始化 (基础模式: {base_mode})")
+            print(f"智能导演系统已初始化 (基础模式: {base_mode})")
 
             # 运行自适应训练
             result = self._run_adaptive_training_with_director(config, director)
@@ -1756,7 +1759,7 @@ class UnifiedTrainingSystem:
             print("🔄 回退到传统课程学习模式")
             return self._run_traditional_curriculum_training(config)
         except Exception as e:
-            print(f"❌ 智能自适应课程学习失败: {e}")
+            print(f"智能自适应课程学习失败: {e}")
             import traceback
             traceback.print_exc()
             return {'success': False, 'error': str(e), 'mode': 'adaptive_curriculum'}
@@ -1777,10 +1780,10 @@ class UnifiedTrainingSystem:
 
     def _run_adaptive_training_with_director(self, config: Dict[str, Any], director) -> Dict[str, Any]:
         """使用智能导演运行自适应训练"""
-        print("\n🎬 启动智能导演训练流程...")
+        print("\n启动智能导演训练流程...")
 
         # 1. 环境和智能体初始化
-        print("\n1️⃣ 初始化环境和智能体...")
+        print("\n1. 初始化环境和智能体...")
         mpc = load_power_grid_data(config['data']['case_name'])
 
         # 创建环境（使用场景生成）
@@ -1829,7 +1832,7 @@ class UnifiedTrainingSystem:
         )
 
         # 2. 智能自适应训练循环
-        print("\n2️⃣ 开始智能自适应训练...")
+        print("\n2. 开始智能自适应训练...")
         num_episodes = config['training']['num_episodes']
         max_steps_per_episode = config['training']['max_steps_per_episode']
         update_interval = config['training']['update_interval']
@@ -1950,7 +1953,8 @@ class UnifiedTrainingSystem:
             # 保存训练好的模型
             model_dir = Path(config['logging']['checkpoint_dir']) / 'models'
             model_dir.mkdir(parents=True, exist_ok=True)
-            model_path = model_dir / f"agent_{config['data']['case_name']}_adaptive_best.pth"
+            timestamp = time.strftime('%Y%m%d_%H%M%S')
+            model_path = model_dir / f"agent_{config['data']['case_name']}_adaptive_{timestamp}_best.pth"
 
             agent.save(str(model_path))
             print(f"💾 自适应训练模型已保存: {model_path}")
@@ -2169,7 +2173,7 @@ def main():
                 print(f"📊 评估结果: 平均奖励 {eval_stats.get('avg_reward', 0):.4f}, "
                       f"成功率 {eval_stats.get('success_rate', 0):.3f}")
         else:
-            print(f"\n❌ 训练失败: {results.get('error', '未知错误')}")
+            print(f"\n训练失败: {results.get('error', '未知错误')}")
             return 1
 
     except Exception as e:

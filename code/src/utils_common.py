@@ -18,6 +18,7 @@ def safe_rich_debug(message: str, category: str = None):
         else:
             rich_debug(message)
     except ImportError:
+        # 静默处理，rich_output模块不可用时不输出调试信息
         pass
 
 def safe_rich_warning(message: str):
@@ -31,7 +32,7 @@ def safe_rich_warning(message: str):
         from code.src.rich_output import rich_warning
         rich_warning(message)
     except ImportError:
-        print(f"⚠️ {message}")
+        print(f"WARNING: {message}")
 
 def safe_rich_error(message: str):
     """
@@ -44,7 +45,7 @@ def safe_rich_error(message: str):
         from code.src.rich_output import rich_error
         rich_error(message)
     except ImportError:
-        print(f"❌ {message}")
+        print(f"ERROR: {message}")
 
 def safe_rich_success(message: str):
     """

@@ -75,7 +75,7 @@ def install_pytorch_geometric_deps():
         if not check_package(pkg):
             cmd = f"pip install {pkg} -f {wheel_url}"
             if not run_command(cmd, f"安装{pkg}"):
-                print(f"⚠️  {pkg}安装失败，尝试使用conda安装")
+                print(f"WARNING: {pkg}安装失败，尝试使用conda安装")
                 conda_cmd = f"conda install pyg::{pkg} -c pyg -y"
                 run_command(conda_cmd, f"通过conda安装{pkg}")
 
@@ -132,19 +132,19 @@ def main():
         run_command("pip install -r requirements.txt", "安装requirements.txt中的包")
     
     # 2. 安装PyTorch Geometric依赖
-    print("\n2️⃣ 安装PyTorch Geometric依赖...")
+    print("\n2. 安装PyTorch Geometric依赖...")
     install_pytorch_geometric_deps()
-    
+
     # 3. 安装关键包
-    print("\n3️⃣ 安装关键包...")
+    print("\n3. 安装关键包...")
     install_critical_packages()
-    
+
     # 4. 可选包安装
-    print("\n4️⃣ 可选包安装...")
+    print("\n4. 可选包安装...")
     install_optional_packages()
-    
+
     # 5. 验证安装
-    print("\n5️⃣ 验证安装...")
+    print("\n5. 验证安装...")
     verification_packages = [
         'torch', 'torch_geometric', 'stable_baselines3', 
         'gymnasium', 'numpy', 'matplotlib', 'networkx',
@@ -154,9 +154,9 @@ def main():
     failed_packages = []
     for pkg in verification_packages:
         if check_package(pkg):
-            print(f"✅ {pkg}")
+            print(f"OK: {pkg}")
         else:
-            print(f"❌ {pkg}")
+            print(f"FAILED: {pkg}")
             failed_packages.append(pkg)
     
     if failed_packages:

@@ -8,7 +8,7 @@ from typing import Optional, List, Dict, Tuple, Union, Any
 import numpy as np
 import warnings
 
-# 存储捕获到的注意力权重的全局列表（或类属性）
+# 存储捕获到的注意力权重的全局列表
 captured_attention_weights = []
 
 def attention_hook(module, input, output):
@@ -398,7 +398,7 @@ class HeteroGraphEncoder(nn.Module):
             if isinstance(module, PhysicsGATv2Conv):
                 if hasattr(module, '_alpha') and module._alpha is not None:
                     if show_attention_collection and not only_show_errors:
-                        print(f"  📍 发现PhysicsGATv2Conv模块: {prefix}")
+                        print(f"  发现PhysicsGATv2Conv模块: {prefix}")
                         print(f"     注意力权重形状: {module._alpha.shape}")
 
                     # 从模块名称推断边类型
@@ -406,17 +406,17 @@ class HeteroGraphEncoder(nn.Module):
                     if edge_type_key:
                         attention_weights[edge_type_key] = module._alpha
                         if show_attention_collection and not only_show_errors:
-                            print(f"     ✅ 映射到边类型: {edge_type_key}")
+                            print(f"     映射到边类型: {edge_type_key}")
                     else:
                         if show_attention_collection and not only_show_errors:
-                            print(f"     ⚠️ 无法映射边类型，模块名: {prefix}")
+                            print(f"     WARNING: 无法映射边类型，模块名: {prefix}")
                         # 使用模块名作为备用键
                         fallback_key = f"module_{prefix.replace('.', '_')}"
                         attention_weights[fallback_key] = module._alpha
                         if show_attention_collection and not only_show_errors:
-                            print(f"     🔄 使用备用键: {fallback_key}")
+                            print(f"     使用备用键: {fallback_key}")
                 elif show_attention_collection and not only_show_errors:
-                    print(f"  📍 发现PhysicsGATv2Conv模块但无注意力权重: {prefix}")
+                    print(f"  发现PhysicsGATv2Conv模块但无注意力权重: {prefix}")
 
             # 递归检查子模块
             for name, child in module.named_children():
@@ -428,7 +428,7 @@ class HeteroGraphEncoder(nn.Module):
             collect_attention_weights_with_names(self.hetero_encoder)
 
         if show_attention_collection and not only_show_errors:
-            print(f"🎯 收集到 {len(attention_weights)} 个注意力权重:")
+            print(f"收集到 {len(attention_weights)} 个注意力权重:")
             for key, tensor in attention_weights.items():
                 print(f"   - {key}: {tensor.shape}")
 
@@ -497,30 +497,7 @@ class HeteroGraphEncoder(nn.Module):
         safe_rich_debug("无法提取边类型", "attention")
         return None
 
-    def get_attention_weights_legacy(self) -> List[torch.Tensor]:
-        """
-        获取注意力权重用于可视化分析（旧版本接口）
 
-        注意：to_hetero转换后，模型结构会发生变化，需要递归搜索所有模块
-        """
-        attention_weights = []
-
-        def collect_attention_weights(module):
-            """递归收集注意力权重"""
-            # 检查当前模块是否是PhysicsGATv2Conv
-            if isinstance(module, PhysicsGATv2Conv):
-                if hasattr(module, '_alpha') and module._alpha is not None:
-                    attention_weights.append(module._alpha)
-
-            # 递归检查子模块
-            for child in module.children():
-                collect_attention_weights(child)
-
-        # 从hetero_encoder开始递归搜索
-        if hasattr(self, 'hetero_encoder'):
-            collect_attention_weights(self.hetero_encoder)
-
-        return attention_weights
 
     def get_embedding_dim(self) -> int:
         """

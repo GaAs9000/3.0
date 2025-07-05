@@ -322,35 +322,25 @@ comparison = analyzer.compare_experiments(
 ### 配置管理
 
 ```python
-# 配置加载
-from code.src.utils.config import load_config, save_config
+# 配置加载 - 使用YAML直接加载
+import yaml
 
-config = load_config('config.yaml')
-save_config(config, 'modified_config.yaml')
+with open('config.yaml', 'r') as f:
+    config = yaml.safe_load(f)
 
-# 配置验证
-from code.src.utils.config import validate_config
-
-is_valid, errors = validate_config(config)
+# 配置保存
+with open('modified_config.yaml', 'w') as f:
+    yaml.dump(config, f)
 ```
 
 ### 模型评估
 
 ```python
-# 模型评估器
-from code.src.utils.evaluator import ModelEvaluator
+# 使用训练系统进行评估
+from train import UnifiedTrainingSystem
 
-evaluator = ModelEvaluator()
-
-# 跨网络评估
-results = evaluator.evaluate_cross_network(
-    model_path='models/best_model.pth',
-    test_cases=['ieee14', 'ieee30', 'ieee57'],
-    num_episodes=10
-)
-
-# 生成评估报告
-report = evaluator.generate_evaluation_report(results)
+training_system = UnifiedTrainingSystem()
+# 评估功能通过test.py模块提供
 ```
 
 ## 🚀 快速开始示例

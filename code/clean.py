@@ -273,31 +273,31 @@ class CacheManager:
 
     def clean_all_cache(self, confirm: bool = True):
         """清理所有缓存"""
-        print("🚀 开始全面清理缓存...")
-        
+        print("开始全面清理缓存...")
+
         # 首先终止TensorBoard进程
         self.kill_tensorboard_processes()
-        
+
         # 扫描缓存
         cache_info = self.scan_cache_usage()
-        
+
         if confirm:
             self.display_cache_summary(cache_info)
-            response = input("🗑️  确定要清理所有缓存吗? [y/N]: ")
+            response = input("确定要清理所有缓存吗? [y/N]: ")
             if response.lower() not in ['y', 'yes', '是']:
-                print("❌ 取消清理")
+                print("取消清理")
                 return
-        
+
         # 清理每种类型的缓存
         for cache_type in cache_info.keys():
             if cache_info[cache_type]['total_size'] > 0:
                 self.clean_cache_type(cache_type, cache_info, confirm=False)
-        
-        print(f"\n🎉 清理完成! 总共释放了 {self.format_size(self.total_size_cleaned)} 的磁盘空间")
+
+        print(f"\n清理完成! 总共释放了 {self.format_size(self.total_size_cleaned)} 的磁盘空间")
 
     def interactive_cleanup(self):
         """交互式清理模式"""
-        print("🎯 进入交互式清理模式")
+        print("进入交互式清理模式")
         print("您可以选择要清理的缓存类型")
         
         # 首先终止TensorBoard进程
@@ -454,14 +454,14 @@ def main():
             if not cleaned_any:
                 # 如果没有指定任何清理选项，显示帮助
                 cache_manager.display_cache_summary(cache_info)
-                print("\n💡 使用 --help 查看可用选项，或使用 --interactive 进入交互模式")
-                
+                print("\n使用 --help 查看可用选项，或使用 --interactive 进入交互模式")
+
     except KeyboardInterrupt:
-        print("\n\n⚠️  清理操作被用户中断")
+        print("\n\n清理操作被用户中断")
     except Exception as e:
-        print(f"\n❌ 清理过程中发生错误: {e}")
-    
-    print("\n👋 清理工具退出")
+        print(f"\nERROR: 清理过程中发生错误: {e}")
+
+    print("\n清理工具退出")
 
 
 if __name__ == "__main__":

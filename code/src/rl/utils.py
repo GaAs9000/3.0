@@ -657,7 +657,7 @@ class PartitionEvaluator:
 
             # 记录导纳数据来源（用于调试）
             if source != 'extracted':
-                print(f"⚠️ 边类型 {edge_type} 的导纳数据来源: {source}")
+                print(f"WARNING: 边类型 {edge_type} 的导纳数据来源: {source}")
 
         if self.all_edges:
             self.edge_index = torch.cat(self.all_edges, dim=1)

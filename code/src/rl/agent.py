@@ -410,11 +410,11 @@ class PPOAgent:
         self.critic_scheduler = None
 
         if actor_scheduler_config and actor_scheduler_config.get('enabled', False):
-            print("✅ 启用 Actor 学习率调度器")
+            print("启用 Actor 学习率调度器")
             self.actor_scheduler = self._create_scheduler(self.actor_optimizer, actor_scheduler_config)
 
         if critic_scheduler_config and critic_scheduler_config.get('enabled', False):
-            print("✅ 启用 Critic 学习率调度器")
+            print("启用 Critic 学习率调度器")
             self.critic_scheduler = self._create_scheduler(self.critic_optimizer, critic_scheduler_config)
 
         # 内存

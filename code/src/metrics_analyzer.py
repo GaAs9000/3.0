@@ -26,7 +26,7 @@ class MetricsAnalyzer:
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         """
         初始化指标分析器
-        
+
         Args:
             config: 分析配置参数
         """
@@ -34,6 +34,14 @@ class MetricsAnalyzer:
         self.default_window_size = self.config.get('default_window_size', 50)
         self.convergence_threshold = self.config.get('convergence_threshold', 0.1)
         self.stability_threshold = self.config.get('stability_threshold', 0.05)
+
+        # 目标值配置
+        self.cv_target = self.config.get('cv_target', 0.2)
+        self.coupling_target = self.config.get('coupling_target', 0.15)
+
+        # 异常检测配置
+        self.anomaly_sigma_threshold = self.config.get('anomaly_sigma_threshold', 3.0)
+        self.high_severity_sigma = self.config.get('high_severity_sigma', 4.0)
         
     def calculate_convergence_metrics(self, rewards: List[float], 
                                     window_size: Optional[int] = None) -> Dict[str, Any]:
@@ -200,7 +208,7 @@ class MetricsAnalyzer:
                 return self._statistical_anomaly_detection(data)
                 
         except Exception as e:
-            print(f"⚠️ 异常检测失败: {e}")
+            print(f"WARNING: 异常检测失败: {e}")
             return {'anomalies': [], 'anomaly_ratio': 0.0}
     
     def _calculate_rolling_stats(self, data: List[float], window_size: int) -> Dict[str, List[float]]:
@@ -432,12 +440,12 @@ class MetricsAnalyzer:
             'recommendations': self._generate_health_recommendations(cv_values, coupling_ratios)
         }
     
-    def _calculate_target_achievement(self, cv_values: List[float], 
+    def _calculate_target_achievement(self, cv_values: List[float],
                                     coupling_ratios: List[float]) -> Dict[str, Any]:
         """目标达成率计算"""
-        # 设定目标值
-        cv_target = 0.2
-        coupling_target = 0.15
+        # 使用配置的目标值
+        cv_target = self.cv_target
+        coupling_target = self.coupling_target
         
         achievements = {}
         
@@ -621,17 +629,19 @@ class MetricsAnalyzer:
         mean = np.mean(data_array)
         std = np.std(data_array)
         
-        # 使用3σ准则
-        threshold = 3 * std
+        # 使用配置的σ准则
+        threshold = self.anomaly_sigma_threshold * std
+        high_threshold = self.high_severity_sigma * std  # 预计算避免循环中重复计算
         anomalies = []
-        
+
         for i, value in enumerate(data_array):
-            if abs(value - mean) > threshold:
+            deviation = abs(value - mean)
+            if deviation > threshold:
                 anomalies.append({
                     'index': i,
                     'value': value,
-                    'deviation': abs(value - mean),
-                    'severity': 'high' if abs(value - mean) > 4 * std else 'medium'
+                    'deviation': deviation,
+                    'severity': 'high' if deviation > high_threshold else 'medium'
                 })
                 
         return {
