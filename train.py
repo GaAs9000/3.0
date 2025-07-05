@@ -1236,9 +1236,9 @@ class UnifiedTrainingSystem:
                 'num_partitions': 3,
                 'max_steps': 200,
                 'reward_weights': {
-                    'load_balance': 0.4,
-                    'electrical_decoupling': 0.4,
-                    'power_balance': 0.2
+                    'load_b': 0.4,
+                    'decoupling': 0.4,
+                    'power_b': 0.2
                 }
             },
             'gat': {

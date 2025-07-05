@@ -291,8 +291,8 @@ class DataIntegrityManager:
             return self._intelligent_data_completion(hetero_data, validation_report)
 
         elif self.missing_data_policy == 'fallback':
-            # 回退模式：使用备选数据源
-            return self._use_fallback_data(hetero_data, validation_report)
+            # 回退模式：使用智能补全作为备选方案
+            return self._intelligent_data_completion(hetero_data, validation_report)
 
     def _intelligent_data_completion(self, hetero_data, validation_report):
         """
@@ -615,14 +615,14 @@ class RewardFunction:
     def _load_weights(self) -> Dict[str, float]:
         """从配置加载权重参数"""
         default_weights = {
-            # 质量分数权重（替代原有固定阈值）
-            'cv_weight': 0.4,
-            'coupling_weight': 0.3,
-            'power_weight': 0.3,
-            # 保留终局奖励权重以向后兼容
-            'final_balance_weight': 0.4,
-            'final_decoupling_weight': 0.4,
-            'final_power_weight': 0.2,
+            # 质量分数权重（统一命名规范）
+            'load_b': 0.4,
+            'decoupling': 0.3,
+            'power_b': 0.3,
+            # 终局奖励权重（统一命名规范）
+            'final_load_b': 0.4,
+            'final_decoupling': 0.4,
+            'final_power_b': 0.2,
         }
 
         adaptive_quality_config = self.config.get('adaptive_quality', {})
@@ -1161,16 +1161,16 @@ class RewardFunction:
 
             # 加权组合（越小越好的指标）
             composite_badness = (
-                self.weights['cv_weight'] * normalized_cv +
-                self.weights['coupling_weight'] * normalized_coupling +
-                self.weights['power_weight'] * normalized_power
+                self.weights['load_b'] * normalized_cv +
+                self.weights['decoupling'] * normalized_coupling +
+                self.weights['power_b'] * normalized_power
             )
 
             # 归一化到权重总和
             total_weight = (
-                self.weights['cv_weight'] +
-                self.weights['coupling_weight'] +
-                self.weights['power_weight']
+                self.weights['load_b'] +
+                self.weights['decoupling'] +
+                self.weights['power_b']
             )
 
             if total_weight > 0:
@@ -1495,19 +1495,18 @@ class RewardFunction:
 
         # 2. 加权求和得到质量奖励
         quality_reward = (
-            self.weights['final_balance_weight'] * balance_reward +
-            self.weights['final_decoupling_weight'] * decoupling_reward +
-            self.weights['final_power_weight'] * power_reward
+            self.weights['final_load_b'] * balance_reward +
+            self.weights['final_decoupling'] * decoupling_reward +
+            self.weights['final_power_b'] * power_reward
         )
 
-        # 3. 阈值奖励已被自适应质量系统替代，设为0
-        threshold_bonus = 0.0
+        # 3. 阈值奖励已被自适应质量系统替代，不再使用
 
         # 4. 应用终止条件折扣
         termination_discount = self._apply_termination_discount(termination_type)
 
         # 5. 计算最终奖励
-        final_reward = (quality_reward + threshold_bonus) * termination_discount
+        final_reward = quality_reward * termination_discount
 
         # 组件详情
         components = {
@@ -1515,7 +1514,6 @@ class RewardFunction:
             'decoupling_reward': decoupling_reward,
             'power_reward': power_reward,
             'quality_reward': quality_reward,
-            'threshold_bonus': threshold_bonus,
             'termination_discount': termination_discount,
             'final_reward': final_reward,
             'metrics': final_metrics
@@ -1692,14 +1690,7 @@ class RewardFunction:
 
         return power_reward
 
-    def _compute_threshold_bonus(self, metrics: Dict[str, float]) -> float:
-        """
-        计算非线性阈值奖励 (已废弃，被自适应质量系统替代)
 
-        保留此方法仅为向后兼容，实际返回0
-        """
-        # 固定阈值奖励已被自适应质量导向系统替代
-        return 0.0
 
     def _apply_termination_discount(self, termination_type: str) -> float:
         """
@@ -1745,24 +1736,24 @@ class RewardFunction:
         """动态更新奖励权重（用于智能自适应课程学习）"""
         try:
             # 更新即时奖励权重
-            if 'balance_weight' in new_weights:
-                self.weights['balance_weight'] = new_weights['balance_weight']
-            if 'decoupling_weight' in new_weights:
-                self.weights['decoupling_weight'] = new_weights['decoupling_weight']
-            if 'power_weight' in new_weights:
-                self.weights['power_weight'] = new_weights['power_weight']
+            if 'load_b' in new_weights:
+                self.weights['load_b'] = new_weights['load_b']
+            if 'decoupling' in new_weights:
+                self.weights['decoupling'] = new_weights['decoupling']
+            if 'power_b' in new_weights:
+                self.weights['power_b'] = new_weights['power_b']
 
             # 更新终局奖励权重（保持一致性）
-            if 'balance_weight' in new_weights:
-                self.weights['final_balance_weight'] = new_weights['balance_weight']
-            if 'decoupling_weight' in new_weights:
-                self.weights['final_decoupling_weight'] = new_weights['decoupling_weight']
-            if 'power_weight' in new_weights:
-                self.weights['final_power_weight'] = new_weights['power_weight']
+            if 'load_b' in new_weights:
+                self.weights['final_load_b'] = new_weights['load_b']
+            if 'decoupling' in new_weights:
+                self.weights['final_decoupling'] = new_weights['decoupling']
+            if 'power_b' in new_weights:
+                self.weights['final_power_b'] = new_weights['power_b']
 
-            print(f"🎯 奖励权重已更新: balance={self.weights['balance_weight']:.2f}, "
-                  f"decoupling={self.weights['decoupling_weight']:.2f}, "
-                  f"power={self.weights['power_weight']:.2f}")
+            print(f"🎯 奖励权重已更新: load_b={self.weights['load_b']:.2f}, "
+                  f"decoupling={self.weights['decoupling']:.2f}, "
+                  f"power_b={self.weights['power_b']:.2f}")
 
         except Exception as e:
             print(f"⚠️ 更新奖励权重失败: {e}")
@@ -1770,9 +1761,9 @@ class RewardFunction:
     def get_current_weights(self) -> Dict[str, float]:
         """获取当前奖励权重"""
         return {
-            'balance_weight': self.weights.get('balance_weight', 1.0),
-            'decoupling_weight': self.weights.get('decoupling_weight', 1.0),
-            'power_weight': self.weights.get('power_weight', 1.0)
+            'load_b': self.weights.get('load_b', 1.0),
+            'decoupling': self.weights.get('decoupling', 1.0),
+            'power_b': self.weights.get('power_b', 1.0)
         }
 
 

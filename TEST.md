@@ -236,7 +236,7 @@ def calculate_new_metric(partition: np.ndarray, additional_data) -> float:
 'metrics_weights': {
     'inter_region_balance': 0.3,
     'intra_region_balance': 0.3,  # 新增指标权重
-    'electrical_decoupling': 0.4
+    'decoupling': 0.4
 }
 ```
 

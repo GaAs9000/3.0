@@ -224,7 +224,6 @@ class IntelligentAdmittanceExtractor:
         admittance = torch.clamp(torch.abs(admittance), 0.8, 4.0)
 
         return admittance
-    warnings.warn("Scikit-learn不可用。使用随机初始化作为回退。")
 
 
 class MetisInitializer:

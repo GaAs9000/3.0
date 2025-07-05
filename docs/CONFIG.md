@@ -147,9 +147,9 @@ attention_config:
 reward_config:
   # 主要奖励组件权重
   weights:
-    balance: 0.4      # 负载平衡权重
+    load_b: 0.4      # 负载平衡权重
     decoupling: 0.4   # 电气解耦权重
-    power: 0.2        # 功率平衡权重
+    power_b: 0.2        # 功率平衡权重
   
   # 势函数参数
   potential_function:

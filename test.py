@@ -24,7 +24,7 @@ from comprehensive_evaluator import ComprehensiveAgentEvaluator
 from evaluation_config import get_evaluation_config, EVALUATION_MODES
 
 
-def run_baseline_comparison(config_path: Optional[str] = None, network: str = 'ieee30', mode: str = 'standard', model_path: Optional[str] = None):
+def run_baseline_comparison(config_path: Optional[str] = None, network: str = 'ieee57', mode: str = 'standard', model_path: Optional[str] = None):
     """运行baseline对比测试"""
     print(f"🔍 启动Baseline对比测试")
     print(f"   测试网络: {network.upper()}")

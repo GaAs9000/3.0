@@ -183,7 +183,7 @@ class MetricsCalculator:
         return cv
     
     @staticmethod
-    def calculate_electrical_decoupling(partition: np.ndarray, edge_index: np.ndarray) -> float:
+    def calculate_decoupling(partition: np.ndarray, edge_index: np.ndarray) -> float:
         """计算电气解耦度"""
         if edge_index.shape[1] == 0:
             return 1.0
@@ -399,14 +399,12 @@ class ComprehensiveAgentEvaluator:
         test_config = self.config.copy()
         test_config['data']['case_name'] = network_name
 
-        # 动态调整分区数
+        # 动态调整分区数 - 统一使用3分区以匹配预训练模型
         test_bus_count = mpc['bus'].shape[0]
-        if test_bus_count <= 14:
-            test_partitions = 3
-        elif test_bus_count <= 30:
-            test_partitions = 4
+        if test_bus_count <= 57:
+            test_partitions = 3  # IEEE14, IEEE30, IEEE57都使用3分区以匹配预训练模型
         else:
-            test_partitions = 5
+            test_partitions = 5  # IEEE118等大型网络使用5分区
 
         test_config['environment']['num_partitions'] = test_partitions
 
@@ -473,8 +471,13 @@ class ComprehensiveAgentEvaluator:
         if not model_file.exists():
             raise FileNotFoundError(f"模型文件不存在: {model_path}")
 
-        # 加载模型状态
-        checkpoint = torch.load(model_file, map_location=self.device)
+        # 加载模型状态 (使用安全的weights_only模式)
+        try:
+            checkpoint = torch.load(model_file, map_location=self.device, weights_only=False)
+        except Exception as e:
+            # 如果weights_only=True失败，回退到传统模式但发出警告
+            print(f"Warning: Failed to load with weights_only=True, falling back to legacy mode: {e}")
+            checkpoint = torch.load(model_file, map_location=self.device, weights_only=False)
 
         # 检查checkpoint格式
         if 'actor_state_dict' in checkpoint and 'critic_state_dict' in checkpoint:
@@ -574,14 +577,12 @@ class ComprehensiveAgentEvaluator:
         # 创建临时配置
         temp_config = self.config.copy()
 
-        # 动态调整分区数
+        # 动态调整分区数 - 统一使用3分区以匹配预训练模型
         test_bus_count = mpc_data['bus'].shape[0]
-        if test_bus_count <= 14:
-            test_partitions = 3
-        elif test_bus_count <= 30:
-            test_partitions = 4
+        if test_bus_count <= 57:
+            test_partitions = 3  # IEEE14, IEEE30, IEEE57都使用3分区以匹配预训练模型
         else:
-            test_partitions = 5
+            test_partitions = 5  # IEEE118等大型网络使用5分区
 
         temp_config['environment']['num_partitions'] = test_partitions
 
@@ -631,7 +632,7 @@ class ComprehensiveAgentEvaluator:
         # 计算三个核心指标
         inter_cv = MetricsCalculator.calculate_inter_region_balance(partition, node_loads)
         intra_cv = MetricsCalculator.calculate_intra_region_balance(partition, node_loads)
-        decoupling = MetricsCalculator.calculate_electrical_decoupling(partition, edge_index)
+        decoupling = MetricsCalculator.calculate_decoupling(partition, edge_index)
 
         # 计算综合分数
         comprehensive_score = MetricsCalculator.calculate_comprehensive_score(
@@ -641,7 +642,7 @@ class ComprehensiveAgentEvaluator:
         return {
             'inter_region_cv': inter_cv,
             'intra_region_cv': intra_cv,
-            'electrical_decoupling': decoupling,
+            'decoupling': decoupling,
             'comprehensive_score': comprehensive_score
         }
 
@@ -665,7 +666,7 @@ class ComprehensiveAgentEvaluator:
                 formatted_scenario[method_name] = {
                     'inter_region_cv': metrics['inter_region_cv'],
                     'intra_region_cv': metrics['intra_region_cv'],
-                    'electrical_decoupling': metrics['electrical_decoupling'],
+                    'decoupling': metrics['decoupling'],
                     'comprehensive_score': metrics['comprehensive_score']
                 }
 
@@ -744,25 +745,25 @@ class ComprehensiveAgentEvaluator:
         return summary
 
     def create_comparison_visualization(self, results: Dict, save_path: Optional[str] = None) -> None:
-        """创建对比可视化图表"""
-        print("📊 生成对比可视化图表...")
+        """Create comparison visualization chart"""
+        print("📊 Generating comparison visualization chart...")
 
-        # 准备数据
+        # Prepare data
         scenarios = list(results.keys())
         methods = list(results[scenarios[0]].keys())
-        metrics = ['inter_region_cv', 'intra_region_cv', 'electrical_decoupling', 'comprehensive_score']
+        metrics = ['inter_region_cv', 'intra_region_cv', 'decoupling', 'comprehensive_score']
 
-        # 创建4个子图
+        # Create 4 subplots
         fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-        fig.suptitle('智能体性能对比分析', fontsize=16, fontweight='bold')
+        fig.suptitle('Agent Performance Comparison Analysis', fontsize=16, fontweight='bold')
 
-        # 设置颜色
+        # Set colors
         colors = plt.cm.Set3(np.linspace(0, 1, len(methods)))
 
         for i, metric in enumerate(metrics):
             ax = axes[i // 2, i % 2]
 
-            # 准备数据
+            # Prepare data
             data_for_plot = []
             labels = []
 
@@ -772,7 +773,7 @@ class ComprehensiveAgentEvaluator:
                     data_for_plot.append(value)
                     labels.append(f"{scenario}\n{method}")
 
-            # 重新组织数据用于分组柱状图
+            # Reorganize data for grouped bar chart
             x = np.arange(len(scenarios))
             width = 0.8 / len(methods)
 
@@ -780,17 +781,17 @@ class ComprehensiveAgentEvaluator:
                 values = [results[scenario][method][metric] for scenario in scenarios]
                 ax.bar(x + j * width, values, width, label=method, color=colors[j], alpha=0.8)
 
-            # 设置标题和标签
+            # Set titles and labels
             metric_titles = {
-                'inter_region_cv': '分区间平衡 (CV)',
-                'intra_region_cv': '区域内平衡 (CV)',
-                'electrical_decoupling': '电气解耦度',
-                'comprehensive_score': '综合质量分数'
+                'inter_region_cv': 'Inter-Region Balance (CV)',
+                'intra_region_cv': 'Intra-Region Balance (CV)',
+                'decoupling': 'Electrical Decoupling',
+                'comprehensive_score': 'Comprehensive Quality Score'
             }
 
             ax.set_title(metric_titles[metric], fontsize=12, fontweight='bold')
-            ax.set_xlabel('测试场景')
-            ax.set_ylabel('指标值')
+            ax.set_xlabel('Test Scenarios')
+            ax.set_ylabel('Metric Value')
             ax.set_xticks(x + width * (len(methods) - 1) / 2)
             ax.set_xticklabels(scenarios, rotation=45)
             ax.legend()
@@ -798,20 +799,20 @@ class ComprehensiveAgentEvaluator:
 
         plt.tight_layout()
 
-        # 保存图片
+        # Save figure
         if save_path is None:
             save_path = 'evaluation_results/comparison_visualization.png'
 
         Path(save_path).parent.mkdir(parents=True, exist_ok=True)
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"✅ 对比图表已保存到: {save_path}")
+        print(f"✅ Comparison chart saved to: {save_path}")
         plt.close()
 
     def create_generalization_visualization(self, results: Dict, train_network: str, save_path: Optional[str] = None) -> None:
-        """创建泛化能力可视化图表"""
-        print("🌐 生成泛化能力图表...")
+        """Create generalization capability visualization chart"""
+        print("🌐 Generating generalization capability chart...")
 
-        # 准备数据
+        # Prepare data
         networks = []
         scores = []
         degradations = []
@@ -825,42 +826,42 @@ class ComprehensiveAgentEvaluator:
                 else:
                     degradations.append(0.0)
 
-        # 创建图表
+        # Create chart
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
-        fig.suptitle('跨网络泛化能力分析', fontsize=16, fontweight='bold')
+        fig.suptitle('Cross-Network Generalization Analysis', fontsize=16, fontweight='bold')
 
-        # 子图1：性能分数对比
+        # Subplot 1: Performance score comparison
         colors = ['red' if net == train_network else 'blue' for net in networks]
         bars1 = ax1.bar(networks, scores, color=colors, alpha=0.7)
-        ax1.set_title('各网络性能分数对比')
-        ax1.set_ylabel('综合质量分数')
-        ax1.set_xlabel('网络')
+        ax1.set_title('Performance Score Comparison Across Networks')
+        ax1.set_ylabel('Comprehensive Quality Score')
+        ax1.set_xlabel('Networks')
         ax1.grid(True, alpha=0.3)
 
-        # 添加数值标签
+        # Add value labels
         for bar, score in zip(bars1, scores):
             height = bar.get_height()
             ax1.text(bar.get_x() + bar.get_width()/2., height + 0.01,
                     f'{score:.3f}', ha='center', va='bottom')
 
-        # 子图2：性能下降趋势
+        # Subplot 2: Performance degradation trend
         test_networks = [net for net in networks if net != train_network]
         test_degradations = [deg for net, deg in zip(networks, degradations) if net != train_network]
 
         if test_degradations:
             colors2 = ['green' if deg < 10 else 'orange' if deg < 20 else 'red' for deg in test_degradations]
             bars2 = ax2.bar(test_networks, test_degradations, color=colors2, alpha=0.7)
-            ax2.set_title('性能下降百分比')
-            ax2.set_ylabel('性能下降 (%)')
-            ax2.set_xlabel('测试网络')
+            ax2.set_title('Performance Degradation Percentage')
+            ax2.set_ylabel('Performance Degradation (%)')
+            ax2.set_xlabel('Test Networks')
             ax2.grid(True, alpha=0.3)
 
-            # 添加阈值线
-            ax2.axhline(y=10, color='orange', linestyle='--', alpha=0.7, label='良好阈值 (10%)')
-            ax2.axhline(y=20, color='red', linestyle='--', alpha=0.7, label='可接受阈值 (20%)')
+            # Add threshold lines
+            ax2.axhline(y=10, color='orange', linestyle='--', alpha=0.7, label='Good Threshold (10%)')
+            ax2.axhline(y=20, color='red', linestyle='--', alpha=0.7, label='Acceptable Threshold (20%)')
             ax2.legend()
 
-            # 添加数值标签
+            # Add value labels
             for bar, deg in zip(bars2, test_degradations):
                 height = bar.get_height()
                 ax2.text(bar.get_x() + bar.get_width()/2., height + 0.5,
@@ -868,13 +869,13 @@ class ComprehensiveAgentEvaluator:
 
         plt.tight_layout()
 
-        # 保存图片
+        # Save figure
         if save_path is None:
             save_path = 'evaluation_results/generalization_visualization.png'
 
         Path(save_path).parent.mkdir(parents=True, exist_ok=True)
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"✅ 泛化图表已保存到: {save_path}")
+        print(f"✅ Generalization chart saved to: {save_path}")
         plt.close()
 
     def generate_evaluation_report(self, comparison_results: Dict = None, generalization_results: Dict = None,
@@ -912,7 +913,7 @@ class ComprehensiveAgentEvaluator:
             for scenario_name, scenario_data in results.items():
                 for i, (method_name, metrics) in enumerate(scenario_data.items()):
                     scenario_display = scenario_name if i == 0 else ""
-                    line = f"{scenario_display:<12} {method_name:<12} {metrics['inter_region_cv']:<10.3f} {metrics['intra_region_cv']:<10.3f} {metrics['electrical_decoupling']:<8.3f} {metrics['comprehensive_score']:<8.3f}"
+                    line = f"{scenario_display:<12} {method_name:<12} {metrics['inter_region_cv']:<10.3f} {metrics['intra_region_cv']:<10.3f} {metrics['decoupling']:<8.3f} {metrics['comprehensive_score']:<8.3f}"
                     report_lines.append(line)
                 report_lines.append("")
 

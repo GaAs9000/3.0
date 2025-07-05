@@ -48,7 +48,7 @@ EVALUATION_CONFIG = {
     'metrics_weights': {
         'inter_region_balance': 0.3,  # 分区间平衡权重
         'intra_region_balance': 0.3,  # 区域内平衡权重（新增）
-        'electrical_decoupling': 0.4  # 电气解耦权重
+        'decoupling': 0.4  # 电气解耦权重
     },
     
     # 性能阈值配置
@@ -106,12 +106,12 @@ NETWORK_CONFIGS = {
         'complexity_level': 'low'
     },
     'ieee30': {
-        'num_partitions': 4,
+        'num_partitions': 3,  # 修改为3分区以匹配预训练模型
         'expected_nodes': 30,
         'complexity_level': 'medium'
     },
     'ieee57': {
-        'num_partitions': 5,
+        'num_partitions': 3,  # 修改为3分区以匹配预训练模型
         'expected_nodes': 57,
         'complexity_level': 'medium'
     },
@@ -138,7 +138,7 @@ METRICS_DEFINITIONS = {
         'optimal_range': [0.0, 0.5],
         'display_format': '.3f'
     },
-    'electrical_decoupling': {
+    'decoupling': {
         'name': '电气解耦度',
         'description': '分区内部边占总边数的比例，越大越好',
         'unit': '比例',

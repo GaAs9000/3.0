@@ -250,9 +250,9 @@ adaptive_quality:
 
   # 质量分数权重(替代原有固定阈值)
   quality_weights:
-    cv_weight: 0.4
-    coupling_weight: 0.3
-    power_weight: 0.3
+    load_b: 0.4
+    decoupling: 0.3
+    power_b: 0.3
 ```
 
 ### 移除的配置
@@ -284,9 +284,9 @@ adaptive_quality:
     lambda: 0.5
     early_stop_confidence: 0.85
   quality_weights:
-    cv_weight: 0.4
-    coupling_weight: 0.3
-    power_weight: 0.3
+    load_b: 0.4
+    decoupling: 0.3
+    power_b: 0.3
 ```
 
 ### 2. 环境集成

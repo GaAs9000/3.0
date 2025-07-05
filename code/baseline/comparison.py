@@ -114,7 +114,7 @@ def run_baseline_comparison(env, agent, seed: int = 42):
         'total_coupling': -0.25,
         'connectivity': 0.2,
         'modularity': 0.15,
-        'power_balance': -0.1
+        'power_b': -0.1
     }
 
     scores = []

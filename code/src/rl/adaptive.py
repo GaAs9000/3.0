@@ -51,9 +51,9 @@ class ParameterEvolutionConfig:
     """参数演化配置"""
     connectivity_penalty_range: Tuple[float, float] = (0.1, 1.5)
     action_mask_relaxation_range: Tuple[float, float] = (0.0, 0.7)
-    balance_weight_range: Tuple[float, float] = (0.6, 0.8)
-    decoupling_weight_range: Tuple[float, float] = (0.2, 0.6)
-    power_weight_range: Tuple[float, float] = (0.0, 0.3)
+    load_b_range: Tuple[float, float] = (0.6, 0.8)
+    decoupling_range: Tuple[float, float] = (0.2, 0.6)
+    power_b_range: Tuple[float, float] = (0.0, 0.3)
     learning_rate_decay_factor: float = 0.1
 
 
@@ -198,9 +198,9 @@ class ParameterScheduler:
             'connectivity_penalty': 0.05,
             'action_mask_relaxation': 0.7,
             'reward_weights': {
-                'balance_weight': 0.8,
-                'decoupling_weight': 0.2,
-                'power_weight': 0.0
+                'load_b': 0.8,
+                'decoupling': 0.2,
+                'power_b': 0.0
             },
             'learning_rate_factor': 1.0,
             'stage_name': 'exploration'
@@ -211,17 +211,17 @@ class ParameterScheduler:
         # 平滑插值
         connectivity_penalty = 0.1 + 1.4 * progress
         action_mask_relaxation = 0.7 * (1 - progress)
-        balance_weight = 0.8 - 0.2 * progress
-        decoupling_weight = 0.2 + 0.4 * progress
-        power_weight = 0.3 * progress
-        
+        load_b_weight = 0.8 - 0.2 * progress
+        decoupling_weight_val = 0.2 + 0.4 * progress
+        power_b_weight = 0.3 * progress
+
         return {
             'connectivity_penalty': connectivity_penalty,
             'action_mask_relaxation': action_mask_relaxation,
             'reward_weights': {
-                'balance_weight': balance_weight,
-                'decoupling_weight': decoupling_weight,
-                'power_weight': power_weight
+                'load_b': load_b_weight,
+                'decoupling': decoupling_weight_val,
+                'power_b': power_b_weight
             },
             'learning_rate_factor': 1.0,
             'stage_name': 'transition'
@@ -233,9 +233,9 @@ class ParameterScheduler:
             'connectivity_penalty': 1.5,
             'action_mask_relaxation': 0.0,
             'reward_weights': {
-                'balance_weight': 0.6,
-                'decoupling_weight': 0.6,
-                'power_weight': 0.3
+                'load_b': 0.6,
+                'decoupling': 0.6,
+                'power_b': 0.3
             },
             'learning_rate_factor': 0.5,
             'stage_name': 'refinement'
@@ -244,14 +244,14 @@ class ParameterScheduler:
     def _stage4_params(self, progress: float) -> Dict[str, Any]:
         """阶段4：微调期 - 学习率退火"""
         lr_decay = self.config.learning_rate_decay_factor * (1 - progress * 0.5)
-        
+
         return {
             'connectivity_penalty': 1.5,
             'action_mask_relaxation': 0.0,
             'reward_weights': {
-                'balance_weight': 0.6,
-                'decoupling_weight': 0.6,
-                'power_weight': 0.3
+                'load_b': 0.6,
+                'decoupling': 0.6,
+                'power_b': 0.3
             },
             'learning_rate_factor': lr_decay,
             'stage_name': 'fine_tuning'
@@ -344,9 +344,9 @@ class SafetyMonitor:
             'connectivity_penalty': 0.01,
             'action_mask_relaxation': 0.9,
             'reward_weights': {
-                'balance_weight': 1.0,
-                'decoupling_weight': 0.1,
-                'power_weight': 0.0
+                'load_b': 1.0,
+                'decoupling': 0.1,
+                'power_b': 0.0
             },
             'learning_rate_factor': 0.1,
             'stage_name': 'emergency_recovery'
@@ -557,7 +557,7 @@ class AdaptiveDirector:
 
     def _check_stage3_to_4_transition(self, performance: Dict[str, float]) -> bool:
         """检查阶段3到阶段4的转换条件"""
-        # 简单条件：在阶段3停留足够长时间且性能稳定
+        # 基于时间和性能稳定性的转换条件
         episodes_in_stage3 = self.episode_count - self.parameter_scheduler.stage_start_episode
 
         if episodes_in_stage3 >= 300:  # 在阶段3至少300个episodes

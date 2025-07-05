@@ -34,9 +34,9 @@ environment:
   num_partitions: 3
   max_steps: 200
   reward_weights:
-    load_balance: 0.4
-    electrical_decoupling: 0.4
-    power_balance: 0.2
+    load_b: 0.4
+    decoupling: 0.4
+    power_b: 0.2
 
 # GAT编码器配置
 gat:
@@ -99,9 +99,9 @@ adaptive_curriculum:
   parameter_evolution:
     connectivity_penalty_range: [0.1, 1.5]
     action_mask_relaxation_range: [0.0, 0.7]
-    balance_weight_range: [0.6, 0.8]
-    decoupling_weight_range: [0.2, 0.6]
-    power_weight_range: [0.0, 0.3]
+    load_b_range: [0.6, 0.8]
+    decoupling_range: [0.2, 0.6]
+    power_b_range: [0.0, 0.3]
     learning_rate_decay_factor: 0.1
   safety_monitoring:
     min_episode_length: 1

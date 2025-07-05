@@ -32,7 +32,7 @@ def evaluate_partition_method(env: 'PowerGridPartitioningEnv', partition: np.nda
             'total_coupling': metrics.get('coupling_ratio', 0.0),
             'inter_region_lines': int(metrics.get('coupling_ratio', 0.0) * metrics.get('total_edges', 100)),
             'connectivity': metrics.get('connectivity', 1.0),
-            'power_balance': metrics.get('power_imbalance_normalized', 0.0),
+            'power_b': metrics.get('power_imbalance_normalized', 0.0),
             'modularity': metrics.get('modularity', 0.0)  # 如果新系统没有，保持默认值
         }
     else:
@@ -45,6 +45,6 @@ def evaluate_partition_method(env: 'PowerGridPartitioningEnv', partition: np.nda
             'total_coupling': metrics.get('total_coupling', 0.0),
             'inter_region_lines': metrics.get('coupling_edges', 0),
             'connectivity': metrics.get('connectivity', 1.0),
-            'power_balance': metrics.get('power_imbalance_mean', 0.0),
+            'power_b': metrics.get('power_imbalance_mean', 0.0),
             'modularity': metrics.get('modularity', 0.0)
         }

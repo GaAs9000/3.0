@@ -269,9 +269,9 @@ quality_score = (1 - CV_norm) × (1 - coupling_norm) × (1 - power_norm)
 ```yaml
 reward:
   weights:
-    final_balance_weight: 1.0    # 影响balance_reward的重要性
-    final_decoupling_weight: 1.0 # 影响decoupling_reward的重要性
-    final_power_weight: 1.0      # 影响power_reward的重要性
+    final_load_b: 1.0    # 影响balance_reward的重要性
+    final_decoupling: 1.0 # 影响decoupling_reward的重要性
+    final_power_b: 1.0      # 影响power_reward的重要性
 ```
 
 ### 自适应质量配置
