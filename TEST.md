@@ -1,251 +1,115 @@
-# 智能体综合评估系统使用文档
+# 电力网络分区智能体评估说明（test.md）
 
-## 概述
+> 本文档汇总了 **evaluation_results** 中各项指标的含义、计算公式与测试流程，方便项目成员或第三方快速理解评估体系。
 
-本评估系统为电力网络分区强化学习智能体提供全面的性能评估，包含baseline方法对比、跨网络泛化测试和自动化报告生成。
+---
 
-## 核心功能
+## 1. 测试框架概览
 
-### 1. 评估指标
-- **分区间平衡度** (Inter-region CV): 各分区总负载的变异系数
-- **区域内平衡度** (Intra-region CV): 各分区内部节点负载的平均变异系数 ⭐ **新增核心指标**
-- **电气解耦度** (Electrical Decoupling): 分区内部边占总边数的比例
-- **综合质量分数**: 基于三个核心指标的加权综合分数
+1. **运行脚本**：`python test.py`，支持三种模式
+   - `--baseline`    只在指定网络上与 Baseline 方法对比。
+   - `--generalization`   训练–测试跨网络泛化能力评估。
+   - `--comprehensive`   先基线对比再泛化测试，生成完整报告。
+2. **本次示例**执行了 `--baseline`，载入预训练模型 `agent_ieee57_adaptive_best.pth`，在同一张 **IEEE-57** 网络的 4 个场景下测试：
+   - *normal*（正常负荷）
+   - *high_load*（高负荷）
+   - *unbalanced*（节点负荷失衡）
+   - *fault*（线路故障）
+3. **对比对象**
+   - `my_agent`          强化学习智能体（PPO）
+   - `random`            随机分区
+   - `degree_based`     基于度数启发式
+   - `spectral`         谱聚类（Laplacian）
+4. **重复实验**：默认每个场景运行 10 次，取平均值后再比较。
+5. **输出**
+   - 图表：`evaluation_results/comparison_visualization.png`
+   - 报告：`evaluation_results/evaluation_report.txt`
 
-### 2. Baseline方法
-- **随机分区** (Random): 随机分配节点到各分区
-- **度中心性分区** (Degree-based): 基于节点度数进行分区
-- **谱聚类分区** (Spectral): 使用图的拉普拉斯矩阵特征向量
+---
 
-### 3. 测试场景
-- **正常场景** (Normal): 原始负载数据
-- **高负载场景** (High Load): 所有负载×1.5，模拟高峰期
-- **不平衡场景** (Unbalanced): 随机30%节点负载×2，其他×0.8
-- **故障场景** (Fault): 移除度数最高的1条边，模拟N-1故障
+## 2. 核心指标
 
-## 快速开始
+| 指标简称 | 原始符号 (Raw) | 物理 / 数学意义 | 期望方向 | 计算公式 |
+|---------|---------------|----------------|---------|----------|
+| 负载平衡度 | `load_b` (=CV) | 各分区总负荷的变异系数 (Coefficient of Variation) | 越小越好 | \[ \operatorname{CV}=\frac{\sigma_{P}}{\mu_{P}} \]
+| 电气耦合率 | `decoupling` (coupling ratio) | 跨分区线路数占比 | 越小越好 | \[ r_{\text{coup}} = \frac{\#\text{cross-edges}}{\#\text{total edges}} \]
+| 功率不平衡 | `power_b` | 分区内发–负荷偏差的归一化绝对和 | 越小越好 | \[ r_{\text{imb}} = \frac{\sum_{k}|P^{\text{gen}}_k-P^{\text{load}}_k|}{\sum_{i}|P^{\text{load}}_i|} \]
 
-### 1. 查看可用模式
-```bash
-python test.py --list-modes
-```
+> 以上原始指标“越小越好”，不利于直观比较，故统一映射为 **Score**（越大越好）。
 
-### 2. 快速Baseline对比测试
-```bash
-# 在IEEE14网络上进行快速对比测试
-python test.py --baseline --network ieee14 --mode quick
+### 2.1 指标映射 (Raw → Score)
 
-# 在IEEE30网络上进行标准对比测试
-python test.py --baseline --network ieee30 --mode standard
+| Score 名称 | 映射公式 | 取值范围 |
+|------------|---------|-----------|
+| `load_b_score` | \[ S_{\text{load}} = \frac{1}{1+\text{CV}} \] | (0, 1] |
+| `decoupling_score` | \[ S_{\text{dec}} = 1- r_{\text{coup}} \] | [0, 1] |
+| `power_b_score` | \[ S_{\text{pow}} = \frac{1}{1+r_{\text{imb}}} \] | (0, 1] |
 
-# 使用预训练模型进行测试（推荐）
-python test.py --baseline --network ieee30 --mode quick --model data/checkpoints/models/agent_ieee57_adaptive_best.pth
-```
+### 2.2 综合质量分数
 
-### 3. 泛化能力测试
-```bash
-# 在IEEE14上训练，测试在其他网络的泛化能力
-python test.py --generalization --train-network ieee14 --mode quick
+采用加权平均：
 
-# 更全面的泛化测试
-python test.py --generalization --train-network ieee14 --mode standard
+\[
+Q = w_{\text{load}}\,S_{\text{load}} + w_{\text{dec}}\,S_{\text{dec}} + w_{\text{pow}}\,S_{\text{pow}}, \quad \sum w_i =1
+\]
 
-# 使用预训练模型进行泛化测试（推荐）
-python test.py --generalization --train-network ieee14 --mode quick --model data/checkpoints/models/agent_ieee57_adaptive_best.pth
-```
+> 默认权重 `w = {0.4, 0.4, 0.2}`，可在 `evaluation_config['metrics_weights_v2']` 中调整。
 
-### 4. 完整评估
-```bash
-# 运行完整评估（包含baseline对比和泛化测试）
-python test.py --comprehensive --mode standard
+---
 
-# 最全面的评估
-python test.py --comprehensive --mode comprehensive
+## 3. 场景生成与实验流程
 
-# 使用预训练模型进行完整评估（推荐）
-python test.py --comprehensive --mode standard --model data/checkpoints/models/agent_ieee57_adaptive_best.pth
-```
+1. **场景生成**：`ScenarioGenerator.generate_test_scenarios()` 基于原始 MPC 数据动态构造 *high_load / unbalanced / fault* 版本：
+   - **高负荷**：将所有负荷放大 50 %。
+   - **失衡**：随机挑选 30 % 节点，将其负荷放大 80 %，其余缩小 20 %。
+   - **故障**：删除一条关键线路造成拓扑缺口。
+2. **环境初始化**：统一使用 3 分区（57 及以下节点）或 5 分区（>57 节点），保证与预训练模型结构匹配。
+3. **智能体评估**：在 `PowerGridPartitioningEnv` 中执行最多 200 步操作；终局分区经 `RewardFunction.get_current_metrics()` 产出 Raw 指标。
+4. **Baseline 评估**：直接调用分区算法得到静态结果，无 RL 迭代。
+5. **结果聚合**：对每个场景-方法取 10 次平均，保存 Raw + Score + Q。
+6. **可视化**：
+   - **上排 4 图**：三个 Score + Q，Y 轴“↑ Better”。
+   - **下排 3 图**：对应 Raw 指标，Y 轴“↓ Better”。
 
-## 评估模式说明
+---
 
-### Quick模式 (快速评估)
-- **Baseline对比**: 2个网络, 2种场景, 每个5次运行
-- **泛化测试**: 1个测试网络, 每个10次运行
-- **适用场景**: 快速验证、调试测试
-
-### Standard模式 (标准评估)
-- **Baseline对比**: 3个网络, 3种场景, 每个10次运行
-- **泛化测试**: 2个测试网络, 每个20次运行
-- **适用场景**: 常规性能评估
-
-### Comprehensive模式 (全面评估)
-- **Baseline对比**: 3个网络, 4种场景, 每个15次运行
-- **泛化测试**: 3个测试网络, 每个30次运行
-- **适用场景**: 论文发表、深度分析
-
-## 模型管理
-
-### 训练模型
-训练完成后，模型会自动保存到：
-```
-data/checkpoints/models/
-├── agent_ieee14_adaptive_best.pth  # IEEE14网络训练模型
-├── agent_ieee30_adaptive_best.pth  # IEEE30网络训练模型
-├── agent_ieee57_adaptive_best.pth  # IEEE57网络训练模型
-└── ...
-```
-
-**说明**: 所有训练都使用智能自适应算法，`--mode` 参数只是控制训练强度(episodes数量)，不改变训练算法。
-
-### 使用预训练模型
-```bash
-# 查看可用模型
-ls data/checkpoints/models/
-
-# 使用特定模型进行评估
-python test.py --baseline --model data/checkpoints/models/agent_ieee57_adaptive_best.pth
-```
-
-**优势**：
-- ⚡ **快速评估**：跳过训练时间，直接使用已训练好的模型
-- 🔄 **可重复性**：使用相同模型确保结果一致性
-- 📊 **对比分析**：可以测试不同训练方法的模型效果
-
-## 命令行参数
-
-### 基本参数
-- `--config`: 配置文件路径 (可选)
-- `--mode`: 评估模式 (quick/standard/comprehensive)
-- `--model`: 预训练模型路径 (可选，如不提供则重新训练)
-
-### 测试类型 (必选其一)
-- `--baseline`: 运行Baseline对比测试
-- `--generalization`: 运行泛化能力测试
-- `--comprehensive`: 运行完整评估
-- `--list-modes`: 列出可用的评估模式
-
-### Baseline测试参数
-- `--network`: 测试网络 (ieee14/ieee30/ieee57/ieee118)
-
-### 泛化测试参数
-- `--train-network`: 训练网络 (ieee14/ieee30/ieee57)
-
-## 输出结果
-
-### 1. 控制台输出
-- 实时进度显示
-- 即时结果反馈
-- 性能改善统计
-- 泛化能力评级
-
-### 2. 可视化图表
-保存在 `evaluation_results/` 目录：
-- `comparison_visualization.png`: Baseline对比图表
-- `generalization_visualization.png`: 泛化能力图表
-
-### 3. 评估报告
-- `evaluation_report.txt`: 详细的文本报告
-- 包含数值对比表、改善幅度、总体结论
-
-## 结果解读
-
-### Baseline对比结果
-```
-🏆 性能改善总结:
-平均性能提升: 15.4%
-最小性能提升: 8.2%
-最大性能提升: 23.1%
-
-normal: 提升 18.4% - 🎉 优秀
-high_load: 提升 12.7% - ✅ 良好
-```
-
-### 泛化能力结果
-```
-🌐 泛化能力测试结果:
-测试网络    质量分数    性能下降    泛化评级
-IEEE30      0.68       4.2%       🎉 优秀泛化
-IEEE57      0.64       9.9%       🎉 优秀泛化
-IEEE118     0.58       18.3%      ✅ 良好泛化
-```
-
-### 评级标准
-- **性能提升**:
-  - 🎉 优秀: >15%
-  - ✅ 良好: 5-15%
-  - ⚠️ 有限: <5%
-
-- **泛化能力**:
-  - 🎉 优秀: <10%性能下降
-  - ✅ 良好: 10-20%性能下降
-  - ⚠️ 不足: >20%性能下降
-
-## 系统架构
+## 4. 文件结构与输出解析
 
 ```
-code/test/
-├── comprehensive_evaluator.py    # 核心评估器
-├── evaluation_config.py          # 配置管理
-test.py                           # 主入口脚本
-evaluation_results/              # 输出目录
-├── comparison_visualization.png
-├── generalization_visualization.png
-└── evaluation_report.txt
+└─ evaluation_results/
+   ├─ comparison_visualization.png   # 本文档嵌入的 2×4 柱状图
+   └─ evaluation_report.txt          # 文本报告（Raw、Score、Q 及增益统计）
 ```
 
-## 故障排除
+报告字段说明：
 
-### 常见问题
+| 列名 | 对应变量 | 单位 | 说明 |
+|------|----------|------|------|
+| 负载CV | `load_b` | — | Raw 负载平衡指标，越小越好 |
+| 耦合率 | `decoupling` | — | Raw 电气耦合率 |
+| 功率不平衡 | `power_b` | — | Raw 功率不平衡 |
+| 负载S / 解耦S / 功率S | `*_score` | — | Raw 指标映射后的 Score |
+| 综合分 | `comprehensive_score` | — | 三个 Score 的加权和 |
 
-1. **训练时间过长**
-   - 使用 `--mode quick` 减少测试次数
-   - 选择较小的网络进行测试
+---
 
-2. **内存不足**
-   - 减少并行运行数量
-   - 使用CPU模式训练
+## 5. 过时 / 待删除文件
 
-3. **依赖缺失**
-   ```bash
-   pip install scikit-learn matplotlib numpy
-   ```
+| 文件 | 理由 | 建议操作 |
+|------|------|-----------|
+| `code/test/evaluation_config.py` | 仍包含旧版 `inter_region_cv` / `intra_region_cv` 阈值配置，当前评估流程已迁移至新版 Score 体系。 | 若无其他模块引用，可删除或重构为新版权重格式。 |
+| （暂无） | 此次重构未发现其他明显冗余文件；如需进一步精简，可搜索旧指标 `inter_region_cv` / `intra_region_cv` 或未调用模块后手动移除。 |
 
-## 扩展功能
+> ⚠️ 删除文件前请确保未被训练脚本、可视化或文档引用，以免破坏向后兼容。
 
-### 添加新的Baseline方法
-在 `BaselinePartitioner` 类中添加新的静态方法：
-```python
-@staticmethod
-def new_method_partition(adjacency_matrix: np.ndarray, num_partitions: int) -> np.ndarray:
-    # 实现新的分区方法
-    pass
-```
+---
 
-### 自定义评估指标
-在 `MetricsCalculator` 类中添加新的指标计算方法：
-```python
-@staticmethod
-def calculate_new_metric(partition: np.ndarray, additional_data) -> float:
-    # 实现新的指标计算
-    pass
-```
+## 6. 后续改进方向
 
-### 修改权重配置
-编辑 `evaluation_config.py` 中的权重设置：
-```python
-'metrics_weights': {
-    'inter_region_balance': 0.3,
-    'intra_region_balance': 0.3,  # 新增指标权重
-    'decoupling': 0.4
-}
-```
+1. **可视化交互化**：将静态图迁移到 Plotly/Dash 以支持鼠标悬浮与筛选。
+2. **指标可扩展**：若将来引入网络可靠性、稳定裕度等新维度，可在 `convert_to_scores()` 内统一映射并更新综合权重。
+3. **自动废弃检测**：CI 步骤中添加 `ruff --unused` 或 pytest 覆盖率扫描，防止遗留死代码。
 
-## 技术支持
+---
 
-如遇问题，请检查：
-1. Python环境和依赖包版本
-2. 数据文件完整性
-3. 配置文件格式
-4. 系统内存和GPU状态
-
-更多技术细节请参考源代码注释和配置文件说明。
+如对指标或流程仍有疑问，欢迎在 Issues 中讨论。

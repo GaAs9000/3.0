@@ -223,6 +223,27 @@ class MetricsCalculator:
         
         return comprehensive_score
 
+    @staticmethod
+    def convert_to_scores(load_b: float, decoupling: float, power_b: float):
+        """将原始(越小越好)指标转换为分数(越大越好)"""
+        load_b_score = 1.0 / (1.0 + load_b)
+        decoupling_score = 1.0 - decoupling
+        power_b_score = 1.0 / (1.0 + power_b)
+        return load_b_score, decoupling_score, power_b_score
+
+    @staticmethod
+    def calculate_comprehensive_score_v2(load_b_score: float, decoupling_score: float, power_b_score: float,
+                                         weights: Dict[str, float] = None) -> float:
+        """根据三个分数计算综合质量分数 (越大越好)"""
+        if weights is None:
+            weights = {'load_b': 0.4, 'decoupling': 0.4, 'power_b': 0.2}
+        # 归一化权重
+        total_w = sum(weights.values()) + 1e-8
+        w_load = weights['load_b'] / total_w
+        w_dec = weights['decoupling'] / total_w
+        w_pow = weights['power_b'] / total_w
+        return w_load * load_b_score + w_dec * decoupling_score + w_pow * power_b_score
+
 
 class ComprehensiveAgentEvaluator:
     """综合智能体评估器"""
@@ -252,6 +273,12 @@ class ComprehensiveAgentEvaluator:
                 'inter_balance': 0.3,
                 'intra_balance': 0.3,
                 'decoupling': 0.4
+            },
+            # 新指标权重 (score 越大越好)
+            'metrics_weights_v2': {
+                'load_b': 0.4,
+                'decoupling': 0.4,
+                'power_b': 0.2
             },
             'thresholds': {
                 'excellent_generalization': 10,  # <10%性能下降
@@ -622,27 +649,33 @@ class ComprehensiveAgentEvaluator:
         return env
 
     def _calculate_all_metrics(self, partition: np.ndarray, env) -> Dict[str, float]:
-        """计算所有评估指标"""
-        # 获取节点负载
-        node_loads = env.evaluator.load_active.cpu().numpy()
+        """计算所有评估指标 (新版本)"""
+        # 将分区转换为torch张量以使用reward_function
+        import torch
+        partition_tensor = torch.tensor(partition, dtype=torch.long, device=env.device)
 
-        # 获取边信息
-        edge_index = env.edge_info['edge_index'].cpu().numpy()
+        # 使用统一奖励系统的核心指标接口
+        core_metrics = env.reward_function.get_current_metrics(partition_tensor)
 
-        # 计算三个核心指标
-        inter_cv = MetricsCalculator.calculate_inter_region_balance(partition, node_loads)
-        intra_cv = MetricsCalculator.calculate_intra_region_balance(partition, node_loads)
-        decoupling = MetricsCalculator.calculate_decoupling(partition, edge_index)
+        load_b = core_metrics.get('cv', 1.0)
+        decoupling_raw = core_metrics.get('coupling_ratio', 1.0)  # 越小越好
+        power_b = core_metrics.get('power_imbalance_normalized', 1.0)
 
-        # 计算综合分数
-        comprehensive_score = MetricsCalculator.calculate_comprehensive_score(
-            inter_cv, intra_cv, decoupling, self.evaluation_config['metrics_weights']
-        )
+        # 分数转换
+        load_b_score, decoupling_score, power_b_score = MetricsCalculator.convert_to_scores(
+            load_b, decoupling_raw, power_b)
+
+        # 综合分数
+        comprehensive_score = MetricsCalculator.calculate_comprehensive_score_v2(
+            load_b_score, decoupling_score, power_b_score, self.evaluation_config.get('metrics_weights_v2', None))
 
         return {
-            'inter_region_cv': inter_cv,
-            'intra_region_cv': intra_cv,
-            'decoupling': decoupling,
+            'load_b': load_b,
+            'decoupling': decoupling_raw,
+            'power_b': power_b,
+            'load_b_score': load_b_score,
+            'decoupling_score': decoupling_score,
+            'power_b_score': power_b_score,
             'comprehensive_score': comprehensive_score
         }
 
@@ -656,7 +689,7 @@ class ComprehensiveAgentEvaluator:
             return "⚠️ 泛化不足"
 
     def _format_comparison_results(self, results: Dict) -> Dict[str, Any]:
-        """格式化对比结果"""
+        """格式化对比结果 (updated)"""
         formatted_results = {}
 
         for scenario_name, scenario_data in results.items():
@@ -664,9 +697,12 @@ class ComprehensiveAgentEvaluator:
 
             for method_name, metrics in scenario_data.items():
                 formatted_scenario[method_name] = {
-                    'inter_region_cv': metrics['inter_region_cv'],
-                    'intra_region_cv': metrics['intra_region_cv'],
+                    'load_b': metrics['load_b'],
                     'decoupling': metrics['decoupling'],
+                    'power_b': metrics['power_b'],
+                    'load_b_score': metrics['load_b_score'],
+                    'decoupling_score': metrics['decoupling_score'],
+                    'power_b_score': metrics['power_b_score'],
                     'comprehensive_score': metrics['comprehensive_score']
                 }
 
@@ -745,59 +781,74 @@ class ComprehensiveAgentEvaluator:
         return summary
 
     def create_comparison_visualization(self, results: Dict, save_path: Optional[str] = None) -> None:
-        """Create comparison visualization chart"""
+        """Create comparison visualization chart (updated version)"""
         print("📊 Generating comparison visualization chart...")
 
         # Prepare data
         scenarios = list(results.keys())
         methods = list(results[scenarios[0]].keys())
-        metrics = ['inter_region_cv', 'intra_region_cv', 'decoupling', 'comprehensive_score']
 
-        # Create 4 subplots
-        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-        fig.suptitle('Agent Performance Comparison Analysis', fontsize=16, fontweight='bold')
+        # 【新】指标列表
+        score_metrics = ['load_b_score', 'decoupling_score', 'power_b_score', 'comprehensive_score']
+        raw_metrics = ['load_b', 'decoupling', 'power_b']
 
-        # Set colors
+        fig, axes = plt.subplots(2, 4, figsize=(22, 10))
+        fig.suptitle('Agent vs Baseline Performance Comparison', fontsize=16, fontweight='bold')
+
+        # Colors
         colors = plt.cm.Set3(np.linspace(0, 1, len(methods)))
 
-        for i, metric in enumerate(metrics):
-            ax = axes[i // 2, i % 2]
-
-            # Prepare data
-            data_for_plot = []
-            labels = []
-
-            for scenario in scenarios:
-                for method in methods:
-                    value = results[scenario][method][metric]
-                    data_for_plot.append(value)
-                    labels.append(f"{scenario}\n{method}")
-
-            # Reorganize data for grouped bar chart
-            x = np.arange(len(scenarios))
+        # --- 绘制score指标 (第一行) ---
+        for idx, metric in enumerate(score_metrics):
+            ax = axes[0, idx]
             width = 0.8 / len(methods)
+            x = np.arange(len(scenarios))
 
             for j, method in enumerate(methods):
-                values = [results[scenario][method][metric] for scenario in scenarios]
-                ax.bar(x + j * width, values, width, label=method, color=colors[j], alpha=0.8)
+                values = [results[sc][method][metric] for sc in scenarios]
+                ax.bar(x + j * width, values, width, label=method, color=colors[j], alpha=0.85)
 
-            # Set titles and labels
-            metric_titles = {
-                'inter_region_cv': 'Inter-Region Balance (CV)',
-                'intra_region_cv': 'Intra-Region Balance (CV)',
-                'decoupling': 'Electrical Decoupling',
+            title_map = {
+                'load_b_score': 'Load Balance Score',
+                'decoupling_score': 'Decoupling Score',
+                'power_b_score': 'Power Balance Score',
                 'comprehensive_score': 'Comprehensive Quality Score'
             }
-
-            ax.set_title(metric_titles[metric], fontsize=12, fontweight='bold')
-            ax.set_xlabel('Test Scenarios')
-            ax.set_ylabel('Metric Value')
+            ax.set_title(title_map.get(metric, metric), fontsize=11, fontweight='bold')
             ax.set_xticks(x + width * (len(methods) - 1) / 2)
             ax.set_xticklabels(scenarios, rotation=45)
-            ax.legend()
+            ax.set_ylabel('Score (↑ Better)')
             ax.grid(True, alpha=0.3)
+            if idx == 0:
+                ax.legend()
 
-        plt.tight_layout()
+        # --- 绘制原始指标 (第二行) ---
+        for idx, metric in enumerate(raw_metrics):
+            ax = axes[1, idx]
+            width = 0.8 / len(methods)
+            x = np.arange(len(scenarios))
+
+            for j, method in enumerate(methods):
+                values = [results[sc][method][metric] for sc in scenarios]
+                ax.bar(x + j * width, values, width, label=method, color=colors[j], alpha=0.85)
+
+            title_map_raw = {
+                'load_b': 'Load CV (raw)',
+                'decoupling': 'Coupling Ratio (raw)',
+                'power_b': 'Power Imbalance (raw)'
+            }
+            ax.set_title(title_map_raw.get(metric, metric), fontsize=11, fontweight='bold')
+            ax.set_xticks(x + width * (len(methods) - 1) / 2)
+            ax.set_xticklabels(scenarios, rotation=45)
+            ax.set_ylabel('Raw Value (↓ Better)')
+            ax.grid(True, alpha=0.3)
+            if idx == 0:
+                ax.legend()
+
+        # 移除多余子图 (axes[1,3])
+        fig.delaxes(axes[1, 3])
+
+        plt.tight_layout(rect=[0, 0, 1, 0.96])
 
         # Save figure
         if save_path is None:
@@ -906,14 +957,19 @@ class ComprehensiveAgentEvaluator:
             report_lines.append("")
 
             # 表头
-            header = f"{'场景':<12} {'方法':<12} {'分区间CV':<10} {'区域内CV':<10} {'解耦度':<8} {'综合分数':<8}"
+            header = f"{'场景':<10} {'方法':<12} {'负载CV':<10} {'耦合率':<10} {'功率不平衡':<12} {'负载S':<8} {'解耦S':<8} {'功率S':<8} {'综合分':<8}"
             report_lines.append(header)
             report_lines.append("-" * len(header))
 
             for scenario_name, scenario_data in results.items():
                 for i, (method_name, metrics) in enumerate(scenario_data.items()):
                     scenario_display = scenario_name if i == 0 else ""
-                    line = f"{scenario_display:<12} {method_name:<12} {metrics['inter_region_cv']:<10.3f} {metrics['intra_region_cv']:<10.3f} {metrics['decoupling']:<8.3f} {metrics['comprehensive_score']:<8.3f}"
+                    line = (
+                        f"{scenario_display:<10} {method_name:<12} "
+                        f"{metrics['load_b']:<10.3f} {metrics['decoupling']:<10.3f} {metrics['power_b']:<12.3f} "
+                        f"{metrics['load_b_score']:<8.3f} {metrics['decoupling_score']:<8.3f} {metrics['power_b_score']:<8.3f} "
+                        f"{metrics['comprehensive_score']:<8.3f}"
+                    )
                     report_lines.append(line)
                 report_lines.append("")
 
