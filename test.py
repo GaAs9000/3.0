@@ -21,7 +21,6 @@ sys.path.append(str(Path(__file__).parent / 'code'))
 sys.path.append(str(Path(__file__).parent / 'code' / 'test'))
 
 from comprehensive_evaluator import ComprehensiveAgentEvaluator
-from evaluation_config import get_evaluation_config, EVALUATION_MODES
 
 
 def run_baseline_comparison(config_path: Optional[str] = None, network: str = 'ieee57', mode: str = 'standard', model_path: Optional[str] = None):
@@ -140,7 +139,7 @@ def run_comprehensive_evaluation(config_path: Optional[str] = None, mode: str = 
         evaluator = ComprehensiveAgentEvaluator(config_path, model_path)
 
         # 获取评估配置
-        eval_config = get_evaluation_config(mode)
+        eval_config = evaluator.get_evaluation_config(mode)
 
         comparison_results = None
         generalization_results = None
@@ -206,7 +205,53 @@ def run_comprehensive_evaluation(config_path: Optional[str] = None, mode: str = 
 def print_available_modes():
     """打印可用的评估模式"""
     print("📋 可用的评估模式:")
-    for mode_name, mode_config in EVALUATION_MODES.items():
+    
+    modes = {
+        'quick': {
+            'description': '快速评估模式',
+            'baseline_comparison': {
+                'enabled': True,
+                'test_networks': ['ieee14', 'ieee30'],
+                'scenarios': ['normal', 'high_load'],
+                'runs_per_test': 5
+            },
+            'generalization_test': {
+                'enabled': True,
+                'test_networks': ['ieee30'],
+                'runs_per_network': 10
+            }
+        },
+        'standard': {
+            'description': '标准评估模式',
+            'baseline_comparison': {
+                'enabled': True,
+                'test_networks': ['ieee14', 'ieee30', 'ieee57'],
+                'scenarios': ['normal', 'high_load', 'unbalanced'],
+                'runs_per_test': 10
+            },
+            'generalization_test': {
+                'enabled': True,
+                'test_networks': ['ieee30', 'ieee57'],
+                'runs_per_network': 20
+            }
+        },
+        'comprehensive': {
+            'description': '全面评估模式',
+            'baseline_comparison': {
+                'enabled': True,
+                'test_networks': ['ieee14', 'ieee30', 'ieee57'],
+                'scenarios': ['normal', 'high_load', 'unbalanced', 'fault'],
+                'runs_per_test': 15
+            },
+            'generalization_test': {
+                'enabled': True,
+                'test_networks': ['ieee30', 'ieee57', 'ieee118'],
+                'runs_per_network': 30
+            }
+        }
+    }
+    
+    for mode_name, mode_config in modes.items():
         print(f"   {mode_name}: {mode_config['description']}")
 
         # Baseline对比配置

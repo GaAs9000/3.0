@@ -290,6 +290,55 @@ class ComprehensiveAgentEvaluator:
         print(f"   训练网络: {self.config['data']['case_name']}")
         print(f"   设备: {self.device}")
     
+    def get_evaluation_config(self, mode: str = 'standard') -> Dict[str, Any]:
+        """获取指定模式的评估配置"""
+        modes = {
+            'quick': {
+                'baseline_comparison': {
+                    'enabled': True,
+                    'test_networks': ['ieee14', 'ieee30'],
+                    'scenarios': ['normal', 'high_load'],
+                    'runs_per_test': 5
+                },
+                'generalization_test': {
+                    'enabled': True,
+                    'train_network': 'ieee14',
+                    'test_networks': ['ieee30'],
+                    'runs_per_network': 10
+                }
+            },
+            'standard': {
+                'baseline_comparison': {
+                    'enabled': True,
+                    'test_networks': ['ieee14', 'ieee30', 'ieee57'],
+                    'scenarios': ['normal', 'high_load', 'unbalanced'],
+                    'runs_per_test': 10
+                },
+                'generalization_test': {
+                    'enabled': True,
+                    'train_network': 'ieee14',
+                    'test_networks': ['ieee30', 'ieee57'],
+                    'runs_per_network': 20
+                }
+            },
+            'comprehensive': {
+                'baseline_comparison': {
+                    'enabled': True,
+                    'test_networks': ['ieee14', 'ieee30', 'ieee57'],
+                    'scenarios': ['normal', 'high_load', 'unbalanced', 'fault'],
+                    'runs_per_test': 15
+                },
+                'generalization_test': {
+                    'enabled': True,
+                    'train_network': 'ieee14',
+                    'test_networks': ['ieee30', 'ieee57', 'ieee118'],
+                    'runs_per_network': 30
+                }
+            }
+        }
+        
+        return modes.get(mode, modes['standard'])
+    
     def run_baseline_comparison(self, network_name: str = 'ieee30') -> Dict[str, Any]:
         """运行baseline对比测试"""
         print(f"\n🔍 开始baseline对比测试 - {network_name.upper()}")
