@@ -15,6 +15,7 @@ import time
 from collections import defaultdict
 from typing import Dict, List, Tuple, Optional, Set, Any
 from torch_geometric.data import HeteroData
+import torch_sparse
 
 
 class IntelligentRegionEmbedding:
@@ -296,9 +297,9 @@ class StateManager:
             print(f"   - 注意：此嵌入可能包含GAT原始嵌入 + 注意力增强信息")
         
     def _setup_adjacency_info(self):
-        """设置用于边界节点计算的邻接信息"""
-        # 创建全局邻接列表
-        self.adjacency_list = [[] for _ in range(self.total_nodes)]
+        """设置用于边界节点计算的邻接信息 - 使用稀疏张量优化"""
+        # 收集所有边用于构建稀疏张量
+        all_edges = []
         
         for edge_type, edge_index in self.hetero_data.edge_index_dict.items():
             src_type, _, dst_type = edge_type
@@ -307,10 +308,47 @@ class StateManager:
             src_global = self.local_to_global(edge_index[0], src_type)
             dst_global = self.local_to_global(edge_index[1], dst_type)
             
-            # 添加到邻接列表
-            for src, dst in zip(src_global, dst_global):
-                self.adjacency_list[src.item()].append(dst.item())
-                
+            # 添加边（无向图需要双向边）
+            edges = torch.stack([src_global, dst_global], dim=0)
+            all_edges.append(edges)
+            # 添加反向边
+            all_edges.append(torch.stack([dst_global, src_global], dim=0))
+        
+        # 合并所有边
+        if all_edges:
+            edge_index = torch.cat(all_edges, dim=1)
+            # 去重
+            edge_index = torch.unique(edge_index, dim=1)
+        else:
+            edge_index = torch.zeros((2, 0), dtype=torch.long, device=self.device)
+        
+        # 创建稀疏张量
+        edge_attr = torch.ones(edge_index.shape[1], device=self.device)
+        self.adjacency_sparse = torch_sparse.SparseTensor(
+            row=edge_index[0],
+            col=edge_index[1],
+            value=edge_attr,
+            sparse_sizes=(self.total_nodes, self.total_nodes)
+        ).to(self.device).requires_grad_(False)
+        
+        # 缓存边索引用于向量化边界节点计算
+        self.edge_index = edge_index
+        
+        # 预计算每个节点的邻居索引（用于增量更新）
+        self._precompute_neighbors()
+    
+    def _precompute_neighbors(self):
+        """预计算每个节点的邻居，用于快速查询"""
+        self.neighbors_cache = {}
+        
+        # 从稀疏张量中提取每个节点的邻居
+        row_ptr, col, _ = self.adjacency_sparse.csr()
+        for node_idx in range(self.total_nodes):
+            start_idx = row_ptr[node_idx]
+            end_idx = row_ptr[node_idx + 1]
+            neighbors = col[start_idx:end_idx]
+            self.neighbors_cache[node_idx] = neighbors
+        
     def local_to_global(self, local_indices: torch.Tensor, node_type: str) -> torch.Tensor:
         """将给定节点类型的局部索引转换为全局索引"""
         return self.local_to_global_map[node_type][local_indices]
@@ -352,20 +390,23 @@ class StateManager:
         self._compute_region_embeddings()
         
     def _compute_boundary_nodes(self):
-        """从当前分区计算边界节点"""
-        boundary_set = set()
-        
-        for node_idx in range(self.total_nodes):
-            node_partition = self.current_partition[node_idx].item()
+        """从当前分区计算边界节点 - 向量化实现"""
+        if hasattr(self, 'edge_index') and self.edge_index.shape[1] > 0:
+            # 使用向量化方法
+            src, dst = self.edge_index[0], self.edge_index[1]
             
-            # 检查是否有邻居在不同分区中
-            for neighbor_idx in self.adjacency_list[node_idx]:
-                neighbor_partition = self.current_partition[neighbor_idx].item()
-                if neighbor_partition != node_partition:
-                    boundary_set.add(node_idx)
-                    break
-                    
-        self.boundary_nodes = torch.tensor(list(boundary_set), dtype=torch.long, device=self.device)
+            # 检查哪些边连接不同分区的节点
+            diff_mask = self.current_partition[src] != self.current_partition[dst]
+            
+            # 找到所有涉及跨区连接的节点
+            boundary_nodes = torch.unique(
+                torch.cat([src[diff_mask], dst[diff_mask]])
+            )
+            
+            self.boundary_nodes = boundary_nodes
+        else:
+            # 如果没有边，就没有边界节点
+            self.boundary_nodes = torch.empty(0, dtype=torch.long, device=self.device)
         
     def _update_boundary_nodes_incremental(self, changed_node: int, old_partition: int, new_partition: int):
         """单个节点变化后增量更新边界节点"""
@@ -380,11 +421,13 @@ class StateManager:
         
         # 检查变化的节点
         is_boundary = False
-        for neighbor_idx in self.adjacency_list[changed_node]:
-            neighbor_partition = self.current_partition[neighbor_idx].item()
-            if neighbor_partition != new_partition:
-                is_boundary = True
-                break
+        if changed_node in self.neighbors_cache:
+            neighbors = self.neighbors_cache[changed_node]
+            for neighbor_idx in neighbors:
+                neighbor_partition = self.current_partition[neighbor_idx].item()
+                if neighbor_partition != new_partition:
+                    is_boundary = True
+                    break
                 
         if is_boundary:
             boundary_set.add(changed_node)
@@ -392,21 +435,26 @@ class StateManager:
             boundary_set.discard(changed_node)
             
         # 检查变化节点的所有邻居
-        for neighbor_idx in self.adjacency_list[changed_node]:
-            neighbor_partition = self.current_partition[neighbor_idx].item()
-            
-            # 检查邻居是否现在是边界节点
-            neighbor_is_boundary = False
-            for neighbor_neighbor_idx in self.adjacency_list[neighbor_idx]:
-                neighbor_neighbor_partition = self.current_partition[neighbor_neighbor_idx].item()
-                if neighbor_neighbor_partition != neighbor_partition:
-                    neighbor_is_boundary = True
-                    break
-                    
-            if neighbor_is_boundary:
-                boundary_set.add(neighbor_idx)
-            else:
-                boundary_set.discard(neighbor_idx)
+        if changed_node in self.neighbors_cache:
+            neighbors = self.neighbors_cache[changed_node]
+            for neighbor_idx in neighbors:
+                neighbor_idx_int = neighbor_idx.item()
+                neighbor_partition = self.current_partition[neighbor_idx_int].item()
+                
+                # 检查邻居是否现在是边界节点
+                neighbor_is_boundary = False
+                if neighbor_idx_int in self.neighbors_cache:
+                    neighbor_neighbors = self.neighbors_cache[neighbor_idx_int]
+                    for neighbor_neighbor_idx in neighbor_neighbors:
+                        neighbor_neighbor_partition = self.current_partition[neighbor_neighbor_idx].item()
+                        if neighbor_neighbor_partition != neighbor_partition:
+                            neighbor_is_boundary = True
+                            break
+                        
+                if neighbor_is_boundary:
+                    boundary_set.add(neighbor_idx_int)
+                else:
+                    boundary_set.discard(neighbor_idx_int)
                 
         self.boundary_nodes = torch.tensor(list(boundary_set), dtype=torch.long, device=self.device)
         

@@ -12,6 +12,7 @@ import torch
 import numpy as np
 from typing import Dict, List, Tuple, Set, Optional, Any
 from torch_geometric.data import HeteroData
+import torch_sparse
 
 
 class ActionSpace:
@@ -44,21 +45,18 @@ class ActionSpace:
         # 设置邻接信息
         self._setup_adjacency_info()
         
-        # 动作验证缓存
-        self._action_cache = {}
-        
     def _setup_adjacency_info(self):
-        """设置用于动作验证的邻接信息"""
+        """设置用于动作验证的邻接信息 - 使用稀疏张量优化"""
         # 获取节点总数
         self.total_nodes = sum(x.shape[0] for x in self.hetero_data.x_dict.values())
-        
-        # 创建全局邻接列表
-        self.adjacency_list = [set() for _ in range(self.total_nodes)]
         
         # 设置节点类型映射
         self._setup_node_mappings()
         
-        # 从异构边构建邻接列表
+        # 收集所有边用于构建稀疏张量
+        all_edges = []
+        
+        # 从异构边构建边列表
         for edge_type, edge_index in self.hetero_data.edge_index_dict.items():
             src_type, _, dst_type = edge_type
             
@@ -66,11 +64,44 @@ class ActionSpace:
             src_global = self._local_to_global(edge_index[0], src_type)
             dst_global = self._local_to_global(edge_index[1], dst_type)
             
-            # 添加到邻接列表（无向图）
-            for src, dst in zip(src_global, dst_global):
-                self.adjacency_list[src.item()].add(dst.item())
-                self.adjacency_list[dst.item()].add(src.item())
-                
+            # 添加边（无向图需要双向边）
+            edges = torch.stack([src_global, dst_global], dim=0)
+            all_edges.append(edges)
+            # 添加反向边
+            all_edges.append(torch.stack([dst_global, src_global], dim=0))
+        
+        # 合并所有边
+        if all_edges:
+            edge_index = torch.cat(all_edges, dim=1)
+            # 去重（因为可能有重复边）
+            edge_index = torch.unique(edge_index, dim=1)
+        else:
+            edge_index = torch.zeros((2, 0), dtype=torch.long, device=self.device)
+        
+        # 创建稀疏张量
+        edge_attr = torch.ones(edge_index.shape[1], device=self.device)
+        self.adjacency_sparse = torch_sparse.SparseTensor(
+            row=edge_index[0],
+            col=edge_index[1],
+            value=edge_attr,
+            sparse_sizes=(self.total_nodes, self.total_nodes)
+        ).to(self.device).requires_grad_(False)
+        
+        # 预计算每个节点的邻居索引（用于快速查询）
+        self._precompute_neighbors()
+        
+    def _precompute_neighbors(self):
+        """预计算每个节点的邻居，用于快速查询"""
+        self.neighbors_cache = {}
+        
+        # 从稀疏张量中提取每个节点的邻居
+        row_ptr, col, _ = self.adjacency_sparse.csr()
+        for node_idx in range(self.total_nodes):
+            start_idx = row_ptr[node_idx]
+            end_idx = row_ptr[node_idx + 1]
+            neighbors = col[start_idx:end_idx]
+            self.neighbors_cache[node_idx] = neighbors
+        
     def _setup_node_mappings(self):
         """设置局部和全局节点索引之间的映射"""
         self.node_types = list(self.hetero_data.x_dict.keys())
@@ -150,9 +181,12 @@ class ActionSpace:
         """
         neighboring_partitions = set()
         
-        for neighbor_idx in self.adjacency_list[node_idx]:
-            neighbor_partition = current_partition[neighbor_idx].item()
-            neighboring_partitions.add(neighbor_partition)
+        # 使用预计算的邻居缓存
+        if node_idx in self.neighbors_cache:
+            neighbors = self.neighbors_cache[node_idx]
+            for neighbor_idx in neighbors:
+                neighbor_partition = current_partition[neighbor_idx].item()
+                neighboring_partitions.add(neighbor_partition)
             
         return neighboring_partitions
         
@@ -346,24 +380,60 @@ class ActionMask:
         self._setup_graph_structure()
         
     def _setup_graph_structure(self):
-        """设置图结构信息用于拓扑约束"""
+        """设置图结构信息用于拓扑约束 - 使用稀疏张量优化"""
         # 构建全局邻接关系（用于连通性检查）
         self.total_nodes = sum(x.shape[0] for x in self.hetero_data.x_dict.values())
-        self.adjacency_list = [[] for _ in range(self.total_nodes)]
         
         # 设置节点映射
         self._setup_node_mappings()
         
-        # 构建邻接列表
+        # 收集所有边用于构建稀疏张量
+        all_edges = []
+        
+        # 构建边列表
         for edge_type, edge_index in self.hetero_data.edge_index_dict.items():
             src_type, _, dst_type = edge_type
             src_global = self._local_to_global(edge_index[0], src_type)
             dst_global = self._local_to_global(edge_index[1], dst_type)
             
-            for src, dst in zip(src_global, dst_global):
-                self.adjacency_list[src.item()].append(dst.item())
-                self.adjacency_list[dst.item()].append(src.item())
-                
+            # 添加边（无向图需要双向边）
+            edges = torch.stack([src_global, dst_global], dim=0)
+            all_edges.append(edges)
+            # 添加反向边
+            all_edges.append(torch.stack([dst_global, src_global], dim=0))
+        
+        # 合并所有边
+        if all_edges:
+            edge_index = torch.cat(all_edges, dim=1)
+            # 去重
+            edge_index = torch.unique(edge_index, dim=1)
+        else:
+            edge_index = torch.zeros((2, 0), dtype=torch.long, device=self.device)
+        
+        # 创建稀疏张量
+        edge_attr = torch.ones(edge_index.shape[1], device=self.device)
+        self.adjacency_sparse = torch_sparse.SparseTensor(
+            row=edge_index[0],
+            col=edge_index[1],
+            value=edge_attr,
+            sparse_sizes=(self.total_nodes, self.total_nodes)
+        ).to(self.device).requires_grad_(False)
+        
+        # 预计算每个节点的邻居索引
+        self._precompute_neighbors()
+        
+    def _precompute_neighbors(self):
+        """预计算每个节点的邻居，用于快速查询"""
+        self.neighbors_cache = {}
+        
+        # 从稀疏张量中提取每个节点的邻居
+        row_ptr, col, _ = self.adjacency_sparse.csr()
+        for node_idx in range(self.total_nodes):
+            start_idx = row_ptr[node_idx]
+            end_idx = row_ptr[node_idx + 1]
+            neighbors = col[start_idx:end_idx]
+            self.neighbors_cache[node_idx] = neighbors
+        
     def _setup_node_mappings(self):
         """设置节点类型映射"""
         self.node_types = list(self.hetero_data.x_dict.keys())
@@ -431,10 +501,13 @@ class ActionMask:
         for remaining_node in remaining_nodes:
             has_connection = False
             node_id = remaining_node.item()
-            for neighbor in self.adjacency_list[node_id]:
-                if neighbor in remaining_nodes_set:
-                    has_connection = True
-                    break
+            # 使用neighbors_cache替代adjacency_list
+            if node_id in self.neighbors_cache:
+                neighbors = self.neighbors_cache[node_id]
+                for neighbor in neighbors:
+                    if neighbor.item() in remaining_nodes_set:
+                        has_connection = True
+                        break
             if not has_connection:
                 isolated_nodes.append(node_id)
 
@@ -478,10 +551,13 @@ class ActionMask:
             
             # 统计该节点邻居的分区分布
             neighbor_partitions = {}
-            for neighbor_idx in self.adjacency_list[node_idx_int]:
-                neighbor_partition = current_partition[neighbor_idx].item()
-                if neighbor_partition != current_node_partition:
-                    neighbor_partitions[neighbor_partition] = neighbor_partitions.get(neighbor_partition, 0) + 1
+            # 使用neighbors_cache替代adjacency_list
+            if node_idx_int in self.neighbors_cache:
+                neighbors = self.neighbors_cache[node_idx_int]
+                for neighbor_idx in neighbors:
+                    neighbor_partition = current_partition[neighbor_idx].item()
+                    if neighbor_partition != current_node_partition:
+                        neighbor_partitions[neighbor_partition] = neighbor_partitions.get(neighbor_partition, 0) + 1
                     
             # 如果某个邻居分区连接数明显更多，优先移动到该分区（减少跨分区连接）
             if neighbor_partitions:
