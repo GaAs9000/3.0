@@ -37,21 +37,40 @@ from .relative_reward_calculator import RelativeImprovementReward, HybridRewardF
 
 class RobustMetricsCalculator:
     """
-    鲁棒的指标计算器，提供智能的错误处理和诊断
+    计算核心物理指标，内置了丰富的错误处理和回退机制。
+
+    该类的设计目标是提供一个极其健壮的指标计算服务，即使在输入
+    数据有缺失或计算过程中出现意外错误时，也能够通过预设的策略
+    （如使用历史均值）提供一个合理的估价值，从而保证上层应用的稳定运行。
     """
 
-    def __init__(self, config=None):
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
+        """
+        初始化鲁棒指标计算器。
+
+        Args:
+            config (Optional[Dict[str, Any]]): 
+                配置字典，可包含 `fallback_strategy` 等键。
+        """
         self.config = config or {}
         self.error_history = []
         self.metrics_history = defaultdict(list)
         self.fallback_strategy = config.get('fallback_strategy', 'conservative')
 
-    def calculate_coupling_metrics(self, edge_admittance, edge_index, partition):
+    def calculate_coupling_metrics(self, 
+                                 edge_admittance: torch.Tensor, 
+                                 edge_index: torch.Tensor, 
+                                 partition: torch.Tensor) -> Dict[str, Any]:
         """
-        计算耦合指标，带有完整的错误处理
+        以向量化的方式高效计算电气耦合度指标。
 
-        返回:
-            dict: 包含指标值、置信度和来源信息
+        Args:
+            edge_admittance (torch.Tensor): 边的导纳值张量。
+            edge_index (torch.Tensor): 描述边连接的张量, shape `[2, num_edges]`。
+            partition (torch.Tensor): 每个节点的所属分区标签。
+
+        Returns:
+            Dict[str, Any]: 包含耦合指标、置信度和来源信息的字典。
         """
         try:
             # 输入验证
@@ -62,31 +81,40 @@ class RobustMetricsCalculator:
             if not validation_result['valid']:
                 return self._handle_invalid_coupling_inputs(validation_result)
 
-            # 正常计算
-            cross_partition_admittance = 0.0
-            total_admittance = edge_admittance.sum().item()
+            # 高效的向量化计算
+            total_admittance = edge_admittance.sum()
 
-            for i in range(edge_index.shape[1]):
-                node1, node2 = edge_index[:, i]
-                if (node1 < partition.shape[0] and node2 < partition.shape[0] and
-                    partition[node1] != partition[node2] and
-                    partition[node1] > 0 and partition[node2] > 0):
-                    cross_partition_admittance += edge_admittance[i].item()
+            # 获取边的源节点和目标节点
+            src_nodes, dst_nodes = edge_index
 
+            # 获取节点所在的分区
+            src_partitions = partition[src_nodes]
+            dst_partitions = partition[dst_nodes]
+
+            # 创建跨区边的掩码
+            # 条件: 1. 源分区 != 目标分区, 2. 源分区 > 0, 3. 目标分区 > 0
+            cross_partition_mask = (src_partitions != dst_partitions) & \
+                                   (src_partitions > 0) & \
+                                   (dst_partitions > 0)
+
+            # 计算跨区导纳总和
+            cross_partition_admittance = edge_admittance[cross_partition_mask].sum()
+
+            # 计算耦合比率
             coupling_ratio = cross_partition_admittance / (total_admittance + 1e-10)
             edge_decoupling_ratio = 1.0 - coupling_ratio
 
             # 结果验证
             if not (0 <= coupling_ratio <= 1):
-                return self._handle_out_of_range_coupling(coupling_ratio)
+                return self._handle_out_of_range_coupling(coupling_ratio.item())
 
             # 记录成功的计算
-            self._record_successful_calculation('coupling_ratio', coupling_ratio)
-            self._record_successful_calculation('edge_decoupling_ratio', edge_decoupling_ratio)
+            self._record_successful_calculation('coupling_ratio', coupling_ratio.item())
+            self._record_successful_calculation('edge_decoupling_ratio', edge_decoupling_ratio.item())
 
             return {
-                'coupling_ratio': coupling_ratio,
-                'edge_decoupling_ratio': edge_decoupling_ratio,
+                'coupling_ratio': coupling_ratio.item(),
+                'edge_decoupling_ratio': edge_decoupling_ratio.item(),
                 'confidence': 1.0,
                 'source': 'calculated'
             }
@@ -496,32 +524,28 @@ class DataIntegrityManager:
 
 class RewardFunction:
     """
-    自适应质量导向奖励函数系统
+    自适应质量导向奖励函数系统。
 
-    实现基于势函数理论的自适应质量导向激励结构：
-    1. 质量分数计算：统一的质量评估指标，支持跨网络适应性
-    2. 势函数主奖励：基于质量分数的相对改善，零固定阈值依赖
-    3. 平台期检测：智能检测质量改善平台期，支持早停机制
-    4. 效率奖励：在平台期激活的效率激励，鼓励快速收敛
-
-    核心组件：
-    - _compute_quality_score(): 统一质量分数计算
-    - plateau_detector: 平台期检测器
-    - previous_quality_score: 前一步质量分数缓存
-    - 数值稳定性保护：所有数学运算都有epsilon保护
+    该类是整个强化学习训练的核心，它不仅计算每一步的即时奖励，还集成了
+    复杂的自适应机制，如平台期检测、场景感知和数据完整性管理。
+    其设计哲学是，奖励信号不仅要引导智能体走向最优解，还必须能够适应
+    各种复杂的、非理想的训练场景。
     """
 
     def __init__(self,
                  hetero_data: HeteroData,
-                 config: Dict[str, Any] = None,
-                 device: torch.device = None):
+                 config: Optional[Dict[str, Any]] = None,
+                 device: Optional[torch.device] = None):
         """
-        初始化自适应质量导向奖励函数
+        初始化自适应质量导向奖励函数。
 
         Args:
-            hetero_data: 异构图数据
-            config: 配置字典，包含权重、阈值等参数
-            device: 计算设备
+            hetero_data (HeteroData): 
+                PyG格式的异构图数据，包含了电网的完整拓扑和节点/边特征。
+            config (Optional[Dict[str, Any]]): 
+                一个配置字典，用于控制奖励权重、平台期检测参数、场景感知策略等。
+            device (Optional[torch.device]): 
+                计算所用的设备 (e.g., 'cpu', 'cuda')。
         """
         self.device = device or torch.device('cpu')
         self.config = config or {}
@@ -613,7 +637,7 @@ class RewardFunction:
         self.epsilon = 1e-9
         
     def _load_weights(self) -> Dict[str, float]:
-        """从配置加载权重参数"""
+        """从配置中加载并合并奖励权重。"""
         default_weights = {
             # 质量分数权重（统一命名规范）
             'load_b': 0.4,
@@ -661,7 +685,7 @@ class RewardFunction:
         return result
 
     def _create_plateau_detector(self) -> QualityPlateauDetector:
-        """创建平台期检测器"""
+        """创建平台期检测器实例。"""
         plateau_config = self.adaptive_quality_config['plateau_detection']
         return QualityPlateauDetector(
             window_size=plateau_config['window_size'],
@@ -1135,16 +1159,17 @@ class RewardFunction:
 
     def _compute_quality_score(self, partition: torch.Tensor) -> float:
         """
-        计算统一质量分数
+        根据当前分区方案，计算一个归一化的统一质量分数。
 
-        基于技术方案中的公式：
-        Q(s) = 1 - normalize(w₁·CV + w₂·coupling_ratio + w₃·power_imbalance)
+        该分数综合了负载均衡(CV)、电气解耦(Coupling)和功率平衡(Power Imbalance)
+        三个核心维度，是评估分区方案质量的核心标量。
 
         Args:
-            partition: 当前分区方案 [num_nodes]
+            partition (torch.Tensor): 
+                包含每个节点所属分区的张量。Shape: `[num_nodes]`
 
         Returns:
-            质量分数 [0, 1]，越大越好
+            float: 质量分数，范围在 [0, 1] 之间，值越大表示质量越好。
         """
         try:
             # 计算核心指标
@@ -1189,10 +1214,11 @@ class RewardFunction:
             print(f"警告：质量分数计算出现异常: {e}")
             return 0.0
 
-    def _compute_simple_relative_reward(self, prev_quality: float, curr_quality: float) -> float:
+    @staticmethod
+    def _compute_simple_relative_reward(prev_quality: float, curr_quality: float) -> float:
         """
-        简单相对改进奖励 - 解决跨场景训练偏向问题
-
+        [已废弃] 简单相对改进奖励 - 解决跨场景训练偏向问题
+        
         核心思想：相同的相对努力应该获得相同的奖励幅度
         - 故障场景: (0.42-0.40)/0.40 = 5%改进 → 奖励+0.05
         - 正常场景: (0.714-0.68)/0.68 = 5%改进 → 奖励+0.05
@@ -1206,6 +1232,11 @@ class RewardFunction:
         Returns:
             相对改进奖励 [-1.0, 1.0]
         """
+        warnings.warn(
+            "此方法已被更高级的场景感知奖励替代，请改用 HybridRewardFunction",
+            DeprecationWarning,
+            stacklevel=2
+        )
         try:
             if prev_quality > 0.01:  # 避免除零，处理边界情况
                 relative_improvement = (curr_quality - prev_quality) / prev_quality
@@ -1222,117 +1253,91 @@ class RewardFunction:
 
     def _compute_core_metrics(self, partition: torch.Tensor) -> Dict[str, float]:
         """
-        中心化的核心指标计算方法
+        以向量化的方式，中心化地计算所有核心物理指标。
         
-        高效计算所有后续奖励所需的基础物理量，避免重复计算：
-        - CV (变异系数): 负载平衡指标
-        - coupling: 电气耦合度指标  
-        - power_imbalance: 功率不平衡指标
-        - 其他辅助指标
+        该函数是性能关键路径，它通过高效的PyTorch张量操作，避免了任何
+        在Python层面的循环，一次性计算出所有下游奖励函数所需的基础物理量。
         
         Args:
-            partition: 当前分区方案 [num_nodes]
+            partition (torch.Tensor): 
+                包含每个节点所属分区的张量。Shape: `[num_nodes]`
             
         Returns:
-            包含所有核心指标的字典
+            Dict[str, float]: 包含所有核心指标的字典 (e.g., 'cv', 'coupling_ratio')。
         """
         metrics = {}
         
-        # 获取分区数量
-        num_partitions = partition.max().item()
-        if num_partitions <= 0:
-            # 如果没有分区，返回最差指标
-            return {
-                'cv': 1.0,
-                'coupling_ratio': 1.0, 
-                'power_imbalance_normalized': 1.0,
-                'num_partitions': 0
-            }
-            
-        # 1. 计算负载平衡指标 (CV)
-        partition_loads = torch.zeros(num_partitions, device=self.device)
-        for i in range(1, num_partitions + 1):
-            mask = (partition == i)
-            if mask.any():
-                partition_loads[i-1] = self.node_loads[mask].abs().sum()
-                
-        # 计算变异系数，添加数值稳定性保护
+        # 获取分区数量，确保分区索引是连续的，从0开始
+        unique_partitions = torch.unique(partition)
+        # 排除无效分区（如0）
+        unique_partitions = unique_partitions[unique_partitions > 0]
+        if unique_partitions.numel() == 0:
+            return {'cv': 1.0, 'coupling_ratio': 1.0, 'power_imbalance_normalized': 1.0, 'num_partitions': 0}
+        
+        num_partitions = unique_partitions.max().item()
+        
+        # 创建一个从1开始的分区到从0开始的连续索引的映射
+        # 这对于scatter操作至关重要，因为它需要连续的索引
+        partition_map = torch.zeros(num_partitions + 1, dtype=torch.long, device=self.device)
+        partition_map[unique_partitions] = torch.arange(unique_partitions.numel(), device=self.device)
+        
+        # 将原始分区标签映射到连续索引
+        mapped_partition = partition_map[partition.long()]
+        
+        # 只处理有效分区 (>0) 的节点
+        valid_mask = partition > 0
+        
+        # 1. 高效计算负载平衡指标 (CV)
+        # 使用scatter_add计算每个分区的负载总和
+        partition_loads = torch.zeros(unique_partitions.numel(), device=self.device).scatter_add_(
+            0, mapped_partition[valid_mask], self.node_loads[valid_mask].abs()
+        )
+        
+        # 计算变异系数
         mean_load = partition_loads.mean()
         std_load = partition_loads.std()
         
-        # 多重保护：防止除零、NaN和inf
-        if torch.isnan(mean_load) or torch.isinf(mean_load) or mean_load <= 0:
-            cv = 1.0  # 最差情况
-        elif torch.isnan(std_load) or torch.isinf(std_load):
+        if torch.isnan(mean_load) or torch.isinf(mean_load) or mean_load <= self.epsilon:
             cv = 1.0
         else:
-            cv = std_load / (mean_load + self.epsilon)
-            cv = torch.clamp(cv, 0.0, 10.0)  # 限制CV在合理范围内
-            
-        metrics['cv'] = cv.item() if torch.is_tensor(cv) else cv
-        
-        # 2. 计算电气解耦指标 - 使用鲁棒计算器
+            cv = (std_load / (mean_load + self.epsilon)).item()
+        metrics['cv'] = np.clip(cv, 0.0, 10.0)
+
+        # 2. 计算电气解耦指标 (已向量化)
         if self.edge_index.shape[1] > 0:
-            # 使用鲁棒指标计算器
             coupling_result = self.metrics_calculator.calculate_coupling_metrics(
                 self.edge_admittance, self.edge_index, partition
             )
-
-            # 提取结果
-            metrics['coupling_ratio'] = coupling_result['coupling_ratio']
-            metrics['edge_decoupling_ratio'] = coupling_result['edge_decoupling_ratio']
-
-            # 记录置信度和来源信息（用于调试）
-            if hasattr(self, 'logger'):
-                if coupling_result['confidence'] < 0.8:
-                    self.logger.warning(
-                        f"耦合指标置信度较低: {coupling_result['confidence']:.2f}, "
-                        f"来源: {coupling_result['source']}"
-                    )
-            elif coupling_result['confidence'] < 0.8:
-                print(f"⚠️ 耦合指标置信度较低: {coupling_result['confidence']:.2f}, "
-                      f"来源: {coupling_result['source']}")
+            metrics.update(coupling_result)
         else:
-            # 没有边的情况
             metrics['coupling_ratio'] = 0.0
             metrics['edge_decoupling_ratio'] = 1.0
             
-        # 3. 计算功率平衡指标
-        total_imbalance = 0.0
+        # 3. 高效计算功率平衡指标
+        # 使用scatter_add同时计算每个分区的发电和负载
+        partition_generation = torch.zeros(unique_partitions.numel(), device=self.device).scatter_add_(
+            0, mapped_partition[valid_mask], self.node_generation[valid_mask]
+        )
+        # partition_loads 已在上文计算过，无需重复
         
-        # 检查节点数据的数值稳定性
-        if (torch.isnan(self.node_generation).any() or torch.isinf(self.node_generation).any() or
-            torch.isnan(self.node_loads).any() or torch.isinf(self.node_loads).any()):
-            # 如果数据有问题，返回最差情况
-            metrics['power_imbalance_normalized'] = 1.0
+        # 计算总不平衡
+        total_imbalance = torch.abs(partition_generation - partition_loads).sum().item()
+        
+        # 归一化
+        total_load = self.node_loads.abs().sum().item()
+        if total_load > self.epsilon:
+            power_imbalance_normalized = total_imbalance / total_load
         else:
-            for i in range(1, num_partitions + 1):
-                mask = (partition == i)
-                if mask.any():
-                    partition_generation = self.node_generation[mask].sum()
-                    partition_load = self.node_loads[mask].sum()
-                    
-                    # 检查每个分区的计算结果
-                    if (torch.isnan(partition_generation) or torch.isinf(partition_generation) or
-                        torch.isnan(partition_load) or torch.isinf(partition_load)):
-                        continue  # 跳过有问题的分区
-                        
-                    imbalance = torch.abs(partition_generation - partition_load)
-                    if not (torch.isnan(imbalance) or torch.isinf(imbalance)):
-                        total_imbalance += imbalance.item()
-                    
-            # 归一化功率不平衡，添加多重保护
-            total_load = self.node_loads.abs().sum().item()
-            if total_load <= 0 or np.isnan(total_load) or np.isinf(total_load):
-                power_imbalance_normalized = 1.0  # 最差情况
-            else:
-                power_imbalance_normalized = total_imbalance / (total_load + self.epsilon)
-                power_imbalance_normalized = np.clip(power_imbalance_normalized, 0.0, 10.0)
-                
-            metrics['power_imbalance_normalized'] = power_imbalance_normalized
+            power_imbalance_normalized = 1.0
+        metrics['power_imbalance_normalized'] = np.clip(power_imbalance_normalized, 0.0, 10.0)
         
         # 4. 其他辅助指标
-        metrics['num_partitions'] = num_partitions
+        metrics['num_partitions'] = unique_partitions.numel()
+        
+        # 清理 NaN/Inf 值，确保返回结果的健壮性
+        for key, value in metrics.items():
+            if isinstance(value, (float, int)) and (np.isnan(value) or np.isinf(value)):
+                metrics[key] = 1.0 if key in ['cv', 'coupling_ratio', 'power_imbalance_normalized'] else 0.0
         
         return metrics
 
@@ -1341,19 +1346,23 @@ class RewardFunction:
                                  action: Tuple[int, int],
                                  scenario_context: Optional[ScenarioContext] = None) -> Tuple[float, Optional[PlateauResult]]:
         """
-        计算自适应质量导向即时奖励
+        计算即时奖励 (Incremental Reward)。
 
-        实现基于相对改进的奖励系统，解决跨场景训练偏向问题：
-        主奖励 = 相对改进奖励 = (Q(s_{t+1}) - Q(s_t)) / Q(s_t)
-        效率奖励 = λ * (max_steps - current_step) / max_steps (仅在平台期激活)
+        这是在每个时间步都会被调用的核心奖励函数。它实现了基于相对改进的
+        奖励机制，并结合了平台期检测和效率激励。
 
         Args:
-            current_partition: 当前分区状态
-            action: 执行的动作 (node_idx, partition_id)
-            scenario_context: 场景上下文（用于场景感知奖励）
+            current_partition (torch.Tensor): 
+                执行动作后的新分区状态。Shape: `[num_nodes]`
+            action (Tuple[int, int]): 
+                刚刚执行的动作 `(node_idx, partition_id)`。
+            scenario_context (Optional[ScenarioContext]): 
+                当前的场景上下文，用于场景感知奖励。
 
         Returns:
-            (总奖励, 平台期检测结果)
+            Tuple[float, Optional[PlateauResult]]:
+                - reward: 计算出的总即时奖励。
+                - plateau_result: 平台期检测器的结果，或为None。
         """
         # 更新步数和场景上下文
         self.current_step += 1
@@ -1377,10 +1386,19 @@ class RewardFunction:
 
         try:
             # 1. 计算主奖励（相对改进奖励）
-            main_reward = self._compute_simple_relative_reward(
-                self.previous_quality_score,
-                current_quality_score
-            )
+            if self.relative_reward_calculator is not None and scenario_context is not None:
+                # 优先使用高级的、场景感知的混合奖励函数
+                main_reward, _ = self.relative_reward_calculator.compute_reward(
+                    current_quality_score,
+                    self.previous_quality_score,
+                    scenario_context
+                )
+            else:
+                # 回退到简单的相对改进奖励
+                main_reward = self._compute_simple_relative_reward(
+                    self.previous_quality_score,
+                    current_quality_score
+                )
 
             # 数值稳定性保护
             if np.isnan(main_reward) or np.isinf(main_reward):
@@ -1468,19 +1486,20 @@ class RewardFunction:
                            final_partition: torch.Tensor,
                            termination_type: str = 'natural') -> Tuple[float, Dict[str, float]]:
         """
-        计算终局奖励（Reward）
+        计算回合结束时的终局奖励 (Final Reward)。
 
-        基于最终分区质量的综合评估，包含：
-        1. 三个核心奖励组件（按设计蓝图公式）
-        2. 非线性阈值奖励
-        3. 终止条件折扣
+        该奖励在回合结束时被调用，用于对最终的分区质量给出一个综合性的评估。
 
         Args:
-            final_partition: 最终分区方案
-            termination_type: 终止类型 ('natural', 'timeout', 'stuck')
+            final_partition (torch.Tensor): 
+                最终的分区方案。Shape: `[num_nodes]`
+            termination_type (str): 
+                回合的终止类型 (e.g., 'natural', 'timeout', 'stuck')。
 
         Returns:
-            (总终局奖励, 奖励组件详情)
+            Tuple[float, Dict[str, float]]:
+                - total_reward: 计算出的总终局奖励。
+                - components: 包含各个奖励分量详情的字典。
         """
         # 计算最终指标
         final_metrics = self._compute_core_metrics(final_partition)

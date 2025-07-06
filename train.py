@@ -1525,7 +1525,7 @@ class UnifiedTrainingSystem:
                 hetero_data=hetero_data,
                 node_embeddings=node_embeddings,
                 num_partitions=env_config['num_partitions'],
-                reward_weights=env_config['reward_weights'],
+                reward_weights=env_config.get('reward_weights', {}),
                 max_steps=env_config['max_steps'],
                 device=self.device,
                 attention_weights=attention_weights,
@@ -1537,30 +1537,18 @@ class UnifiedTrainingSystem:
         # 4. 智能体
         if not only_show_errors:
             print("\n4️⃣ PPO智能体...")
+            
         agent_config = config['agent']
-        node_embedding_dim = env.state_manager.embedding_dim
-        region_embedding_dim = node_embedding_dim * 2
-
         agent = PPOAgent(
-            node_embedding_dim=node_embedding_dim,
-            region_embedding_dim=region_embedding_dim,
-            num_partitions=env.num_partitions,
-            lr_actor=agent_config['lr_actor'],
-            lr_critic=agent_config['lr_critic'],
-            gamma=agent_config['gamma'],
-            eps_clip=agent_config['eps_clip'],
-            k_epochs=agent_config['k_epochs'],
-            entropy_coef=agent_config['entropy_coef'],
-            value_coef=agent_config['value_coef'],
-            device=self.device,
-            max_grad_norm=agent_config.get('max_grad_norm', None),
-            # 【修改】传递独立的调度器配置
-            actor_scheduler_config=agent_config.get('actor_scheduler', {}),
-            critic_scheduler_config=agent_config.get('critic_scheduler', {})
+            node_embedding_dim=next(iter(node_embeddings.values())).shape[1],
+            region_embedding_dim=config['gat']['output_dim'],
+            num_partitions=env_config['num_partitions'],
+            agent_config=agent_config,
+            device=self.device
         )
-
+        
         if not only_show_errors:
-            print(f"✅ 智能体创建完成")
+            print(f"✅ PPO智能体初始化完成")
 
         # 5. 训练
         rich_info("开始训练...", show_always=True)
@@ -1779,7 +1767,7 @@ class UnifiedTrainingSystem:
             return 'fast'
 
     def _run_adaptive_training_with_director(self, config: Dict[str, Any], director) -> Dict[str, Any]:
-        """使用智能导演运行自适应训练"""
+        """运行由智能导演指导的自适应训练"""
         print("\n启动智能导演训练流程...")
 
         # 1. 环境和智能体初始化

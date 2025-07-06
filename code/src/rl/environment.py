@@ -484,7 +484,7 @@ class PowerGridPartitioningEnv:
         current_scenario_context = getattr(self.reward_function, 'current_scenario_context', None)
         # 使用自适应质量导向奖励函数
         reward, plateau_result = self.reward_function.compute_incremental_reward(
-            self.state_manager.current_partition,
+            self.state_manager.current_partition.long(),
             action,
             current_scenario_context
         )
@@ -563,7 +563,7 @@ class PowerGridPartitioningEnv:
 
             # 使用奖励函数计算终局奖励
             final_reward, final_components = self.reward_function.compute_final_reward(
-                self.state_manager.current_partition,
+                self.state_manager.current_partition.long(),
                 termination_type
             )
             reward += final_reward
