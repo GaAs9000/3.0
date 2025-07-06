@@ -339,7 +339,7 @@ class ComprehensiveAgentEvaluator:
         
         return modes.get(mode, modes['standard'])
     
-    def run_baseline_comparison(self, network_name: str = 'ieee30') -> Dict[str, Any]:
+    def run_baseline_comparison(self, network_name: str = 'ieee30', custom_scenarios: Optional[List[str]] = None, custom_runs: Optional[int] = None) -> Dict[str, Any]:
         """运行baseline对比测试"""
         print(f"\n🔍 开始baseline对比测试 - {network_name.upper()}")
         print("=" * 50)
@@ -359,20 +359,29 @@ class ComprehensiveAgentEvaluator:
             print(f"❌ 模型加载失败: {e}")
             return {'success': False, 'error': f'Model loading failed: {e}'}
 
-        # 2. 准备测试数据
+        # 2. 准备测试数据和配置
         test_mpc = load_power_grid_data(network_name)
-        scenarios = ScenarioGenerator.generate_test_scenarios(test_mpc, network_name)
         
+        # 使用自定义参数或从配置中获取
+        scenarios_to_run = ScenarioGenerator.generate_test_scenarios(test_mpc, network_name)
+        if custom_scenarios:
+            scenarios_to_run = {s: scenarios_to_run[s] for s in custom_scenarios if s in scenarios_to_run}
+            print(f"🔩 使用自定义场景: {list(scenarios_to_run.keys())}")
+        
+        runs_per_test = custom_runs if custom_runs is not None else self.evaluation_config['baseline_comparison']['runs_per_test']
+        if custom_runs is not None:
+            print(f"🔩 使用自定义运行次数: {runs_per_test}")
+
         # 4. 运行对比测试
         results = {}
         
-        for scenario_name, mpc_data in scenarios.items():
+        for scenario_name, mpc_data in scenarios_to_run.items():
             print(f"\n   🔍 测试场景: {scenario_name}")
             
             scenario_results = {}
             
             # 测试我的智能体
-            agent_metrics = self._test_agent_on_scenario(agent, mpc_data, scenario_name)
+            agent_metrics = self._test_agent_on_scenario(agent, mpc_data, scenario_name, num_runs=runs_per_test)
             scenario_results['my_agent'] = agent_metrics
             
             # 测试baseline方法
@@ -384,7 +393,7 @@ class ComprehensiveAgentEvaluator:
             
             for baseline_name, baseline_method in baseline_methods.items():
                 baseline_metrics = self._test_baseline_on_scenario(
-                    baseline_method, mpc_data, scenario_name
+                    baseline_method, mpc_data, scenario_name, num_runs=runs_per_test
                 )
                 scenario_results[baseline_name] = baseline_metrics
             
@@ -400,7 +409,7 @@ class ComprehensiveAgentEvaluator:
             'summary': self._generate_comparison_summary(comparison_results)
         }
 
-    def run_generalization_test(self, train_network: str = 'ieee14') -> Dict[str, Any]:
+    def run_generalization_test(self, train_network: str = 'ieee14', custom_runs: Optional[int] = None) -> Dict[str, Any]:
         """运行泛化能力测试"""
         print(f"\n🌐 开始泛化能力测试")
         print("=" * 50)
@@ -422,7 +431,9 @@ class ComprehensiveAgentEvaluator:
 
         # 2. 获取训练网络baseline性能
         train_mpc = load_power_grid_data(train_network)
-        train_score = self._test_agent_on_scenario(train_agent, train_mpc, 'normal')
+        runs_per_test = custom_runs if custom_runs is not None else self.evaluation_config['baseline_comparison']['runs_per_test']
+
+        train_score = self._test_agent_on_scenario(train_agent, train_mpc, 'normal', num_runs=runs_per_test)
 
         print(f"✅ 训练网络性能: {train_score['comprehensive_score']:.3f}")
 
@@ -437,7 +448,7 @@ class ComprehensiveAgentEvaluator:
 
             try:
                 test_mpc = load_power_grid_data(test_network)
-                test_score = self._test_agent_cross_network(train_agent, test_mpc, test_network)
+                test_score = self._test_agent_cross_network(train_agent, test_mpc, test_network, num_runs=runs_per_test)
 
                 # 计算性能下降
                 degradation = (train_score['comprehensive_score'] - test_score['comprehensive_score']) / train_score['comprehensive_score'] * 100
@@ -526,13 +537,7 @@ class ComprehensiveAgentEvaluator:
             node_embedding_dim=node_embedding_dim,
             region_embedding_dim=region_embedding_dim,
             num_partitions=env.num_partitions,
-            lr_actor=agent_config['lr_actor'],
-            lr_critic=agent_config['lr_critic'],
-            gamma=agent_config['gamma'],
-            eps_clip=agent_config['eps_clip'],
-            k_epochs=agent_config['k_epochs'],
-            entropy_coef=agent_config['entropy_coef'],
-            value_coef=agent_config['value_coef'],
+            agent_config=agent_config,
             device=self.device
         )
 
@@ -644,9 +649,9 @@ class ComprehensiveAgentEvaluator:
 
         return avg_metrics
 
-    def _test_agent_cross_network(self, agent, mpc_data: Dict, network_name: str) -> Dict[str, float]:
+    def _test_agent_cross_network(self, agent, mpc_data: Dict, network_name: str, num_runs: int = 20) -> Dict[str, float]:
         """测试智能体跨网络性能"""
-        return self._test_agent_on_scenario(agent, mpc_data, 'cross_network', num_runs=20)
+        return self._test_agent_on_scenario(agent, mpc_data, 'cross_network', num_runs=num_runs)
 
     def _create_scenario_environment(self, mpc_data: Dict, scenario_name: str):
         """为特定场景创建环境"""

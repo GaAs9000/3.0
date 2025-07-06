@@ -13,7 +13,7 @@ import argparse
 import sys
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 
 # 添加路径
 sys.path.append(str(Path(__file__).parent / 'code' / 'src'))
@@ -23,7 +23,7 @@ sys.path.append(str(Path(__file__).parent / 'code' / 'test'))
 from comprehensive_evaluator import ComprehensiveAgentEvaluator
 
 
-def run_baseline_comparison(config_path: Optional[str] = None, network: str = 'ieee57', mode: str = 'standard', model_path: Optional[str] = None):
+def run_baseline_comparison(config_path: Optional[str] = None, network: str = 'ieee57', mode: str = 'standard', model_path: Optional[str] = None, custom_scenarios: Optional[List[str]] = None, custom_runs: Optional[int] = None):
     """运行baseline对比测试"""
     print(f"🔍 启动Baseline对比测试")
     print(f"   测试网络: {network.upper()}")
@@ -37,7 +37,7 @@ def run_baseline_comparison(config_path: Optional[str] = None, network: str = 'i
         evaluator = ComprehensiveAgentEvaluator(config_path, model_path)
 
         # 运行对比测试
-        results = evaluator.run_baseline_comparison(network)
+        results = evaluator.run_baseline_comparison(network, custom_scenarios, custom_runs)
 
         if results['success']:
             print(f"\n✅ Baseline对比测试完成！")
@@ -71,7 +71,7 @@ def run_baseline_comparison(config_path: Optional[str] = None, network: str = 'i
         return False
 
 
-def run_generalization_test(config_path: Optional[str] = None, train_network: str = 'ieee14', mode: str = 'standard', model_path: Optional[str] = None):
+def run_generalization_test(config_path: Optional[str] = None, train_network: str = 'ieee14', mode: str = 'standard', model_path: Optional[str] = None, custom_runs: Optional[int] = None):
     """运行泛化能力测试"""
     print(f"🌐 启动泛化能力测试")
     print(f"   训练网络: {train_network.upper()}")
@@ -85,7 +85,7 @@ def run_generalization_test(config_path: Optional[str] = None, train_network: st
         evaluator = ComprehensiveAgentEvaluator(config_path, model_path)
 
         # 运行泛化测试
-        results = evaluator.run_generalization_test(train_network)
+        results = evaluator.run_generalization_test(train_network, custom_runs=custom_runs)
 
         if results['success']:
             print(f"\n✅ 泛化能力测试完成！")
@@ -300,6 +300,12 @@ def main():
                        help='评估模式 (默认: standard)')
     parser.add_argument('--model', type=str, help='预训练模型路径 (除--list-modes外必需)')
 
+    # 自定义测试参数
+    parser.add_argument('--scenarios', type=str, nargs='+',
+                       choices=['normal', 'high_load', 'unbalanced', 'fault'],
+                       help='(自定义) 指定一个或多个测试场景')
+    parser.add_argument('--runs', type=int, help='(自定义) 指定每个测试的运行次数')
+
     # Baseline测试参数
     parser.add_argument('--network', type=str, default='ieee30',
                        choices=['ieee14', 'ieee30', 'ieee57', 'ieee118'],
@@ -332,10 +338,23 @@ def main():
         success = False
 
         if args.baseline:
-            success = run_baseline_comparison(args.config, args.network, args.mode, args.model)
+            success = run_baseline_comparison(
+                config_path=args.config,
+                network=args.network,
+                mode=args.mode,
+                model_path=args.model,
+                custom_scenarios=args.scenarios,
+                custom_runs=args.runs
+            )
 
         elif args.generalization:
-            success = run_generalization_test(args.config, args.train_network, args.mode, args.model)
+            success = run_generalization_test(
+                config_path=args.config,
+                train_network=args.train_network,
+                mode=args.mode,
+                model_path=args.model,
+                custom_runs=args.runs
+            )
 
         elif args.comprehensive:
             success = run_comprehensive_evaluation(args.config, args.mode, args.model)

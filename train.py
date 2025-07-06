@@ -25,11 +25,27 @@ from collections import deque
 from tqdm import tqdm
 import queue
 import threading
+from rich.panel import Panel
 
 # 添加code/src到路径
 sys.path.append(str(Path(__file__).parent / 'code' / 'src'))
 # 添加code到路径以便导入baseline
 sys.path.append(str(Path(__file__).parent / 'code'))
+
+# --- 核心模块导入 ---
+try:
+    import gymnasium as gym
+    from stable_baselines3 import PPO
+    from torch_geometric.data import HeteroData
+    from data_processing import PowerGridDataProcessor
+    from gat import create_hetero_graph_encoder
+    from rl.environment import PowerGridPartitioningEnv
+    from rl.agent import PPOAgent
+    from rl.adaptive import AdaptiveDirector
+    CRITICAL_DEPS_AVAILABLE = True
+except ImportError as e:
+    CRITICAL_DEPS_AVAILABLE = False
+    MISSING_DEP_ERROR = e
 
 # --- 全局 NaN/Inf 异常检测开关 ---
 torch.autograd.set_detect_anomaly(False)
@@ -1139,6 +1155,41 @@ class UnifiedTrainer:
             self.logger.close()
 
 
+def create_environment_from_config(config: Dict, hetero_data: HeteroData, node_embeddings: Dict, attention_weights: Dict, mpc_data: Dict, device: torch.device) -> Tuple[PowerGridPartitioningEnv, Optional[gym.Env]]:
+    """根据配置创建环境实例，如果需要则使用Gym包装器。"""
+    should_use_gym_wrapper = config.get('scenario_generation', {}).get('enabled', True) or \
+                             config.get('parallel_training', {}).get('enabled', False)
+
+    if should_use_gym_wrapper:
+        from code.src.rl.gym_wrapper import PowerGridPartitionGymEnv
+        config_copy = config.copy()
+        config_copy['system']['device'] = str(device)
+        
+        gym_env = PowerGridPartitionGymEnv(
+            base_case_data=mpc_data,
+            config=config_copy,
+            use_scenario_generator=config.get('scenario_generation', {}).get('enabled', True),
+            scenario_seed=config['system']['seed']
+        )
+        _, _ = gym_env.reset()
+        env = gym_env.internal_env
+        return env, gym_env
+    
+    # 创建标准环境
+    env_config = config['environment']
+    env = PowerGridPartitioningEnv(
+        hetero_data,
+        node_embeddings=node_embeddings,
+        num_partitions=env_config['num_partitions'],
+        reward_weights=env_config.get('reward_weights', {}),
+        max_steps=env_config['max_steps'],
+        device=device,
+        attention_weights=attention_weights,
+        config=config
+    )
+    return env, None
+
+
 class UnifiedTrainingSystem:
     """统一训练系统 - 专注于训练功能"""
 
@@ -1439,12 +1490,6 @@ class UnifiedTrainingSystem:
         else:
             rich_info("启动标准训练模式", show_always=True)
 
-        # 导入必要模块
-        from code.src.data_processing import PowerGridDataProcessor
-        from code.src.gat import create_hetero_graph_encoder
-        from code.src.rl.environment import PowerGridPartitioningEnv
-        from code.src.rl.agent import PPOAgent
-
         # 1. 数据处理
         if not only_show_errors:
             print("\n1️⃣ 数据处理...")
@@ -1483,66 +1528,31 @@ class UnifiedTrainingSystem:
         # 3. 环境（支持场景生成）
         if not only_show_errors:
             print("\n3️⃣ 强化学习环境...")
-        env_config = config['environment']
-        scenario_config = config.get('scenario_generation', {})
-        use_scenario_generation = scenario_config.get('enabled', True)  # 默认启用场景生成
-
+        
+        env, gym_env = create_environment_from_config(config, hetero_data, node_embeddings, attention_weights, mpc, self.device)
+        if env is None:
+            raise RuntimeError("环境创建失败，返回了None。")
+        
+        use_scenario_generation = gym_env is not None
         if use_scenario_generation:
-            if not only_show_errors:
-                print("🎭 启用场景生成功能...")
-                
-            # 使用支持场景生成的Gym环境包装器
-            try:
-                from code.src.rl.gym_wrapper import PowerGridPartitionGymEnv
-
-                # 确保设备配置正确传递
-                config_copy = config.copy()
-                config_copy['system']['device'] = str(self.device)  # 转换为字符串
-
-                gym_env = PowerGridPartitionGymEnv(
-                    base_case_data=mpc,
-                    config=config_copy,
-                    use_scenario_generator=True,
-                    scenario_seed=config['system']['seed']
-                )
-
-                # 重置环境以获取初始状态
-                obs_array, info = gym_env.reset()
-                env = gym_env.internal_env  # 获取内部的PowerGridPartitioningEnv
-
-                rich_info(f"场景生成环境: {env.total_nodes}节点, {env.num_partitions}分区", show_always=True)
-
-            except ImportError as e:
-                from code.src.rich_output import rich_warning
-                rich_warning(f"场景生成模块导入失败: {e}")
-                use_scenario_generation = False
-
-        if not use_scenario_generation:
-            if not only_show_errors:
-                print("📊 使用标准环境（无场景生成）...")
-                
-            env = PowerGridPartitioningEnv(
-                hetero_data=hetero_data,
-                node_embeddings=node_embeddings,
-                num_partitions=env_config['num_partitions'],
-                reward_weights=env_config.get('reward_weights', {}),
-                max_steps=env_config['max_steps'],
-                device=self.device,
-                attention_weights=attention_weights,
-                config=config
-            )
-
+            rich_info(f"场景生成环境: {env.total_nodes}节点, {env.num_partitions}分区", show_always=True)
+        else:
             rich_info(f"标准环境: {env.total_nodes}节点, {env.num_partitions}分区", show_always=True)
 
         # 4. 智能体
         if not only_show_errors:
             print("\n4️⃣ PPO智能体...")
             
+        # 在 _run_standard_training 方法，替换 agent 初始化前
+        # 计算嵌入维度
+        node_dim_env = env.state_manager.embedding_dim if hasattr(env, 'state_manager') else next(iter(node_embeddings.values())).shape[1]
+        region_dim_env = node_dim_env * 2  # 根据 IntelligentRegionEmbedding 设计
+
         agent_config = config['agent']
         agent = PPOAgent(
-            node_embedding_dim=next(iter(node_embeddings.values())).shape[1],
-            region_embedding_dim=config['gat']['output_dim'],
-            num_partitions=env_config['num_partitions'],
+            node_embedding_dim=node_dim_env,
+            region_embedding_dim=region_dim_env,
+            num_partitions=config['environment']['num_partitions'],
             agent_config=agent_config,
             device=self.device
         )
@@ -1552,9 +1562,7 @@ class UnifiedTrainingSystem:
 
         # 5. 训练
         rich_info("开始训练...", show_always=True)
-        # 如果使用了场景生成，传递gym_env给训练器
-        gym_env_ref = gym_env if use_scenario_generation and 'gym_env' in locals() else None
-        trainer = UnifiedTrainer(agent=agent, env=env, config=config, gym_env=gym_env_ref)
+        trainer = UnifiedTrainer(agent=agent, env=env, config=config, gym_env=gym_env)
 
         training_config = config['training']
         history = trainer.train(
@@ -1574,6 +1582,7 @@ class UnifiedTrainingSystem:
 
         # 7. 基础评估
         rich_info("开始评估...", show_always=True)
+        # 评估时也使用同一个trainer实例
         eval_stats = trainer.evaluate()
 
         trainer.close()
@@ -1599,7 +1608,7 @@ class UnifiedTrainingSystem:
         try:
             # 检查是否有gym和stable_baselines3
             try:
-                import gym
+                import gymnasium as gym
                 from stable_baselines3 import PPO
                 has_sb3 = True
             except ImportError:
@@ -1721,15 +1730,9 @@ class UnifiedTrainingSystem:
         print("=" * 60)
 
         try:
-            # 导入智能导演系统
-            from code.src.rl.adaptive import AdaptiveDirector
-
-            # 获取基础训练模式
-            base_mode = self._detect_base_mode(config)
-
             # 初始化智能导演
-            director = AdaptiveDirector(config, base_mode)
-            print(f"智能导演系统已初始化 (基础模式: {base_mode})")
+            director = AdaptiveDirector(config, self._detect_base_mode(config))
+            print(f"智能导演系统已初始化 (基础模式: {self._detect_base_mode(config)})")
 
             # 运行自适应训练
             result = self._run_adaptive_training_with_director(config, director)
@@ -1767,59 +1770,62 @@ class UnifiedTrainingSystem:
             return 'fast'
 
     def _run_adaptive_training_with_director(self, config: Dict[str, Any], director) -> Dict[str, Any]:
-        """运行由智能导演指导的自适应训练"""
+        """运行由智能导演指导的自适应训练（已重构）"""
         print("\n启动智能导演训练流程...")
+        from code.src.rich_output import rich_info, rich_warning
 
-        # 1. 环境和智能体初始化
-        print("\n1. 初始化环境和智能体...")
-        mpc = load_power_grid_data(config['data']['case_name'])
-
-        # 创建环境（使用场景生成）
-        if config['scenario_generation']['enabled']:
-            from code.src.rl.gym_wrapper import PowerGridPartitionGymEnv
-
-            # 确保设备配置正确传递
-            config_copy = config.copy()
-            config_copy['system']['device'] = 'cuda' if torch.cuda.is_available() else 'cpu'
-
-            gym_env = PowerGridPartitionGymEnv(
-                base_case_data=mpc,
-                config=config_copy,
-                use_scenario_generator=True,
-                scenario_seed=config['system']['seed']
+        # 1. 统一的数据和模型资产初始化
+        # =================================================================
+        rich_info("1. 初始化核心数据资产 (数据处理器, GAT编码器)...")
+        try:
+            processor = PowerGridDataProcessor(
+                normalize=config['data']['normalize'],
+                cache_dir=config['data']['cache_dir']
             )
-            # 重置环境以获取初始状态
-            obs_array, info = gym_env.reset()
-            env = gym_env.internal_env
-        else:
-            from code.src.rl.environment import PowerGridPartitioningEnv
-            env = PowerGridPartitioningEnv(mpc, config)
-            gym_env = None
+            mpc = load_power_grid_data(config['data']['case_name'])
+            hetero_data = processor.graph_from_mpc(mpc, config).to(self.device)
+            
+            gat_config = config['gat']
+            encoder = create_hetero_graph_encoder(
+                hetero_data,
+                hidden_channels=gat_config['hidden_channels'],
+                gnn_layers=gat_config['gnn_layers'],
+                heads=gat_config['heads'],
+                output_dim=gat_config['output_dim']
+            ).to(self.device)
 
-        # 创建智能体
-        from code.src.rl.agent import PPOAgent
+            with torch.no_grad():
+                node_embeddings, attention_weights = encoder.encode_nodes_with_attention(hetero_data, config)
+        except Exception as e:
+            rich_warning(f"核心资产初始化失败: {e}")
+            raise e
+        rich_info("✅ 核心数据资产初始化完成。")
 
-        # 获取正确的嵌入维度
-        node_embedding_dim = env.state_manager.embedding_dim
-        region_embedding_dim = node_embedding_dim * 2
-
+        # 2. 创建初始环境和Gym包装器 (如果需要)
+        # =================================================================
+        rich_info("2. 创建初始环境...")
+        env, gym_env = create_environment_from_config(config, hetero_data, node_embeddings, attention_weights, mpc, self.device)
+        if env is None:
+            raise RuntimeError("环境创建失败，返回了None。")
+        rich_info(f"✅ 初始环境创建完成 (类型: {'Gym-Wrapped' if gym_env else 'Standard'})")
+        
+        # 3. 创建PPO智能体
+        # =================================================================
+        rich_info("3. 创建PPO智能体...")
+        # 在 _run_adaptive_training_with_director 方法 创建PPOAgent
+        node_dim_env = env.state_manager.embedding_dim if hasattr(env, 'state_manager') else next(iter(node_embeddings.values())).shape[1]
+        region_dim_env = node_dim_env * 2
         agent = PPOAgent(
-            node_embedding_dim=node_embedding_dim,
-            region_embedding_dim=region_embedding_dim,
+            node_embedding_dim=node_dim_env,
+            region_embedding_dim=region_dim_env,
             num_partitions=env.num_partitions,
-            lr_actor=config['agent']['lr_actor'],
-            lr_critic=config['agent']['lr_critic'],
-            gamma=config['agent']['gamma'],
-            eps_clip=config['agent']['eps_clip'],
-            k_epochs=config['agent']['k_epochs'],
-            entropy_coef=config['agent']['entropy_coef'],
-            value_coef=config['agent']['value_coef'],
-            device=env.device,
-            actor_scheduler_config=config['agent'].get('actor_scheduler'),
-            critic_scheduler_config=config['agent'].get('critic_scheduler')
+            agent_config=config['agent'],
+            device=self.device
         )
+        rich_info("✅ PPO智能体创建完成。")
 
-        # 2. 智能自适应训练循环
+        # 4. 智能自适应训练循环
+        # =================================================================
         print("\n2. 开始智能自适应训练...")
         num_episodes = config['training']['num_episodes']
         max_steps_per_episode = config['training']['max_steps_per_episode']
@@ -2113,8 +2119,23 @@ class UnifiedTrainingSystem:
         return exp_dir
 
 
+def verify_dependencies():
+    """在程序启动时验证所有关键依赖是否都已安装。"""
+    if not CRITICAL_DEPS_AVAILABLE:
+        from code.src.rich_output import rich_warning
+        rich_warning("="*60)
+        rich_warning("错误：一个或多个核心依赖项未能成功导入。")
+        rich_warning(f"具体错误: {MISSING_DEP_ERROR}")
+        rich_warning("请确保您已根据 environment.yml 或 requirements.txt 正确安装了所有必需的包，")
+        rich_warning("特别是 `gymnasium`, `stable-baselines3`, `torch`, 和 `torch_geometric`。")
+        rich_warning("="*60)
+        sys.exit(1)
+
 def main():
     """主函数"""
+    # 在执行任何操作前，首先验证关键依赖
+    verify_dependencies()
+
     parser = argparse.ArgumentParser(description='电力网络分区强化学习统一训练系统')
     parser.add_argument('--config', type=str, default=None, help='自定义配置文件路径')
     parser.add_argument('--mode', type=str, default='standard', help='训练模式')

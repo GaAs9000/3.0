@@ -173,6 +173,28 @@ random     normal    0.25     0.30     0.20        0.60      baseline
 
 ## ⚙️ 高级配置
 
+### 命令行自定义测试
+除了使用预设的模式，你还可以通过命令行参数进行更精细的测试控制，这对于专项实验非常有用。
+
+- **`--scenarios <场景1> <场景2> ...`**
+    - **作用**: 指定一个或多个要运行的测试场景，此参数会覆盖 `mode` 设置中的场景配置。
+    - **可选值**: `normal`, `high_load`, `unbalanced`, `fault`。
+    - **示例**: `python test.py --baseline --scenarios normal fault --model ...`
+
+- **`--runs <次数>`**
+    - **作用**: 指定每个测试场景的运行次数，此参数会覆盖 `mode` 设置中的运行次数。
+    - **示例**: `python test.py --baseline --runs 25 --model ...`
+
+**组合使用示例**:
+```bash
+# 在ieee57网络上，仅在 "高负载" 和 "故障" 场景下测试，每种场景运行30次
+python test.py --baseline \
+               --network ieee57 \
+               --scenarios high_load fault \
+               --runs 30 \
+               --model path/to/your/model.pth
+```
+
 ### 权重调整
 可以在配置文件中调整各指标的权重：
 ```yaml
@@ -182,10 +204,10 @@ metrics_weights_v2:
   power_balance: 0.2   # 功率平衡权重
 ```
 
-### 测试参数
-- **重复次数**：默认10次，可在代码中调整
-- **分区数量**：≤57节点用3分区，>57节点用5分区
-- **最大步数**：智能体最多执行200步
+### 内置测试参数
+- **重复次数**：默认10次（standard模式），可通过 `--runs` 参数覆盖。
+- **分区数量**：≤57节点用3分区，>57节点用5分区。
+- **最大步数**：智能体在每个回合中最多执行200步来优化分区。
 
 ---
 
@@ -227,3 +249,5 @@ evaluation_results/
 
 
 
+# 在ieee57网络上，只测试normal和fault两种场景，每种场景运行20次
+python test.py --baseline --network ieee57 --scenarios normal high_load unbalanced fault --runs 20 --model data/checkpoints/models/agent_ieee57_adaptive_20250706_193341_best.pth

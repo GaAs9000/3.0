@@ -1,4 +1,4 @@
-import gym
+import gymnasium as gym
 import torch
 import numpy as np
 from typing import Dict, Tuple, Any, Optional
@@ -24,7 +24,7 @@ except ImportError:
 
 class PowerGridPartitionGymEnv(gym.Env):
     """
-    兼容OpenAI Gym的电力网络分区环境
+    兼容Gymnasium的电力网络分区环境
     支持场景生成和并行训练
     """
     
@@ -34,7 +34,7 @@ class PowerGridPartitionGymEnv(gym.Env):
                  use_scenario_generator: bool = True,
                  scenario_seed: Optional[int] = None):
         """
-        初始化Gym环境
+        初始化Gymnasium环境
         
         Args:
             base_case_data: 基础电网案例数据（MATPOWER格式）

@@ -312,7 +312,7 @@ class PowerGridDataProcessor:
     
     def _extract_edge_features(self, branch: np.ndarray, baseMVA: float) -> Tuple[np.ndarray, np.ndarray]:
         """
-        提取边特征 (逻辑基本不变)
+        提取边特征 (V2.1: 增加对支路状态的强制检查)
         
         参数:
             branch: 支路数据矩阵
@@ -330,10 +330,18 @@ class PowerGridDataProcessor:
             - 是否为变压器
             - 支路运行状态
         """
+        # 0. 【关键修复】只选择状态为1（投入运行）的支路进行处理
+        status_col = 10  # 支路状态在第11列（0-indexed=10）
+        if branch.shape[1] > status_col:
+            active_branches = branch[branch[:, status_col] == 1]
+        else:
+            # 如果没有状态列，假设所有支路都是激活的
+            active_branches = branch
+
         # 1. 电气参数
-        r_raw = branch[:, 2]
-        x_raw = branch[:, 3]
-        b = branch[:, 4]
+        r_raw = active_branches[:, 2]
+        x_raw = active_branches[:, 3]
+        b = active_branches[:, 4]
 
         # 2. 处理NaN值
         valid_mask = ~np.isnan(r_raw) & ~np.isnan(x_raw)
@@ -346,33 +354,33 @@ class PowerGridDataProcessor:
         y = np.where(np.isinf(z_magnitude), 0.0, 1.0 / (z_magnitude + 1e-10))
         
         # 4. 载流限制和相角约束
-        rateA = branch[:, 5] / baseMVA
-        angle_min = branch[:, 11] if branch.shape[1] > 11 else -np.pi * np.ones(len(branch))
-        angle_max = branch[:, 12] if branch.shape[1] > 12 else np.pi * np.ones(len(branch))
+        rateA = active_branches[:, 5] / baseMVA
+        angle_min = active_branches[:, 11] if active_branches.shape[1] > 11 else -np.pi * np.ones(len(active_branches))
+        angle_max = active_branches[:, 12] if active_branches.shape[1] > 12 else np.pi * np.ones(len(active_branches))
         angle_diff = angle_max - angle_min
         
         # 5. 变压器标识和运行状态
         # 检查多个可能的变压器指标
-        tap_ratio = branch[:, 8]
-        phase_shift = branch[:, 9] if branch.shape[1] > 9 else np.zeros(len(branch))
+        tap_ratio = active_branches[:, 8]
+        phase_shift = active_branches[:, 9] if active_branches.shape[1] > 9 else np.zeros(len(active_branches))
         
         # 变压器识别：tap_ratio != 1 或 phase_shift != 0 或 显式变压器标记
         is_transformer_tap = (tap_ratio != 1.0).astype(float)
         is_transformer_phase = (phase_shift != 0.0).astype(float)
         
         # 如果有显式的变压器标记列（column[9]），使用它
-        if branch.shape[1] > 9:
-            is_transformer_explicit = branch[:, 9].astype(float)
+        if active_branches.shape[1] > 9:
+            is_transformer_explicit = active_branches[:, 9].astype(float)
             is_transformer = np.maximum(np.maximum(is_transformer_tap, is_transformer_phase), is_transformer_explicit)
         else:
             is_transformer = np.maximum(is_transformer_tap, is_transformer_phase)
             
-        status = branch[:, 10].astype(float) if branch.shape[1] > 10 else np.ones(len(branch))
+        status = active_branches[:, 10].astype(float) if active_branches.shape[1] > 10 else np.ones(len(active_branches))
         
         # 6. 边索引 (转换为0-based)
         edge_index = np.column_stack([
-            branch[:, 0].astype(int) - 1,
-            branch[:, 1].astype(int) - 1
+            active_branches[:, 0].astype(int) - 1,
+            active_branches[:, 1].astype(int) - 1
         ])
         
         # 7. 组合所有特征
