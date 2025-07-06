@@ -101,6 +101,19 @@ class ActionSpace:
             end_idx = row_ptr[node_idx + 1]
             neighbors = col[start_idx:end_idx]
             self.neighbors_cache[node_idx] = neighbors
+
+    # ---------------- 向后兼容接口 ----------------
+    @property
+    def adjacency_list(self):
+        """已弃用: 返回每个节点的邻居索引列表 (list[Tensor])"""
+        import warnings
+        warnings.warn(
+            "ActionSpace.adjacency_list 已弃用，请使用 neighbors_cache 或相关方法。",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        # 将 neighbors_cache 转为列表以保持旧接口
+        return [self.neighbors_cache[i] for i in range(self.total_nodes)]
         
     def _setup_node_mappings(self):
         """设置局部和全局节点索引之间的映射"""
@@ -240,28 +253,38 @@ class ActionSpace:
         Returns:
             布尔张量 [total_nodes, num_partitions] 表示有效动作
         """
-        # 初始化掩码（全为False）
+        # ===== 向量化实现 =====
+        # 构建空掩码
         action_mask = torch.zeros(
-            self.total_nodes, self.num_partitions, 
-            dtype=torch.bool, device=self.device
+            self.total_nodes * self.num_partitions,
+            dtype=torch.bool,
+            device=self.device,
         )
-        
-        # 将有效动作设置为True
-        for node_idx in boundary_nodes:
-            node_idx_int = node_idx.item()
-            current_node_partition = current_partition[node_idx_int].item()
-            
-            # 获取相邻分区
-            neighboring_partitions = self._get_neighboring_partitions(
-                node_idx_int, current_partition
-            )
-            
-            # 标记有效的目标分区
-            for target_partition in neighboring_partitions:
-                if target_partition != current_node_partition:
-                    # 转换为基于0的索引用于掩码
-                    action_mask[node_idx_int, target_partition - 1] = True
-                    
+
+        # 使用稀疏邻接一次性获取边 <row, col>
+        row, col, _ = self.adjacency_sparse.coo()
+
+        # 邻居节点所属分区 (基于0)
+        neighbor_partitions = current_partition[col] - 1  # [num_edges]
+
+        # 计算扁平索引： row * K + partition
+        flat_idx = row * self.num_partitions + neighbor_partitions
+
+        # 标记 True
+        action_mask[flat_idx] = True
+
+        # 重塑为 [N, K]
+        action_mask = action_mask.view(self.total_nodes, self.num_partitions)
+
+        # 移除移动到自身分区的动作
+        action_mask[torch.arange(self.total_nodes, device=self.device), current_partition - 1] = False
+
+        # 仅保留边界节点，其余节点置 False
+        if boundary_nodes.numel() < self.total_nodes:
+            non_boundary = torch.ones(self.total_nodes, dtype=torch.bool, device=self.device)
+            non_boundary[boundary_nodes] = False
+            action_mask[non_boundary] = False
+
         return action_mask
         
     def sample_random_action(self,

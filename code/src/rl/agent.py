@@ -23,8 +23,20 @@ from typing import Dict, List, Tuple, Optional, Any
 from collections import deque
 import copy
 import math
+from dataclasses import dataclass
 
 from .fast_memory import FastPPOMemory
+
+
+@dataclass
+class BatchedState:
+    """批量化状态封装，用于一次性图批处理推理"""
+    node_embeddings: torch.Tensor          # 拼接后的所有节点嵌入 [total_nodes, node_dim]
+    region_embeddings: torch.Tensor        # 拼接后的所有区域嵌入 [total_regions, region_dim]
+    boundary_nodes: torch.Tensor           # 边界节点在 node_embeddings 中的全局索引 [num_boundary]
+    node_batch_idx: torch.Tensor           # 每个节点对应的样本索引 [total_nodes]
+    region_batch_idx: torch.Tensor         # 每个区域对应的样本索引 [total_regions]
+    action_mask: torch.Tensor              # 拼接后的动作掩码 [total_nodes, num_partitions]
 
 
 def _check_tensor(t: torch.Tensor, tag: str):
@@ -90,13 +102,29 @@ def safe_log_prob(probs: torch.Tensor, epsilon: float = 1e-12):
 
 try:
     from code.src.gat import HeteroGraphEncoder
+    from torch_scatter import scatter_mean, scatter_sum
 except ImportError:
     # 如果相对导入失败，尝试绝对导入
     try:
         from code.src.gat import HeteroGraphEncoder
+        from torch_scatter import scatter_mean, scatter_sum
     except ImportError:
         # 如果都失败了，定义一个占位符
         HeteroGraphEncoder = None
+        def scatter_mean(src, index, dim=0):  # type: ignore
+            """简易回退：使用scatter_add后再除计数，性能略低"""
+            ones = torch.ones_like(index, dtype=src.dtype, device=src.device)
+            sum_ = torch.zeros(index.max().item() + 1, *src.shape[1:], device=src.device, dtype=src.dtype)
+            count = torch.zeros_like(sum_)
+            sum_.index_add_(dim, index, src)
+            count.index_add_(0, index, ones)
+            count = count.clamp(min=1)  # 防止除零
+            return sum_ / count
+
+        def scatter_sum(src, index, dim=0):  # type: ignore
+            sum_ = torch.zeros(index.max().item() + 1, *src.shape[1:], device=src.device, dtype=src.dtype)
+            sum_.index_add_(dim, index, src)
+            return sum_
 
 
 class ActorNetwork(nn.Module):
@@ -165,47 +193,65 @@ class ActorNetwork(nn.Module):
         # 初始化网络权重
         self._init_weights()
         
-    def forward(self, 
-                node_embeddings: torch.Tensor,
-                region_embeddings: torch.Tensor,
-                boundary_nodes: torch.Tensor,
-                action_mask: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, *args, **kwargs):
+        """支持两种调用方式：
+        1. forward(batched_state: BatchedState)
+        2. forward(node_embeddings, region_embeddings, boundary_nodes, action_mask)（旧接口）
         """
-        动作选择的前向传播
-        
-        Args:
-            node_embeddings: 节点嵌入 [total_nodes, node_dim]
-            region_embeddings: 区域嵌入 [num_partitions, region_dim]
-            boundary_nodes: 边界节点索引 [num_boundary]
-            action_mask: 动作掩码 [total_nodes, num_partitions]
-            
-        Returns:
-            node_logits: 节点选择logits [num_boundary]
-            partition_logits: 分区选择logits [num_boundary, num_partitions]
-        """
-        # 来自区域嵌入的全局上下文
-        global_context = self.global_encoder(region_embeddings.mean(dim=0, keepdim=True))
-        global_context = global_context.expand(len(boundary_nodes), -1)
-        
-        # 获取边界节点嵌入
-        boundary_embeddings = node_embeddings[boundary_nodes]  # [num_boundary, node_dim]
-        
-        # 将节点嵌入与全局上下文结合
-        combined_features = torch.cat([boundary_embeddings, global_context], dim=1)
-        
-        # 节点选择logits
-        node_logits = self.node_selector(combined_features).squeeze(-1)  # [num_boundary]
-        
-        # 每个边界节点的分区选择logits
-        partition_logits = self.partition_selector(combined_features)  # [num_boundary, num_partitions]
-        
-        # 将动作掩码应用于分区logits（使用数值稳定的方法）
-        if len(boundary_nodes) > 0:
-            boundary_mask = action_mask[boundary_nodes]  # [num_boundary, num_partitions]
-            # 使用-1e9代替-inf，避免NaN/Inf问题
+        # 新批处理接口
+        if len(args) == 1 and isinstance(args[0], BatchedState):
+            bs: BatchedState = args[0]
+            if bs.region_embeddings.numel() == 0:
+                # 空批次保护
+                return (torch.zeros(0, device=bs.node_embeddings.device),
+                        torch.zeros(0, self.num_partitions, device=bs.node_embeddings.device))
+
+            # —— 计算批次级全局上下文 ——
+            global_context_per_batch = self.global_encoder(
+                scatter_mean(bs.region_embeddings, bs.region_batch_idx, dim=0)
+            )  # [batch_size, region_dim]
+
+            if bs.boundary_nodes.numel() == 0:
+                return (torch.zeros(0, device=bs.node_embeddings.device),
+                        torch.zeros(0, self.num_partitions, device=bs.node_embeddings.device))
+
+            boundary_batch_idx = bs.node_batch_idx[bs.boundary_nodes]  # [num_boundary]
+            global_context = global_context_per_batch[boundary_batch_idx]  # [num_boundary, region_dim]
+            boundary_embeddings = bs.node_embeddings[bs.boundary_nodes]  # [num_boundary, node_dim]
+
+            combined_features = torch.cat([boundary_embeddings, global_context], dim=1)
+            node_logits = self.node_selector(combined_features).squeeze(-1)
+            partition_logits = self.partition_selector(combined_features)
+
+            # 掩码
+            boundary_mask = bs.action_mask[bs.boundary_nodes]
             partition_logits = partition_logits.masked_fill(~boundary_mask, -1e9)
-        
-        return node_logits, partition_logits
+            return node_logits, partition_logits
+
+        # —— 单样本快速路径 ——
+        if len(args) == 4:
+            node_embeddings, region_embeddings, boundary_nodes, action_mask = args  # type: ignore
+
+            if boundary_nodes.numel() == 0:
+                device = node_embeddings.device
+                return (torch.zeros(0, device=device), torch.zeros(0, self.num_partitions, device=device))
+
+            # 全局上下文
+            global_context = self.global_encoder(region_embeddings.mean(dim=0, keepdim=True))
+            global_context = global_context.expand(len(boundary_nodes), -1)
+
+            # 组合特征
+            boundary_emb = node_embeddings[boundary_nodes]
+            combined_features = torch.cat([boundary_emb, global_context], dim=1)
+
+            node_logits = self.node_selector(combined_features).squeeze(-1)
+            partition_logits = self.partition_selector(combined_features)
+
+            partition_logits = partition_logits.masked_fill(~action_mask[boundary_nodes], -1e9)
+
+            return node_logits, partition_logits
+
+        raise TypeError("ActorNetwork.forward 仅支持 (BatchedState) 或 4-张量单样本接口。")
 
     def _init_weights(self):
         """初始化网络权重以提高数值稳定性"""
@@ -269,39 +315,54 @@ class CriticNetwork(nn.Module):
         # 初始化网络权重
         self._init_weights()
         
-    def forward(self,
-                node_embeddings: torch.Tensor,
-                region_embeddings: torch.Tensor,
-                boundary_nodes: torch.Tensor) -> torch.Tensor:
+    def forward(self, *args, **kwargs):
+        """支持两种调用方式：
+        1. forward(batched_state: BatchedState) -> Tensor[batch]
+        2. forward(node_embeddings, region_embeddings, boundary_nodes) -> Tensor
         """
-        价值估计的前向传播
-        
-        Args:
-            node_embeddings: 节点嵌入 [total_nodes, node_dim]
-            region_embeddings: 区域嵌入 [num_partitions, region_dim]
-            boundary_nodes: 边界节点索引 [num_boundary]
-            
-        Returns:
-            state_value: 估计的状态价值 [1]
-        """
-        # 从区域嵌入编码全局状态
-        global_state = self.state_encoder(region_embeddings.mean(dim=0, keepdim=True))
-        
-        # 编码边界信息
-        if len(boundary_nodes) > 0:
-            boundary_embeddings = node_embeddings[boundary_nodes]
-            boundary_info = self.boundary_encoder(boundary_embeddings.mean(dim=0, keepdim=True))
-        else:
-            boundary_info = torch.zeros(1, self.boundary_encoder[-1].out_features, 
-                                       device=node_embeddings.device)
-        
-        # 结合特征
-        combined_features = torch.cat([global_state, boundary_info], dim=1)
-        
-        # 估计价值
-        value = self.value_head(combined_features)
-        
-        return value.squeeze(-1)
+        if len(args) == 1 and isinstance(args[0], BatchedState):
+            bs: BatchedState = args[0]
+            if bs.region_embeddings.numel() == 0:
+                return torch.zeros(0, device=bs.node_embeddings.device)
+
+            # 全局状态编码 per batch
+            global_state = self.state_encoder(
+                scatter_mean(bs.region_embeddings, bs.region_batch_idx, dim=0)
+            )  # [batch_size, hidden]
+
+            # 边界信息
+            if bs.boundary_nodes.numel() > 0:
+                boundary_embeddings = bs.node_embeddings[bs.boundary_nodes]
+                boundary_batch_idx = bs.node_batch_idx[bs.boundary_nodes]
+                boundary_mean = scatter_mean(boundary_embeddings, boundary_batch_idx, dim=0)
+                boundary_info = self.boundary_encoder(boundary_mean)
+            else:
+                boundary_info = torch.zeros(global_state.size(0), self.boundary_encoder[-1].out_features,
+                                            device=global_state.device)
+
+            combined = torch.cat([global_state, boundary_info], dim=1)
+            value = self.value_head(combined)
+            return value.squeeze(-1)
+
+        # —— 单样本快速路径 ——
+        if len(args) == 3:
+            node_embeddings, region_embeddings, boundary_nodes = args  # type: ignore
+
+            # 全局上下文
+            global_state = self.state_encoder(region_embeddings.mean(dim=0, keepdim=True))
+
+            # 边界信息
+            if boundary_nodes.numel() > 0:
+                boundary_embeddings = node_embeddings[boundary_nodes]
+                boundary_info = self.boundary_encoder(boundary_embeddings.mean(dim=0, keepdim=True))
+            else:
+                boundary_info = torch.zeros(1, self.boundary_encoder[-1].out_features, device=node_embeddings.device)
+
+            combined = torch.cat([global_state, boundary_info], dim=1)
+            value = self.value_head(combined)
+            return value.squeeze(-1)
+
+        raise TypeError("CriticNetwork.forward 仅支持 (BatchedState) 或 3-张量单样本接口。")
 
     def _init_weights(self):
         """初始化网络权重以提高数值稳定性"""
@@ -494,16 +555,37 @@ class PPOAgent:
                         action_mask[node_idx, p] = True
         
         with torch.no_grad():
-            # 获取网络输出
-            node_logits, partition_logits = self.actor(
-                node_embeddings, region_embeddings, boundary_nodes, action_mask
-            )
-            
-            value = self.critic(node_embeddings, region_embeddings, boundary_nodes)
-            
+            # -------- 1) 仅计算节点 logits --------
+            # 若无边界节点直接返回
             if len(boundary_nodes) == 0:
-                # 没有有效动作
+                # 构造单样本 BatchedState 以复用批处理逻辑
+                batched_state_single = self._prepare_batched_state([state])
+                value = self.critic(batched_state_single)
                 return None, 0.0, value.item()
+
+            # 计算全局上下文（与 ActorNetwork 内部保持一致）
+            global_context = self.actor.global_encoder(
+                region_embeddings.mean(dim=0, keepdim=True)
+            )  # [1, region_dim]
+
+            # 边界节点嵌入及组合特征
+            boundary_embeddings = node_embeddings[boundary_nodes]  # [B, node_dim]
+            combined_features = torch.cat(
+                [boundary_embeddings, global_context.expand(len(boundary_nodes), -1)],
+                dim=1
+            )  # [B, node_dim + region_dim]
+
+            # 节点 logits
+            node_logits = self.actor.node_selector(combined_features).squeeze(-1)
+
+            # 若某节点在 action_mask 中无任何可选分区，则禁止采样该节点
+            valid_partition_per_node = action_mask[boundary_nodes].any(dim=1)  # [B]
+            node_logits = node_logits.masked_fill(~valid_partition_per_node, -1e9)
+
+            # Critic 估值
+            # 构造单样本 BatchedState 以复用批处理逻辑
+            batched_state_single = self._prepare_batched_state([state])
+            value = self.critic(batched_state_single)
             
             # 采样动作（使用数值稳定的方法）
             if training:
@@ -524,8 +606,15 @@ class PPOAgent:
                 node_dist = torch.distributions.Categorical(node_probs)
                 node_action = node_dist.sample()
 
-                # 对分区logits进行相同的处理
-                partition_logits_selected = partition_logits[node_action]
+                # -------- 2) 针对选中节点计算分区 logits --------
+                partition_logits_selected = self.actor.partition_selector(
+                    combined_features[node_action]
+                )
+                # 仅对该节点适用掩码
+                partition_mask_selected = action_mask[boundary_nodes[node_action]]
+                partition_logits_selected = partition_logits_selected.masked_fill(
+                    ~partition_mask_selected, -1e9
+                )
                 
                 if torch.isnan(partition_logits_selected).any() or torch.isinf(partition_logits_selected).any():
                     print(f"⚠️ 检测到partition_logits中的NaN/Inf值: {partition_logits_selected}")
@@ -547,9 +636,16 @@ class PPOAgent:
                 partition_log_prob = safe_log_prob(partition_probs)[partition_action]
                 log_prob = node_log_prob + partition_log_prob
             else:
-                # 贪心选择
+                # -------- 贪心模式下也仅计算一次分区 logits --------
                 node_action = torch.argmax(node_logits)
-                partition_action = torch.argmax(partition_logits[node_action])
+                partition_logits_greedy = self.actor.partition_selector(
+                    combined_features[node_action]
+                )
+                partition_mask_greedy = action_mask[boundary_nodes[node_action]]
+                partition_logits_greedy = partition_logits_greedy.masked_fill(
+                    ~partition_mask_greedy, -1e9
+                )
+                partition_action = torch.argmax(partition_logits_greedy)
                 log_prob = 0.0
             
             # 转换为实际索引
@@ -642,154 +738,95 @@ class PPOAgent:
         return advantages, returns
         
     def _ppo_epoch(self, states, actions, old_log_probs, advantages, returns):
-        """单个PPO训练轮 - 修复梯度计算图重复使用问题"""
-        # 累积所有损失，然后一次性反向传播
-        total_actor_losses = []
-        total_critic_losses = []
-        total_entropies = []
+        """单个PPO训练轮（批处理版本，无显式Python循环）"""
+        batch_size = len(states)
+        if batch_size == 0:
+            return {'actor_loss': 0.0, 'critic_loss': 0.0, 'entropy': 0.0}
 
-        # 清零梯度
+        # ---- 1. 数据批量化 ----
+        batched_state = self._prepare_batched_state(states)
+
+        # 计算每个样本在 node_embeddings 中的起始偏移量，用于将局部节点索引转换为全局索引
+        node_offsets = torch.zeros(batch_size, dtype=torch.long, device=self.device)
+        offset = 0
+        for i, s in enumerate(states):
+            node_offsets[i] = offset
+            offset += s['node_embeddings'].size(0)
+
+        # 将动作拆分为节点索引和分区索引
+        node_indices_local = torch.tensor([a[0] for a in actions], dtype=torch.long, device=self.device)
+        partition_indices = torch.tensor([a[1] - 1 for a in actions], dtype=torch.long, device=self.device)  # 0-based
+        node_indices_global = node_indices_local + node_offsets  # [batch_size]
+
+        # ---- 2. 前向传播 ----
+        node_logits, partition_logits = self.actor(batched_state)  # logits 按 boundary_nodes 顺序
+        values = self.critic(batched_state)  # [batch_size]
+
+        # ---- 3. 选取所执行动作对应的 logits/probs ----
+        # 构造 (batch_size, num_boundary) 布尔矩阵，找到每个样本对应 boundary 位置
+        boundary_nodes = batched_state.boundary_nodes  # [num_boundary]
+        boundary_batch_idx = batched_state.node_batch_idx[boundary_nodes]  # [num_boundary]
+
+        # 使用张量比较计算位置索引，避免Python循环
+        equal_matrix = (boundary_nodes.unsqueeze(0) == node_indices_global.unsqueeze(1))  # [batch_size, num_boundary]
+        selected_positions = equal_matrix.float().argmax(dim=1)  # [batch_size] 每行保证唯一 True
+
+        # 取出对应节点 logits 行
+        selected_node_logits = node_logits[selected_positions]  # [batch_size]
+        selected_partition_logits = partition_logits[selected_positions]  # [batch_size, num_partitions]
+
+        # ---- 4. 计算概率 & 对数概率 ----
+        # 节点 softmax 需要在各自样本范围内执行
+        node_logits_clipped = torch.clamp(node_logits, min=-20, max=20)
+        exp_node = torch.exp(node_logits_clipped)
+        sum_exp_node = scatter_sum(exp_node, boundary_batch_idx, dim=0)  # [batch_size]
+        node_probs = exp_node / sum_exp_node[boundary_batch_idx]  # [num_boundary]
+        selected_node_probs = node_probs[selected_positions]  # [batch_size]
+
+        # 分区概率（仅选中节点）
+        partition_logits_clipped = torch.clamp(selected_partition_logits, min=-20, max=20)
+        exp_part = torch.exp(partition_logits_clipped)
+        partition_probs = exp_part / exp_part.sum(dim=1, keepdim=True)
+        selected_partition_probs = partition_probs[torch.arange(batch_size, device=self.device), partition_indices]
+
+        # 安全取对数
+        new_log_probs = safe_log_prob(selected_node_probs) + safe_log_prob(selected_partition_probs)
+
+        # ---- 5. PPO 损失 ----
+        log_prob_diff = torch.clamp(new_log_probs - old_log_probs, min=-20, max=20)
+        ratio = torch.exp(log_prob_diff)
+        ratio = torch.nan_to_num(ratio, nan=1.0, posinf=1.0, neginf=0.0)
+
+        surr1 = ratio * advantages
+        surr2 = torch.clamp(ratio, 1 - self.eps_clip, 1 + self.eps_clip) * advantages
+        actor_loss = -torch.min(surr1, surr2).mean()
+
+        critic_loss = F.mse_loss(values.squeeze(), returns.squeeze())
+
+        # ---- 6. 熵 ----
+        node_entropy_all = -(node_probs * safe_log_prob(node_probs))
+        node_entropy_per_batch = scatter_sum(node_entropy_all, boundary_batch_idx, dim=0)
+        partition_entropy = -(partition_probs * safe_log_prob(partition_probs)).sum(dim=1)  # [batch_size]
+        entropy = (node_entropy_per_batch + partition_entropy).mean()
+
+        # ---- 7. 反向传播 & 更新 ----
+        total_loss = actor_loss + self.value_coef * critic_loss - self.entropy_coef * entropy
+
         self.actor_optimizer.zero_grad()
         self.critic_optimizer.zero_grad()
-
-        for i in range(len(states)):
-            state = states[i]
-            action = actions[i]
-            old_log_prob = old_log_probs[i]
-            advantage = advantages[i]
-            return_val = returns[i]
-
-            # 获取当前策略输出 - 确保每次都重新计算
-            node_embeddings = state['node_embeddings'].detach().clone()  # 断开计算图
-            region_embeddings = state['region_embeddings'].detach().clone()  # 断开计算图
-            boundary_nodes = state['boundary_nodes']
-
-            if len(boundary_nodes) == 0:
-                continue
-
-            # 动作掩码
-            action_mask = torch.zeros(
-                node_embeddings.shape[0], self.num_partitions,
-                dtype=torch.bool, device=self.device
-            )
-            current_partition = state['current_partition']
-            for node_idx in boundary_nodes:
-                current_node_partition = current_partition[node_idx].item()
-                for p in range(self.num_partitions):
-                    if p + 1 != current_node_partition:
-                        action_mask[node_idx, p] = True
-
-            # 重新前向传播，创建新的计算图
-            node_logits, partition_logits = self.actor(
-                node_embeddings, region_embeddings, boundary_nodes, action_mask
-            )
-
-            value = self.critic(node_embeddings, region_embeddings, boundary_nodes)
-
-            # 计算新的对数概率
-            node_idx, partition_idx = action
-            node_pos = (boundary_nodes == node_idx).nonzero(as_tuple=True)[0]
-
-            if len(node_pos) == 0:
-                continue
-
-            node_pos = node_pos[0]
-
-            # 添加数值稳定性检查
-            if torch.isnan(node_logits).any() or torch.isinf(node_logits).any():
-                print(f"⚠️ PPO更新中检测到node_logits的NaN/Inf值")
-                node_logits_clipped = torch.zeros_like(node_logits)
-            else:
-                node_logits_clipped = torch.clamp(node_logits, min=-20, max=20)
-
-            partition_logits_selected = partition_logits[node_pos]
-            if torch.isnan(partition_logits_selected).any() or torch.isinf(partition_logits_selected).any():
-                print(f"⚠️ PPO更新中检测到partition_logits的NaN/Inf值")
-                partition_logits_clipped = torch.zeros_like(partition_logits_selected)
-            else:
-                partition_logits_clipped = torch.clamp(partition_logits_selected, min=-20, max=20)
-
-            # 使用数值稳定的概率计算
-            node_probs = F.softmax(node_logits_clipped, dim=0).clamp(min=1e-12)
-            partition_probs = F.softmax(partition_logits_clipped, dim=0).clamp(min=1e-12)
-
-            # 安全的对数概率计算
-            node_log_prob = safe_log_prob(node_probs)[node_pos]
-            partition_log_prob = safe_log_prob(partition_probs)[partition_idx - 1]
-            new_log_prob = node_log_prob + partition_log_prob
-
-            # 🔧 修复2: ratio = exp(logπ_new – logπ_old) 双重保护
-            log_prob_diff = torch.clamp(new_log_prob - old_log_prob, min=-20, max=20)
-            ratio = torch.exp(log_prob_diff)
-            # 防守式替换所有异常
-            ratio = torch.nan_to_num(ratio, nan=1.0, posinf=1.0, neginf=0.0)
-
-            surr1 = ratio * advantage
-            surr2 = torch.clamp(ratio, 1 - self.eps_clip, 1 + self.eps_clip) * advantage
-            actor_loss = -torch.min(surr1, surr2)
-
-            # 评论家损失 - 确保维度匹配
-            if value.dim() > 0:
-                value = value.squeeze()
-            if return_val.dim() > 0:
-                return_val = return_val.squeeze()
-            critic_loss = F.mse_loss(value, return_val)
-
-            # 熵计算（数值稳定）
-            entropy = -(node_probs * safe_log_prob(node_probs)).sum()
-            entropy += -(partition_probs * safe_log_prob(partition_probs)).sum()
-
-            # 累积损失
-            total_actor_losses.append(actor_loss)
-            total_critic_losses.append(critic_loss)
-            total_entropies.append(entropy)
-
-        # 如果没有有效的样本，返回零损失
-        if not total_actor_losses:
-            return {
-                'actor_loss': 0.0,
-                'critic_loss': 0.0,
-                'entropy': 0.0
-            }
-
-        # 计算平均损失
-        avg_actor_loss = torch.stack(total_actor_losses).mean()
-        avg_critic_loss = torch.stack(total_critic_losses).mean()
-        avg_entropy = torch.stack(total_entropies).mean()
-
-        # 总损失
-        total_loss = avg_actor_loss + self.value_coef * avg_critic_loss - self.entropy_coef * avg_entropy
-
-        # 一次性反向传播
         total_loss.backward()
 
-        # 🔧 修复4: 梯度裁剪一次性覆盖全部可训练参数
         if self.max_grad_norm is not None:
             all_params = list(self.actor.parameters()) + list(self.critic.parameters())
-            grad_norm = torch.nn.utils.clip_grad_norm_(all_params, self.max_grad_norm)
-            # 可选：打印梯度范数用于调试
-            if hasattr(self, '_debug_grad_norm') and self._debug_grad_norm:
-                print(f"📊 梯度范数: {grad_norm:.4f}")
-        else:
-            # 即使不裁剪，也计算梯度范数用于监控
-            all_params = list(self.actor.parameters()) + list(self.critic.parameters())
-            total_norm = 0
-            for p in all_params:
-                if p.grad is not None:
-                    param_norm = p.grad.data.norm(2)
-                    total_norm += param_norm.item() ** 2
-            grad_norm = total_norm ** (1. / 2)
-            if hasattr(self, '_debug_grad_norm') and self._debug_grad_norm:
-                print(f"📊 梯度范数(未裁剪): {grad_norm:.4f}")
+            torch.nn.utils.clip_grad_norm_(all_params, self.max_grad_norm)
 
-        # 一次性更新参数
         self.actor_optimizer.step()
         self.critic_optimizer.step()
 
         return {
-            'actor_loss': avg_actor_loss.item(),
-            'critic_loss': avg_critic_loss.item(),
-            'entropy': avg_entropy.item()
+            'actor_loss': actor_loss.item(),
+            'critic_loss': critic_loss.item(),
+            'entropy': entropy.item()
         }
 
     def enable_gradient_norm_debug(self, enable: bool = True):
@@ -832,3 +869,75 @@ class PPOAgent:
             return {'actor_lr': actor_lr, 'critic_lr': critic_lr}
         except:
             return {'actor_lr': 0.0, 'critic_lr': 0.0}
+
+    def _prepare_batched_state(self, states_list: List[Dict[str, torch.Tensor]]) -> "BatchedState":
+        """将若干原始state列表拼接为批处理BatchedState。"""
+        # 累积列表
+        node_emb_list: List[torch.Tensor] = []
+        region_emb_list: List[torch.Tensor] = []
+        action_mask_list: List[torch.Tensor] = []
+        node_batch_idx_list: List[torch.Tensor] = []
+        region_batch_idx_list: List[torch.Tensor] = []
+        boundary_nodes_global: List[torch.Tensor] = []
+
+        node_offset = 0
+        region_offset = 0
+
+        for batch_id, state in enumerate(states_list):
+            node_embeddings = state['node_embeddings'].detach()
+            region_embeddings = state['region_embeddings'].detach()
+            boundary_nodes = state['boundary_nodes']
+            current_partition = state['current_partition']
+
+            num_nodes = node_embeddings.size(0)
+            num_regions = region_embeddings.size(0)
+
+            # ==== 动作掩码构造 ====
+            if 'action_mask' in state:
+                action_mask = state['action_mask']
+            else:
+                # 复制自旧实现的简化逻辑
+                action_mask = torch.zeros(
+                    num_nodes, self.num_partitions, dtype=torch.bool, device=self.device
+                )
+                for node_idx in boundary_nodes:
+                    current_node_partition = current_partition[node_idx].item()
+                    for p in range(self.num_partitions):
+                        if p + 1 != current_node_partition:
+                            action_mask[node_idx, p] = True
+
+            # ==== 累积张量 ====
+            node_emb_list.append(node_embeddings)
+            region_emb_list.append(region_embeddings)
+            action_mask_list.append(action_mask)
+
+            # batch idx
+            node_batch_idx_list.append(torch.full((num_nodes,), batch_id, dtype=torch.long, device=self.device))
+            region_batch_idx_list.append(torch.full((num_regions,), batch_id, dtype=torch.long, device=self.device))
+
+            # 边界节点全局索引
+            if boundary_nodes.numel() > 0:
+                boundary_nodes_global.append(boundary_nodes + node_offset)
+
+            node_offset += num_nodes
+            region_offset += num_regions
+
+        # ===== 拼接 =====
+        node_embeddings_cat = torch.cat(node_emb_list, dim=0)
+        region_embeddings_cat = torch.cat(region_emb_list, dim=0)
+        action_mask_cat = torch.cat(action_mask_list, dim=0)
+        node_batch_idx = torch.cat(node_batch_idx_list, dim=0)
+        region_batch_idx = torch.cat(region_batch_idx_list, dim=0)
+        if boundary_nodes_global:
+            boundary_nodes_cat = torch.cat(boundary_nodes_global, dim=0)
+        else:
+            boundary_nodes_cat = torch.zeros(0, dtype=torch.long, device=self.device)
+
+        return BatchedState(
+            node_embeddings=node_embeddings_cat,
+            region_embeddings=region_embeddings_cat,
+            boundary_nodes=boundary_nodes_cat,
+            node_batch_idx=node_batch_idx,
+            region_batch_idx=region_batch_idx,
+            action_mask=action_mask_cat,
+        )
