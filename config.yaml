@@ -63,6 +63,7 @@ agent:
   hidden_dim: 256
   dropout: 0.1
   max_grad_norm: 0.5
+  memory_capacity: 10000  # 增加内存容量以支持长episode训练
   actor_scheduler:
     enabled: true
     warmup_updates: 200
@@ -237,6 +238,70 @@ debug:
     use_rich_output: true
     show_training_summary: true
 
+# 场景感知奖励配置 (推荐启用)
+scenario_aware_reward:
+  enabled: true
+  
+  # 场景分类配置
+  scenario_classification:
+    load_scale_bins: [0.8, 1.0, 1.2]  # 负荷缩放分段
+    max_scenarios: 50                  # 最大场景数限制
+    
+  # 历史追踪器配置
+  history_tracking:
+    window_size: 20                    # 最近窗口大小
+    min_samples_for_percentile: 5      # 百分位计算最小样本数
+    max_history_per_scenario: 500      # 每个场景最大历史记录数
+    min_samples_threshold: 3           # 最小样本阈值
+    ema_alpha: 0.1                     # EMA更新系数
+    
+  # 两级查询基线系统配置
+  baseline_query:
+    enable_category_fallback: true     # 启用类别回退
+    enable_global_fallback: true       # 启用全局回退
+    category_confidence_threshold: 0.8 # 类别基线置信度阈值
+    global_confidence_threshold: 0.6   # 全局基线置信度阈值
+    
+  # 平台期检测配置
+  detection_config:
+    window_size: 15                    # 检测窗口大小
+    min_improvement_rate: 0.005        # 最小改进率阈值
+    stability_threshold: 0.8           # 稳定性阈值
+    min_percentile: 0.7               # 最小百分位阈值
+    confidence_threshold: 0.8          # 置信度阈值
+    
+  # 相对奖励配置
+  relative_reward:
+    enabled: true
+    base_reward_weight: 0.5            # 基础奖励权重
+    improvement_bonus: 0.1             # 改进奖励加成
+    
+    # 动态权重调整
+    dynamic_weighting:
+      enabled: true                    # 启用动态权重调整
+      min_data_threshold: 5            # 最小数据阈值
+      adjustment_factor: 0.3           # 权重调整因子
+      
+    # 探索奖励机制
+    exploration_reward:
+      enabled: true                    # 启用探索奖励
+      base_bonus: 0.05                 # 基础探索奖励
+      priority_multiplier: 2.0         # 优先级倍数
+      decay_episodes: 1000             # 衰减episode数
+      quality_boost: true              # 质量调整开关
+      
+      # 新场景类型奖励权重
+      scenario_type_weights:
+        new_exact_scenario: 0.8        # 全新精确场景
+        insufficient_data_scenario: 0.6 # 数据不足场景
+        new_category: 1.0              # 全新类别
+        
+    # 奖励计算方法
+    method: 'relative_improvement'     # 或 'range_normalized', 'popart'
+    use_difficulty_scaling: true       # 启用难度缩放
+    clip_range: [-1.0, 1.0]           # 奖励裁剪范围
+    epsilon: 1e-8                      # 数值稳定性参数
+
 # 训练模式预设
 fast:
   training:
@@ -271,6 +336,7 @@ full:
 ieee118:
   data:
     case_name: ieee118
+    normalize: true
   environment:
     num_partitions: 8
     max_steps: 500

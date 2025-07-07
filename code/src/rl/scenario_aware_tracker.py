@@ -30,11 +30,15 @@ class ScenarioAwareHistoryTracker:
         """
         self.config = config or {}
         
-        # 配置参数
-        self.window_size = self.config.get('window_size', 15)
-        self.min_samples_for_percentile = self.config.get('min_samples_for_percentile', 5)
-        self.max_history_per_scenario = self.config.get('max_history_per_scenario', 1000)
-        self.min_samples_threshold = self.config.get('min_samples_threshold', 3)
+        # 从新的配置结构中提取参数
+        history_config = self.config.get('history_tracking', {})
+        scenario_classification_config = self.config.get('scenario_classification', {})
+        
+        # 配置参数（使用新的分层配置结构）
+        self.window_size = history_config.get('window_size', 15)
+        self.min_samples_for_percentile = history_config.get('min_samples_for_percentile', 5)
+        self.max_history_per_scenario = history_config.get('max_history_per_scenario', 1000)
+        self.min_samples_threshold = history_config.get('min_samples_threshold', 3)
         
         # 核心数据结构
         self.histories = defaultdict(list)  # {scenario_key: [scores]}
@@ -42,15 +46,14 @@ class ScenarioAwareHistoryTracker:
         self.scenario_stats = defaultdict(dict)  # 场景统计信息
         
         # 场景分类器
-        classifier_config = self.config.get('scenario_classification', {})
-        self.classifier = ScenarioClassifier(classifier_config)
+        self.classifier = ScenarioClassifier(scenario_classification_config)
         
         # 统计信息
         self.total_updates = 0
         self.last_update_time = time.time()
         
         # EMA参数
-        self.ema_alpha = self.config.get('ema_alpha', 0.1)
+        self.ema_alpha = history_config.get('ema_alpha', 0.1)
     
     def update_history(self, score: float, scenario_context: ScenarioContext):
         """
@@ -332,3 +335,227 @@ class ScenarioAwareHistoryTracker:
         # 恢复分类器统计
         classifier_stats = data.get('classifier_stats', {})
         self.classifier.scenario_counts = classifier_stats 
+
+    def get_scenario_baseline(self, scenario_context: ScenarioContext) -> Tuple[float, str, Dict[str, Any]]:
+        """
+        获取场景基线质量分数 - 升级版两级查询
+        
+        查询策略：
+        Level 1: 精确场景匹配
+        Level 2: 同类场景平均
+        Level 3: 全局基线回退
+        
+        Args:
+            scenario_context: 场景上下文
+            
+        Returns:
+            Tuple[float, str, Dict]: (基线分数, 数据来源, 详细信息)
+        """
+        scenario_key = self.classifier.classify(scenario_context)
+        scenario_category = self.classifier.extract_category(scenario_key)
+        
+        details = {
+            'scenario_key': scenario_key,
+            'scenario_category': scenario_category,
+            'query_level': None,
+            'data_source_details': {}
+        }
+        
+        # === Level 1: 精确场景匹配 ===
+        if scenario_key in self.histories and len(self.histories[scenario_key]) >= self.min_samples_threshold:
+            scenario_scores = self.histories[scenario_key]
+            baseline = np.mean(scenario_scores)
+            details.update({
+                'query_level': 1,
+                'data_source_details': {
+                    'exact_scenario_count': len(scenario_scores),
+                    'recent_scores': scenario_scores[-5:] if len(scenario_scores) >= 5 else scenario_scores,
+                    'score_range': [float(np.min(scenario_scores)), float(np.max(scenario_scores))]
+                }
+            })
+            return float(baseline), 'exact_scenario', details
+        
+        # === Level 2: 同类场景平均 ===
+        category_scenarios = self.classifier.list_scenarios_in_category(scenario_category)
+        category_scores = []
+        category_details = {}
+        
+        for category_scenario in category_scenarios:
+            if category_scenario in self.histories and len(self.histories[category_scenario]) >= self.min_samples_threshold:
+                scores = self.histories[category_scenario]
+                category_scores.extend(scores)
+                category_details[category_scenario] = {
+                    'count': len(scores),
+                    'mean': float(np.mean(scores)),
+                    'recent_mean': float(np.mean(scores[-5:])) if len(scores) >= 5 else float(np.mean(scores))
+                }
+        
+        if category_scores:
+            category_baseline = np.mean(category_scores)
+            details.update({
+                'query_level': 2,
+                'data_source_details': {
+                    'category_description': self.classifier.get_category_description(scenario_category),
+                    'contributing_scenarios': len(category_details),
+                    'total_category_scores': len(category_scores),
+                    'scenario_details': category_details,
+                    'category_score_range': [float(np.min(category_scores)), float(np.max(category_scores))]
+                }
+            })
+            return float(category_baseline), 'category_average', details
+        
+        # === Level 3: 全局基线回退 ===
+        all_scores = []
+        global_details = {}
+        
+        for scenario_id, scores in self.histories.items():
+            if len(scores) >= self.min_samples_threshold:
+                all_scores.extend(scores)
+                global_details[scenario_id] = {
+                    'count': len(scores),
+                    'category': self.classifier.extract_category(scenario_id)
+                }
+        
+        if all_scores:
+            global_baseline = np.mean(all_scores)
+            details.update({
+                'query_level': 3,
+                'data_source_details': {
+                    'total_scenarios': len(global_details),
+                    'total_scores': len(all_scores),
+                    'global_score_range': [float(np.min(all_scores)), float(np.max(all_scores))],
+                    'scenario_summary': global_details
+                }
+            })
+            return float(global_baseline), 'global_fallback', details
+        
+        # === 无历史数据 ===
+        details.update({
+            'query_level': 0,
+            'data_source_details': {
+                'reason': 'no_historical_data',
+                'total_known_scenarios': len(self.histories),
+                'total_updates': self.total_updates
+            }
+        })
+        return 0.5, 'no_data', details  # 保守的默认值
+
+    def is_new_scenario(self, scenario_context: ScenarioContext) -> Tuple[bool, str]:
+        """
+        判断是否为新场景（用于探索奖励判断）
+        
+        Args:
+            scenario_context: 场景上下文
+            
+        Returns:
+            Tuple[bool, str]: (是否为新场景, 新场景类型)
+        """
+        scenario_key = self.classifier.classify(scenario_context)
+        scenario_category = self.classifier.extract_category(scenario_key)
+        
+        # 检查精确场景
+        if scenario_key not in self.histories:
+            return True, 'new_exact_scenario'
+        
+        if len(self.histories[scenario_key]) < self.min_samples_threshold:
+            return True, 'insufficient_data_scenario'
+        
+        # 检查类别
+        category_scenarios = self.classifier.list_scenarios_in_category(scenario_category)
+        category_has_sufficient_data = False
+        
+        for category_scenario in category_scenarios:
+            if (category_scenario in self.histories and 
+                len(self.histories[category_scenario]) >= self.min_samples_threshold):
+                category_has_sufficient_data = True
+                break
+        
+        if not category_has_sufficient_data:
+            return True, 'new_category'
+        
+        return False, 'known_scenario'
+
+    def get_exploration_context(self, scenario_context: ScenarioContext) -> Dict[str, Any]:
+        """
+        获取探索上下文信息（用于计算探索奖励）
+        
+        Args:
+            scenario_context: 场景上下文
+            
+        Returns:
+            探索上下文字典
+        """
+        scenario_key = self.classifier.classify(scenario_context)
+        scenario_category = self.classifier.extract_category(scenario_key)
+        
+        is_new, new_type = self.is_new_scenario(scenario_context)
+        
+        # 计算数据稀疏性
+        exact_data_count = len(self.histories.get(scenario_key, []))
+        
+        category_scenarios = self.classifier.list_scenarios_in_category(scenario_category)
+        category_data_count = sum(
+            len(self.histories.get(cat_scenario, [])) 
+            for cat_scenario in category_scenarios
+        )
+        
+        global_data_count = sum(len(scores) for scores in self.histories.values())
+        
+        return {
+            'scenario_key': scenario_key,
+            'scenario_category': scenario_category,
+            'category_description': self.classifier.get_category_description(scenario_category),
+            'is_new_scenario': is_new,
+            'new_scenario_type': new_type,
+            'data_sparsity': {
+                'exact_scenario_count': exact_data_count,
+                'category_total_count': category_data_count,
+                'global_total_count': global_data_count,
+                'category_scenario_types': len(category_scenarios)
+            },
+            'exploration_priority': self._calculate_exploration_priority(
+                is_new, new_type, exact_data_count, category_data_count
+            )
+        }
+
+    def _calculate_exploration_priority(self, is_new: bool, new_type: str, 
+                                      exact_count: int, category_count: int) -> float:
+        """
+        计算探索优先级（0-1，越高越需要探索）
+        
+        Args:
+            is_new: 是否为新场景
+            new_type: 新场景类型
+            exact_count: 精确场景数据量
+            category_count: 类别数据量
+            
+        Returns:
+            探索优先级分数
+        """
+        if not is_new:
+            return 0.0
+        
+        priority_map = {
+            'new_exact_scenario': 0.8,
+            'insufficient_data_scenario': 0.6,
+            'new_category': 1.0
+        }
+        
+        base_priority = priority_map.get(new_type, 0.5)
+        
+        # 数据稀疏性调整
+        if exact_count == 0:
+            scarcity_boost = 0.2
+        elif exact_count < self.min_samples_threshold:
+            scarcity_boost = 0.1 * (self.min_samples_threshold - exact_count) / self.min_samples_threshold
+        else:
+            scarcity_boost = 0.0
+        
+        # 类别稀疏性调整
+        if category_count < 10:  # 类别数据不足10个样本
+            category_boost = 0.1
+        else:
+            category_boost = 0.0
+        
+        final_priority = np.clip(base_priority + scarcity_boost + category_boost, 0.0, 1.0)
+        return float(final_priority) 

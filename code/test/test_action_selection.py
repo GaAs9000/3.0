@@ -28,7 +28,8 @@ def build_simple_env(num_nodes: int = 6, num_partitions: int = 3,
     action_space = ActionSpace(data, num_partitions, device)
 
     # ==== Agent ====
-    agent = PPOAgent(node_dim, region_dim, num_partitions, device=device)
+    agent_config = {}
+    agent = PPOAgent(node_dim, region_dim, num_partitions, agent_config, device=device)
 
     # ==== 初始分区 & 状态准备 ====
     current_partition = torch.randint(1, num_partitions + 1, (num_nodes,), device=device)

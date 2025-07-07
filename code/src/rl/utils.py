@@ -38,8 +38,9 @@ class IntelligentAdmittanceExtractor:
     确保PartitionEvaluator使用与奖励函数相同的高质量导纳数据
     """
 
-    def __init__(self, device: torch.device):
+    def __init__(self, device: torch.device, is_normalized: bool = False):
         self.device = device
+        self.is_normalized = is_normalized
 
     def extract_admittance(self, edge_attr: torch.Tensor, edge_index: torch.Tensor = None) -> Tuple[torch.Tensor, str]:
         """
@@ -176,8 +177,12 @@ class IntelligentAdmittanceExtractor:
         if torch.all(admittance == 0):
             return False
 
-        # 检查合理范围（典型输电线路导纳：0.1-10 S）
-        valid_range = (0.01, 20.0)
+        # 检查合理范围（典型输电线路导纳：0.1-10 S，归一化后可能更小）
+        if self.is_normalized:
+            valid_range = (1e-8, 5.0)  # 归一化后的合理范围
+        else:
+            valid_range = (0.01, 50.0) # 原始物理量的合理范围
+
         abs_admittance = torch.abs(admittance)
 
         if torch.any(abs_admittance < valid_range[0]) or torch.any(abs_admittance > valid_range[1]):

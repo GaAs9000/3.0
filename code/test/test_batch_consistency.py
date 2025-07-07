@@ -48,7 +48,8 @@ def test_actor_critic_batch_consistency():
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     node_dim, region_dim, num_partitions = 8, 16, 4
-    agent = PPOAgent(node_dim, region_dim, num_partitions, device=device, memory_capacity=16)
+    agent_config = {'memory_capacity':16}
+    agent = PPOAgent(node_dim, region_dim, num_partitions, agent_config, device=device)
 
     agent.actor.eval()
     agent.critic.eval()
@@ -63,10 +64,9 @@ def test_actor_critic_batch_consistency():
     actor_single_outputs = []
     critic_single_outputs = []
     for s in states:
-        a_logits, p_logits = agent.actor(
-            s['node_embeddings'], s['region_embeddings'], s['boundary_nodes'], s['action_mask']
-        )
-        c_val = agent.critic(s['node_embeddings'], s['region_embeddings'], s['boundary_nodes'])
+        bs_single: BatchedState = agent._prepare_batched_state([s])
+        a_logits, p_logits = agent.actor(bs_single)
+        c_val = agent.critic(bs_single)
         actor_single_outputs.append((a_logits.detach(), p_logits.detach()))
         critic_single_outputs.append(c_val.detach())
 

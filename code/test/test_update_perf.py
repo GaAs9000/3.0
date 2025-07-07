@@ -65,19 +65,23 @@ def benchmark_ppo_update(
     print(f"Simulating {num_steps} steps with {num_nodes} nodes and {num_partitions} partitions.")
 
     # 1. Initialize Agent with correct parameters
+    agent_config = {
+        'lr_actor':3e-4,
+        'lr_critic':1e-3,
+        'gamma':0.99,
+        'eps_clip':0.2,
+        'k_epochs':4,
+        'value_coef':0.5,
+        'entropy_coef':0.01,
+        'memory_capacity':num_steps
+    }
+
     agent = PPOAgent(
         node_embedding_dim=node_dim,
         region_embedding_dim=region_dim,
         num_partitions=num_partitions,
-        device=device,
-        lr_actor=3e-4,
-        lr_critic=1e-3,
-        gamma=0.99,
-        eps_clip=0.2,
-        k_epochs=4,
-        value_coef=0.5,
-        entropy_coef=0.01,
-        memory_capacity=num_steps  # Ensure memory can hold all steps
+        agent_config=agent_config,
+        device=device
     )
 
     # 2. Populate agent's memory

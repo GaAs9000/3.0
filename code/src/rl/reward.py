@@ -33,6 +33,7 @@ from .scenario_context import ScenarioContext
 from .scenario_aware_tracker import ScenarioAwareHistoryTracker
 from .scenario_aware_plateau_detector import ScenarioAwarePlateauDetector
 from .relative_reward_calculator import RelativeImprovementReward, HybridRewardFunction
+from .utils import IntelligentAdmittanceExtractor
 
 
 class RobustMetricsCalculator:
@@ -60,7 +61,8 @@ class RobustMetricsCalculator:
     def calculate_coupling_metrics(self, 
                                  edge_admittance: torch.Tensor, 
                                  edge_index: torch.Tensor, 
-                                 partition: torch.Tensor) -> Dict[str, Any]:
+                                 partition: torch.Tensor,
+                                 total_admittance: Optional[torch.Tensor] = None) -> Dict[str, Any]:
         """
         以向量化的方式高效计算电气耦合度指标。
 
@@ -68,6 +70,7 @@ class RobustMetricsCalculator:
             edge_admittance (torch.Tensor): 边的导纳值张量。
             edge_index (torch.Tensor): 描述边连接的张量, shape `[2, num_edges]`。
             partition (torch.Tensor): 每个节点的所属分区标签。
+            total_admittance (Optional[torch.Tensor]): 预先计算好的总导纳，用于性能优化
 
         Returns:
             Dict[str, Any]: 包含耦合指标、置信度和来源信息的字典。
@@ -82,7 +85,8 @@ class RobustMetricsCalculator:
                 return self._handle_invalid_coupling_inputs(validation_result)
 
             # 高效的向量化计算
-            total_admittance = edge_admittance.sum()
+            if total_admittance is None:
+                total_admittance = edge_admittance.sum()
 
             # 获取边的源节点和目标节点
             src_nodes, dst_nodes = edge_index
@@ -92,7 +96,6 @@ class RobustMetricsCalculator:
             dst_partitions = partition[dst_nodes]
 
             # 创建跨区边的掩码
-            # 条件: 1. 源分区 != 目标分区, 2. 源分区 > 0, 3. 目标分区 > 0
             cross_partition_mask = (src_partitions != dst_partitions) & \
                                    (src_partitions > 0) & \
                                    (dst_partitions > 0)
@@ -535,7 +538,8 @@ class RewardFunction:
     def __init__(self,
                  hetero_data: HeteroData,
                  config: Optional[Dict[str, Any]] = None,
-                 device: Optional[torch.device] = None):
+                 device: Optional[torch.device] = None,
+                 is_normalized: bool = True):
         """
         初始化自适应质量导向奖励函数。
 
@@ -546,6 +550,8 @@ class RewardFunction:
                 一个配置字典，用于控制奖励权重、平台期检测参数、场景感知策略等。
             device (Optional[torch.device]): 
                 计算所用的设备 (e.g., 'cpu', 'cuda')。
+            is_normalized (bool): 
+                是否使用归一化数据。
         """
         self.device = device or torch.device('cpu')
         self.config = config or {}
@@ -588,31 +594,20 @@ class RewardFunction:
 
         # 场景感知奖励系统配置
         scenario_aware_config = self.config.get('scenario_aware_reward', {})
-        self.scenario_aware_enabled = scenario_aware_config.get('enabled', False)
         
-        # 创建平台期检测器和相关组件
-        if self.scenario_aware_enabled:
-            # 创建场景感知组件
-            self.history_tracker = ScenarioAwareHistoryTracker(scenario_aware_config)
-            self.plateau_detector = ScenarioAwarePlateauDetector(
-                self.history_tracker, 
-                scenario_aware_config.get('detection_config', {})
-            )
-            
-            # 创建相对奖励计算器
-            relative_config = scenario_aware_config.get('relative_reward', {})
-            if relative_config.get('enabled', False):
-                self.relative_reward_calculator = HybridRewardFunction(
-                    self.history_tracker, 
-                    relative_config
-                )
-            else:
-                self.relative_reward_calculator = None
-        else:
-            # 使用原有的平台期检测器
-            self.plateau_detector = self._create_plateau_detector()
-            self.history_tracker = None
-            self.relative_reward_calculator = None
+        # 创建场景感知组件
+        self.history_tracker = ScenarioAwareHistoryTracker(scenario_aware_config)
+        self.plateau_detector = ScenarioAwarePlateauDetector(
+            self.history_tracker, 
+            scenario_aware_config.get('detection_config', {})
+        )
+        
+        # 创建相对奖励计算器
+        relative_config = scenario_aware_config.get('relative_reward', {})
+        self.relative_reward_calculator = HybridRewardFunction(
+            self.history_tracker, 
+            relative_config
+        )
 
         # 前一步质量分数缓存
         self.previous_quality_score = None
@@ -631,7 +626,7 @@ class RewardFunction:
         )
 
         # 预计算常用数据
-        self._setup_cached_data()
+        self._setup_cached_data(is_normalized=is_normalized)
 
         # 数值稳定性参数
         self.epsilon = 1e-9
@@ -695,13 +690,13 @@ class RewardFunction:
             confidence_threshold=plateau_config['confidence_threshold']
         )
         
-    def _setup_cached_data(self):
+    def _setup_cached_data(self, is_normalized: bool = True):
         """预计算频繁使用的数据 - 改进的数据处理"""
         # 安全提取节点负载和发电数据
         self._safe_extract_power_data()
 
         # 边信息（用于计算导纳）
-        self._extract_edge_info()
+        self._extract_edge_info(is_normalized=is_normalized)
 
     def _safe_extract_power_data(self):
         """安全提取功率数据，避免创建虚假默认数据"""
@@ -931,13 +926,14 @@ class RewardFunction:
 
         return generation
 
-    def _extract_edge_info(self):
+    def _extract_edge_info(self, is_normalized: bool = True):
         """智能提取边信息用于导纳计算"""
         if ('bus', 'connects', 'bus') in self.hetero_data.edge_index_dict:
             self.edge_index = self.hetero_data.edge_index_dict[('bus', 'connects', 'bus')]
 
             # 智能提取导纳数据
-            self.edge_admittance, admittance_source = self._extract_admittance_data()
+            self.edge_admittance, admittance_source = self._extract_admittance_data(is_normalized=is_normalized)
+            self.total_admittance = self.edge_admittance.sum() # <--- 预计算并缓存
 
             # 记录数据来源
             if hasattr(self, 'logger'):
@@ -951,7 +947,7 @@ class RewardFunction:
             self.edge_index = torch.empty((2, 0), dtype=torch.long, device=self.device)
             self.edge_admittance = torch.empty(0, device=self.device)
 
-    def _extract_admittance_data(self):
+    def _extract_admittance_data(self, is_normalized: bool = True):
         """
         智能提取导纳数据，按优先级尝试多种方法
 
@@ -966,14 +962,16 @@ class RewardFunction:
             edge_attr = self.hetero_data.edge_attr_dict[edge_type]
 
             # 尝试识别导纳数据
-            admittance = self._identify_admittance_from_attributes(edge_attr)
+            admittance_extractor = IntelligentAdmittanceExtractor(self.device, is_normalized=is_normalized)
+            admittance = admittance_extractor._identify_admittance_from_attributes(edge_attr)
             if admittance is not None:
                 return admittance, 'extracted'
 
         # 方法2: 从阻抗计算导纳
         if edge_type in self.hetero_data.edge_attr_dict:
             edge_attr = self.hetero_data.edge_attr_dict[edge_type]
-            admittance = self._calculate_admittance_from_impedance(edge_attr)
+            admittance_extractor = IntelligentAdmittanceExtractor(self.device, is_normalized=is_normalized)
+            admittance = admittance_extractor._calculate_admittance_from_impedance(edge_attr)
             if admittance is not None:
                 return admittance, 'calculated'
 
@@ -984,64 +982,6 @@ class RewardFunction:
 
         # 方法4: 保守默认值（带警告）
         return self._get_conservative_admittance_defaults(), 'default'
-
-    def _identify_admittance_from_attributes(self, edge_attr):
-        """
-        从边属性中智能识别导纳数据
-
-        根据data_processing.py中的特征顺序：
-        [r, x, b, z_magnitude, y, rateA, angle_diff, is_transformer, status]
-        导纳y在第4列（索引4）
-        """
-        if edge_attr.shape[1] <= 4:
-            return None
-
-        # 提取导纳列（第4列）
-        admittance_candidate = edge_attr[:, 4]
-
-        # 检查导纳值的合理性
-        # 导纳应该是正值，且在合理范围内
-        if self._validate_admittance_values(admittance_candidate):
-            # 取绝对值确保为正
-            return torch.abs(admittance_candidate)
-
-        # 如果第4列不合理，尝试其他可能的列
-        for col_idx in [3, 5]:  # z_magnitude, rateA
-            if edge_attr.shape[1] > col_idx:
-                candidate = edge_attr[:, col_idx]
-                if self._validate_admittance_values(candidate):
-                    return torch.abs(candidate)
-
-        return None
-
-    def _calculate_admittance_from_impedance(self, edge_attr):
-        """
-        从阻抗参数计算导纳
-
-        特征顺序：[r, x, b, z_magnitude, y, ...]
-        """
-        if edge_attr.shape[1] < 2:
-            return None
-
-        # 提取电阻和电抗
-        r = edge_attr[:, 0]  # 电阻
-        x = edge_attr[:, 1]  # 电抗
-
-        # 计算阻抗模长
-        z_squared = r**2 + x**2
-
-        # 避免除零，设置最小阻抗值
-        min_impedance = 1e-6
-        z_magnitude = torch.sqrt(z_squared.clamp(min=min_impedance**2))
-
-        # 计算导纳 Y = 1/Z
-        admittance = 1.0 / z_magnitude
-
-        # 验证结果
-        if self._validate_admittance_values(admittance):
-            return admittance
-
-        return None
 
     def _estimate_admittance_from_topology(self):
         """
@@ -1130,33 +1070,6 @@ class RewardFunction:
 
         return admittance
 
-    def _validate_admittance_values(self, admittance):
-        """
-        验证导纳值的物理合理性
-        """
-        # 检查NaN和Inf
-        if torch.isnan(admittance).any() or torch.isinf(admittance).any():
-            return False
-
-        # 检查是否全为零
-        if torch.all(admittance == 0):
-            return False
-
-        # 取绝对值进行范围检查
-        abs_admittance = torch.abs(admittance)
-
-        # 检查物理合理范围（放宽范围以适应不同的标幺化）
-        # 允许更大的范围：0.001-1000
-        if (abs_admittance < 0.001).any() or (abs_admittance > 1000).any():
-            return False
-
-        # 检查是否有足够的非零值
-        non_zero_count = torch.sum(abs_admittance > 0.001).item()
-        if non_zero_count < len(admittance) * 0.5:  # 至少50%的值应该是有意义的
-            return False
-
-        return True
-
     def _compute_quality_score(self, partition: torch.Tensor) -> float:
         """
         根据当前分区方案，计算一个归一化的统一质量分数。
@@ -1214,43 +1127,6 @@ class RewardFunction:
             print(f"警告：质量分数计算出现异常: {e}")
             return 0.0
 
-    @staticmethod
-    def _compute_simple_relative_reward(prev_quality: float, curr_quality: float) -> float:
-        """
-        [已废弃] 简单相对改进奖励 - 解决跨场景训练偏向问题
-        
-        核心思想：相同的相对努力应该获得相同的奖励幅度
-        - 故障场景: (0.42-0.40)/0.40 = 5%改进 → 奖励+0.05
-        - 正常场景: (0.714-0.68)/0.68 = 5%改进 → 奖励+0.05
-
-        这确保算法不会偏向简单场景，在困难场景(故障、高负荷)下也能获得公平激励
-
-        Args:
-            prev_quality: 前一步质量分数
-            curr_quality: 当前质量分数
-
-        Returns:
-            相对改进奖励 [-1.0, 1.0]
-        """
-        warnings.warn(
-            "此方法已被更高级的场景感知奖励替代，请改用 HybridRewardFunction",
-            DeprecationWarning,
-            stacklevel=2
-        )
-        try:
-            if prev_quality > 0.01:  # 避免除零，处理边界情况
-                relative_improvement = (curr_quality - prev_quality) / prev_quality
-            else:
-                # 从零开始的情况，直接用绝对改进
-                relative_improvement = curr_quality - prev_quality
-
-            # 轻微裁剪避免极端值，保持训练稳定性
-            return np.clip(relative_improvement, -1.0, 1.0)
-
-        except Exception as e:
-            print(f"警告：相对奖励计算出现异常: {e}")
-            return 0.0
-
     def _compute_core_metrics(self, partition: torch.Tensor) -> Dict[str, float]:
         """
         以向量化的方式，中心化地计算所有核心物理指标。
@@ -1306,7 +1182,7 @@ class RewardFunction:
         # 2. 计算电气解耦指标 (已向量化)
         if self.edge_index.shape[1] > 0:
             coupling_result = self.metrics_calculator.calculate_coupling_metrics(
-                self.edge_admittance, self.edge_index, partition
+                self.edge_admittance, self.edge_index, partition, self.total_admittance
             )
             metrics.update(coupling_result)
         else:
@@ -1341,107 +1217,114 @@ class RewardFunction:
         
         return metrics
 
-    def compute_incremental_reward(self,
-                                 current_partition: torch.Tensor,
-                                 action: Tuple[int, int],
-                                 scenario_context: Optional[ScenarioContext] = None) -> Tuple[float, Optional[PlateauResult]]:
+    def compute_incremental_reward(self, 
+                                  current_partition: torch.Tensor, 
+                                  scenario_context: Optional[ScenarioContext] = None) -> Tuple[float, Dict[str, Any]]:
         """
-        计算即时奖励 (Incremental Reward)。
-
-        这是在每个时间步都会被调用的核心奖励函数。它实现了基于相对改进的
-        奖励机制，并结合了平台期检测和效率激励。
-
+        计算增量奖励 - 适配升级版HybridRewardFunction
+        
         Args:
-            current_partition (torch.Tensor): 
-                执行动作后的新分区状态。Shape: `[num_nodes]`
-            action (Tuple[int, int]): 
-                刚刚执行的动作 `(node_idx, partition_id)`。
-            scenario_context (Optional[ScenarioContext]): 
-                当前的场景上下文，用于场景感知奖励。
-
+            current_partition: 当前分区配置
+            scenario_context: 场景上下文（如果有）
+            
         Returns:
-            Tuple[float, Optional[PlateauResult]]:
-                - reward: 计算出的总即时奖励。
-                - plateau_result: 平台期检测器的结果，或为None。
+            Tuple[float, Dict]: (奖励值, 平台期检测结果和奖励详情)
         """
-        # 更新步数和场景上下文
-        self.current_step += 1
-        if scenario_context is not None:
-            self.current_scenario_context = scenario_context
-
-        # 计算当前质量分数
-        current_quality_score = self._compute_quality_score(current_partition)
-
-        # 如果没有前一步质量分数，初始化并返回0
-        if self.previous_quality_score is None:
-            self.previous_quality_score = current_quality_score
-            self.previous_metrics = self._compute_core_metrics(current_partition)  # 保持向后兼容
-
-            # 更新平台期检测器
-            if self.scenario_aware_enabled and scenario_context is not None:
-                plateau_result = self.plateau_detector.detect_plateau(current_quality_score, scenario_context)
-            else:
-                plateau_result = self.plateau_detector.update(current_quality_score)
-            return 0.0, plateau_result
-
         try:
-            # 1. 计算主奖励（相对改进奖励）
-            if self.relative_reward_calculator is not None and scenario_context is not None:
-                # 优先使用高级的、场景感知的混合奖励函数
-                main_reward, _ = self.relative_reward_calculator.compute_reward(
+            # 1. 计算当前质量分数
+            current_quality_score = self._compute_quality_score(current_partition)
+            
+            # 2. 获取场景上下文（如果未提供）
+            if scenario_context is None:
+                # 创建默认场景上下文（正常运行状态）
+                scenario_context = ScenarioContext()
+            
+            # 3. 使用升级版HybridRewardFunction计算奖励
+            if self.relative_reward_calculator is not None:
+                # 设置当前episode数（用于探索奖励衰减）
+                self.relative_reward_calculator.set_episode(self.current_step // 100)  # 粗略的episode估计
+                
+                # 计算主要奖励
+                main_reward, reward_details = self.relative_reward_calculator.compute_reward(
                     current_quality_score,
                     self.previous_quality_score,
                     scenario_context
                 )
             else:
-                # 回退到简单的相对改进奖励
-                main_reward = self._compute_simple_relative_reward(
-                    self.previous_quality_score,
-                    current_quality_score
-                )
-
-            # 数值稳定性保护
-            if np.isnan(main_reward) or np.isinf(main_reward):
-                main_reward = 0.0
-            else:
-                main_reward = np.clip(main_reward, -2.0, 2.0)  # 扩大范围以支持相对奖励
-
-            # 2. 平台期检测和效率奖励
-            efficiency_reward = 0.0
-
-            # 更新平台期检测器
-            if self.scenario_aware_enabled and scenario_context is not None:
-                plateau_result = self.plateau_detector.detect_plateau(current_quality_score, scenario_context)
-            else:
-                plateau_result = self.plateau_detector.update(current_quality_score)
-
-            # 如果检测到平台期且置信度足够高，激活效率奖励
-            if (plateau_result.plateau_detected and
-                plateau_result.confidence > self.adaptive_quality_config['efficiency_reward']['early_stop_confidence']):
-
-                lambda_efficiency = self.adaptive_quality_config['efficiency_reward']['lambda']
-                efficiency_reward = lambda_efficiency * (self.max_steps - self.current_step) / self.max_steps
-                efficiency_reward = max(0.0, efficiency_reward)  # 确保非负
-
-            # 3. 总奖励
-            total_reward = main_reward + efficiency_reward
-
-            # 最终数值稳定性保护
-            if np.isnan(total_reward) or np.isinf(total_reward):
-                total_reward = 0.0
-            else:
-                total_reward = np.clip(total_reward, -2.0, 2.0)
-
-        except Exception as e:
-            print(f"警告：自适应质量导向奖励计算出现异常: {e}")
-            total_reward = 0.0
+                # 回退到简单实现（兼容性保证）
+                main_reward = current_quality_score - (self.previous_quality_score or 0.5)
+                reward_details = {
+                    'main_reward': float(main_reward),
+                    'base_reward': float(main_reward),
+                    'relative_reward': 0.0,
+                    'improvement_bonus': 0.0,
+                    'exploration_reward': 0.0,
+                    'total_reward': float(main_reward),
+                    'baseline_info': {
+                        'baseline_quality': 0.5,
+                        'baseline_source': 'fallback',
+                        'query_level': 0
+                    }
+                }
+            
+            # 4. 平台期检测
             plateau_result = None
-
-        # 更新前一步状态
-        self.previous_quality_score = current_quality_score
-        self.previous_metrics = self._compute_core_metrics(current_partition)  # 保持向后兼容
-
-        return total_reward, plateau_result
+            if self.plateau_detector:
+                try:
+                    plateau_result = self.plateau_detector.detect_plateau(
+                        current_quality_score, scenario_context
+                    )
+                except Exception as e:
+                    print(f"警告：平台期检测失败: {e}")
+                    # 创建默认平台期结果
+                    from .scenario_aware_plateau_detector import PlateauResult
+                    plateau_result = PlateauResult(
+                        plateau_detected=False,
+                        confidence=0.0,
+                        improvement_rate=1.0,
+                        stability_score=0.0,
+                        historical_percentile=0.0,
+                        details={'error': str(e)}
+                    )
+            
+            # 5. 更新历史
+            self.previous_quality_score = current_quality_score
+            self.previous_metrics = self._compute_core_metrics(current_partition)  # 保持向后兼容
+            
+            # 6. 组合完整的信息返回
+            complete_info = {
+                'quality_score': current_quality_score,
+                'reward_details': reward_details,
+                'scenario_context': scenario_context.to_dict(),
+                'plateau_result': plateau_result._asdict() if plateau_result else None,
+                'step': self.current_step
+            }
+            
+            # 7. 添加奖励组件信息（用于TensorBoard记录）
+            complete_info.update({
+                'main_reward': reward_details['main_reward'],
+                'base_reward': reward_details['base_reward'],
+                'relative_reward': reward_details['relative_reward'],
+                'improvement_bonus': reward_details['improvement_bonus'],
+                'exploration_reward': reward_details['exploration_reward'],
+                'total_reward': reward_details['total_reward'],
+                'baseline_quality': reward_details['baseline_info']['baseline_quality'],
+                'baseline_source': reward_details['baseline_info']['baseline_source'],
+                'query_level': reward_details['baseline_info']['query_level']
+            })
+            
+            return main_reward, complete_info
+            
+        except Exception as e:
+            print(f"警告：增量奖励计算出现异常: {e}")
+            # 返回保守的默认奖励
+            return 0.0, {
+                'error': str(e),
+                'quality_score': 0.0,
+                'reward_details': {'total_reward': 0.0},
+                'scenario_context': scenario_context.to_dict() if scenario_context else {},
+                'step': self.current_step
+            }
 
     def reset_episode(self, scenario_context: Optional[ScenarioContext] = None):
         """重置episode状态"""
@@ -1519,7 +1402,7 @@ class RewardFunction:
             self.weights['final_power_b'] * power_reward
         )
 
-        # 3. 阈值奖励已被自适应质量系统替代，不再使用
+        # 3. 阈值奖励系统已被自适应质量系统完全替代
 
         # 4. 应用终止条件折扣
         termination_discount = self._apply_termination_discount(termination_type)

@@ -23,7 +23,7 @@ def build_env(num_nodes: int = 32, num_partitions: int = 4,
     data['bus', 'connects', 'bus'].edge_index = torch.stack([src, dst])
 
     action_space = ActionSpace(data, num_partitions, device)
-    agent = PPOAgent(node_dim, region_dim, num_partitions, device=device)
+    agent = PPOAgent(node_dim, region_dim, num_partitions, {}, device=device)
 
     current_partition = torch.randint(1, num_partitions + 1, (num_nodes,), device=device)
     boundary_nodes = torch.arange(num_nodes, device=device)

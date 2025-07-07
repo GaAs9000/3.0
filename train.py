@@ -38,7 +38,7 @@ try:
     from stable_baselines3 import PPO
     from torch_geometric.data import HeteroData
     from data_processing import PowerGridDataProcessor
-    from gat import create_hetero_graph_encoder
+    from gat import create_production_encoder
     from rl.environment import PowerGridPartitioningEnv
     from rl.agent import PPOAgent
     from rl.adaptive import AdaptiveDirector
@@ -114,7 +114,9 @@ def check_dependencies():
 
 def load_power_grid_data(case_name: str) -> Dict:
     """
-    加载电力网络数据
+    加载电力网络数据。
+    该函数现在只从pandapower加载数据，以确保数据源的一致性和高质量。
+    如果加载失败，将直接抛出异常。
 
     Args:
         case_name: 案例名称 (ieee14, ieee30, ieee57, ieee118)
@@ -122,65 +124,17 @@ def load_power_grid_data(case_name: str) -> Dict:
     Returns:
         MATPOWER格式的电网数据字典
     """
-    # 首先尝试从PandaPower加载
-    if _pandapower_available:
-        try:
-            return load_from_pandapower(case_name)
-        except Exception as e:
-            print(f"PandaPower加载失败: {e}")
-            print("🔄 回退到内置数据...")
+    if not _pandapower_available:
+        raise ImportError("Pandapower库未安装或不可用，无法加载电网数据。")
 
-    # 回退到内置的IEEE标准测试系统数据
-    ieee_cases = {
-        'ieee14': {
-            'baseMVA': 100.0,
-            'bus': np.array([
-                [1, 3, 0, 0, 0, 0, 1, 1.06, 0, 345, 1, 1.06, 0.94],
-                [2, 2, 21.7, 12.7, 0, 0, 1, 1.045, -4.98, 345, 1, 1.06, 0.94],
-                [3, 2, 94.2, 19, 0, 0, 1, 1.01, -12.72, 345, 1, 1.06, 0.94],
-                [4, 1, 47.8, -3.9, 0, 0, 1, 1.019, -10.33, 345, 1, 1.06, 0.94],
-                [5, 1, 7.6, 1.6, 0, 0, 1, 1.02, -8.78, 345, 1, 1.06, 0.94],
-                [6, 2, 11.2, 7.5, 0, 12.2, 1, 1.07, -14.22, 345, 1, 1.06, 0.94],
-                [7, 1, 0, 0, 0, 0, 1, 1.062, -13.37, 345, 1, 1.06, 0.94],
-                [8, 2, 0, 0, 0, 17.4, 1, 1.09, -13.36, 345, 1, 1.06, 0.94],
-                [9, 1, 29.5, 16.6, 0, 0, 1, 1.056, -14.94, 345, 1, 1.06, 0.94],
-                [10, 1, 9, 5.8, 0, 0, 1, 1.051, -15.1, 345, 1, 1.06, 0.94],
-                [11, 1, 3.5, 1.8, 0, 0, 1, 1.057, -14.79, 345, 1, 1.06, 0.94],
-                [12, 1, 6.1, 1.6, 0, 0, 1, 1.055, -15.07, 345, 1, 1.06, 0.94],
-                [13, 1, 13.5, 5.8, 0, 0, 1, 1.05, -15.16, 345, 1, 1.06, 0.94],
-                [14, 1, 14.9, 5, 0, 0, 1, 1.036, -16.04, 345, 1, 1.06, 0.94]
-            ]),
-            'branch': np.array([
-                [1, 2, 0.01938, 0.05917, 0.0528, 0, 0, 0, 0, 0, 1, -360, 360],
-                [1, 5, 0.05403, 0.22304, 0.0492, 0, 0, 0, 0, 0, 1, -360, 360],
-                [2, 3, 0.04699, 0.19797, 0.0438, 0, 0, 0, 0, 0, 1, -360, 360],
-                [2, 4, 0.05811, 0.17632, 0.034, 0, 0, 0, 0, 0, 1, -360, 360],
-                [2, 5, 0.05695, 0.17388, 0.0346, 0, 0, 0, 0, 0, 1, -360, 360],
-                [3, 4, 0.06701, 0.17103, 0.0128, 0, 0, 0, 0, 0, 1, -360, 360],
-                [4, 5, 0.01335, 0.04211, 0, 0, 0, 0, 0, 0, 1, -360, 360],
-                [4, 7, 0, 0.20912, 0, 0.978, 0, 0, 0, 0, 1, -360, 360],
-                [4, 9, 0, 0.55618, 0, 0.969, 0, 0, 0, 0, 1, -360, 360],
-                [5, 6, 0, 0.25202, 0, 0.932, 0, 0, 0, 0, 1, -360, 360],
-                [6, 11, 0.09498, 0.1989, 0, 0, 0, 0, 0, 0, 1, -360, 360],
-                [6, 12, 0.12291, 0.25581, 0, 0, 0, 0, 0, 0, 1, -360, 360],
-                [6, 13, 0.06615, 0.13027, 0, 0, 0, 0, 0, 0, 1, -360, 360],
-                [7, 8, 0, 0.17615, 0, 0, 0, 0, 0, 0, 1, -360, 360],
-                [7, 9, 0, 0.11001, 0, 0, 0, 0, 0, 0, 1, -360, 360],
-                [9, 10, 0.03181, 0.0845, 0, 0, 0, 0, 0, 0, 1, -360, 360],
-                [9, 14, 0.12711, 0.27038, 0, 0, 0, 0, 0, 0, 1, -360, 360],
-                [10, 11, 0.08205, 0.19207, 0, 0, 0, 0, 0, 0, 1, -360, 360],
-                [12, 13, 0.22092, 0.19988, 0, 0, 0, 0, 0, 0, 1, -360, 360],
-                [13, 14, 0.17093, 0.34802, 0, 0, 0, 0, 0, 0, 1, -360, 360]
-            ])
-        }
-    }
-
-    if case_name in ieee_cases:
-        return ieee_cases[case_name]
-    else:
-        # 对于其他案例，返回默认的IEEE14数据
-        print(f"⚠️ 案例 {case_name} 未找到，使用IEEE14默认数据")
-        return ieee_cases['ieee14']
+    try:
+        # 这是唯一应该被执行的数据加载路径
+        return load_from_pandapower(case_name)
+    except Exception as e:
+        print(f"❌ 从PandaPower加载案例 '{case_name}' 时发生致命错误。")
+        print("这可能是由于拼写错误、案例不存在或PandaPower库本身的问题。")
+        # 重新抛出异常，以便程序停止
+        raise e
 
 
 def load_from_pandapower(case_name: str) -> Dict:
@@ -219,7 +173,7 @@ def load_from_pandapower(case_name: str) -> Dict:
 
 def convert_pandapower_to_matpower(net) -> Dict:
     """
-    将PandaPower网络转换为MATPOWER格式
+    将PandaPower网络转换为MATPOWER格式（使用官方converter）
 
     Args:
         net: PandaPower网络对象
@@ -227,107 +181,27 @@ def convert_pandapower_to_matpower(net) -> Dict:
     Returns:
         MATPOWER格式的电网数据字典
     """
-    # 基础MVA
-    baseMVA = net.sn_mva
+    # 使用官方 converter 进行可靠转换，避免手写转换中的精度和维护问题
+    import pandapower as pp
+    from pandapower.converter import to_mpc
 
-    # 节点数据转换
-    bus_data = []
-    for idx, bus in net.bus.iterrows():
-        # MATPOWER bus格式: [bus_i, type, Pd, Qd, Gs, Bs, area, Vm, Va, baseKV, zone, Vmax, Vmin]
-        bus_type = 1  # PQ节点
+    # 确保网络已有潮流结果；如果没有，则先运行一次平坦启动潮流
+    try:
+        if getattr(net, "res_bus", None) is None or net.res_bus.empty:
+            pp.runpp(net, init="flat", calculate_voltage_angles=False, numba=False)
+    except Exception:
+        # 如果潮流失败，仍继续转换（to_mpc 允许无结果转换，但会给出警告）
+        pass
 
-        # 检查是否为发电机节点
-        if idx in net.gen.bus.values:
-            gen_at_bus = net.gen[net.gen.bus == idx]
-            if not gen_at_bus.empty:
-                # 检查是否为slack节点
-                if any(gen_at_bus.slack):
-                    bus_type = 3  # slack节点
-                else:
-                    bus_type = 2  # PV节点
+    mpc_wrap = to_mpc(net)
 
-        # 获取负荷数据
-        pd = qd = 0
-        if idx in net.load.bus.values:
-            load_at_bus = net.load[net.load.bus == idx]
-            pd = load_at_bus.p_mw.sum()
-            qd = load_at_bus.q_mvar.sum()
+    # pandapower >=2.0 返回 {'mpc': dict}；向后兼容旧版本
+    if isinstance(mpc_wrap, dict) and "mpc" in mpc_wrap:
+        mpc = mpc_wrap["mpc"]
+    else:
+        mpc = mpc_wrap
 
-        # 获取电压等级
-        vn_kv = bus.vn_kv if hasattr(bus, 'vn_kv') else 345.0  # 默认345kV
-
-        bus_row = [
-            idx + 1,  # bus number (1-indexed)
-            bus_type,  # bus type
-            pd,  # Pd (MW)
-            qd,  # Qd (MVAr)
-            0,  # Gs (MW)
-            0,  # Bs (MVAr)
-            1,  # area
-            1.0,  # Vm (p.u.)
-            0,  # Va (degrees)
-            vn_kv,  # baseKV
-            1,  # zone
-            1.1,  # Vmax
-            0.9   # Vmin
-        ]
-        bus_data.append(bus_row)
-
-    # 线路数据转换
-    branch_data = []
-    for idx, line in net.line.iterrows():
-        # 获取线路电压等级（从连接的节点获取）
-        from_bus_vn = net.bus.loc[line.from_bus, 'vn_kv'] if line.from_bus in net.bus.index else 345.0
-
-        # MATPOWER branch格式: [fbus, tbus, r, x, b, rateA, rateB, rateC, ratio, angle, status, angmin, angmax]
-        # 简化的阻抗计算
-        r_pu = line.r_ohm_per_km * line.length_km / (from_bus_vn**2 / baseMVA) if hasattr(line, 'r_ohm_per_km') else 0.01
-        x_pu = line.x_ohm_per_km * line.length_km / (from_bus_vn**2 / baseMVA) if hasattr(line, 'x_ohm_per_km') else 0.05
-        b_pu = 0.0  # 简化处理
-        rate_a = line.max_i_ka * from_bus_vn * np.sqrt(3) / 1000 if hasattr(line, 'max_i_ka') else 100.0
-
-        branch_row = [
-            line.from_bus + 1,  # from bus (1-indexed)
-            line.to_bus + 1,    # to bus (1-indexed)
-            r_pu,  # r (p.u.)
-            x_pu,  # x (p.u.)
-            b_pu,  # b (p.u.)
-            rate_a,  # rateA (MVA)
-            0,  # rateB
-            0,  # rateC
-            0,  # ratio
-            0,  # angle
-            1,  # status
-            -360,  # angmin
-            360    # angmax
-        ]
-        branch_data.append(branch_row)
-
-    # 变压器数据（如果有）
-    for idx, trafo in net.trafo.iterrows():
-        # 简化的变压器模型
-        branch_row = [
-            trafo.hv_bus + 1,  # from bus (1-indexed)
-            trafo.lv_bus + 1,  # to bus (1-indexed)
-            trafo.vk_percent / 100 * (trafo.vn_hv_kv**2 / baseMVA),  # r (p.u.)
-            trafo.vkr_percent / 100 * (trafo.vn_hv_kv**2 / baseMVA),  # x (p.u.)
-            0,  # b (p.u.)
-            trafo.sn_mva,  # rateA (MVA)
-            0,  # rateB
-            0,  # rateC
-            trafo.vn_hv_kv / trafo.vn_lv_kv,  # ratio
-            0,  # angle
-            1,  # status
-            -360,  # angmin
-            360    # angmax
-        ]
-        branch_data.append(branch_row)
-
-    return {
-        'baseMVA': baseMVA,
-        'bus': np.array(bus_data),
-        'branch': np.array(branch_data)
-    }
+    return mpc
 
 
 class TrainingLogger:
@@ -1155,7 +1029,7 @@ class UnifiedTrainer:
             self.logger.close()
 
 
-def create_environment_from_config(config: Dict, hetero_data: HeteroData, node_embeddings: Dict, attention_weights: Dict, mpc_data: Dict, device: torch.device) -> Tuple[PowerGridPartitioningEnv, Optional[gym.Env]]:
+def create_environment_from_config(config: Dict, hetero_data: HeteroData, node_embeddings: Dict, attention_weights: Dict, mpc_data: Dict, device: torch.device, is_normalized: bool = True) -> Tuple[PowerGridPartitioningEnv, Optional[gym.Env]]:
     """根据配置创建环境实例，如果需要则使用Gym包装器。"""
     should_use_gym_wrapper = config.get('scenario_generation', {}).get('enabled', True) or \
                              config.get('parallel_training', {}).get('enabled', False)
@@ -1185,1017 +1059,107 @@ def create_environment_from_config(config: Dict, hetero_data: HeteroData, node_e
         max_steps=env_config['max_steps'],
         device=device,
         attention_weights=attention_weights,
-        config=config
+        config=config,
+        is_normalized=is_normalized
     )
     return env, None
 
 
-class UnifiedTrainingSystem:
-    """统一训练系统 - 专注于训练功能"""
-
-    def __init__(self, config_path: Optional[str] = None, **kwargs):
-        """
-        初始化统一训练系统
-
-        Args:
-            config_path: 自定义配置文件路径
-            **kwargs: 用于覆盖配置的键值对
-        """
-        # 1. 加载和合并配置
-        self.config = self._load_config(config_path, kwargs)
-
-        # 2. 设置设备
-        self.device = self._setup_device()
-
-        self.setup_directories()
-
-    def _load_config(self, config_path: Optional[str], overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """
-        加载配置，优先级如下: 命令行覆盖 > 文件配置 > 默认配置
-        """
-        # 1. 获取默认配置
-        final_config = self._create_default_config()
-
-        # 2. 确定要加载的配置文件路径
-        # 如果命令行没有指定 --config, 则使用项目根目录的 config.yaml
-        if config_path is None:
-            config_path = 'config.yaml'
-        
-        # 3. 如果配置文件存在，则加载并合并
-        if os.path.exists(config_path):
-            try:
-                with open(config_path, 'r', encoding='utf-8') as f:
-                    file_config = yaml.safe_load(f)
-                
-                if file_config: # 确保文件不是空的
-                    final_config = self._deep_merge_config(final_config, file_config)
-                    from code.src.rich_output import rich_success
-                    rich_success(f"✅ 配置文件加载成功: {config_path}")
-            except Exception as e:
-                from code.src.rich_output import rich_warning
-                rich_warning(f"⚠️ 加载配置文件 {config_path} 失败: {e}，将使用默认配置。")
-        else:
-            # 只在用户明确指定了--config但文件不存在时发出警告
-            if config_path != 'config.yaml':
-                 from code.src.rich_output import rich_warning
-                 rich_warning(f"⚠️ 指定的配置文件不存在: '{config_path}'，将使用默认配置。")
-
-        # 4. 应用来自构造函数的命令行覆盖项
-        if overrides:
-            final_config = self._deep_merge_config(final_config, overrides)
-            from code.src.rich_output import rich_info
-            rich_info("✅ 已应用命令行参数覆盖配置。")
-
-        return final_config
-
-    def _deep_merge_config(self, base_config: Dict[str, Any], preset_config: Dict[str, Any]) -> Dict[str, Any]:
-        """深度合并配置字典"""
-        result = base_config.copy()
-
-        for key, value in preset_config.items():
-            if key in result and isinstance(result[key], dict) and isinstance(value, dict):
-                result[key] = self._deep_merge_config(result[key], value)
-            else:
-                result[key] = value
-
-        return result
-
-    def _create_default_config(self) -> Dict[str, Any]:
-        """创建默认配置"""
-        return {
-            'system': {
-                'name': 'unified_power_grid_partitioning',
-                'version': '2.0',
-                'device': 'auto',
-                'seed': 42,
-                'num_threads': 1
-            },
-            'data': {
-                'case_name': 'ieee14',
-                'normalize': True,
-                'cache_dir': 'data/cache'
-            },
-            'training': {
-                'mode': 'standard',  # standard, parallel, curriculum, large_scale
-                'num_episodes': 1000,
-                'max_steps_per_episode': 200,
-                'update_interval': 10,
-                'save_interval': 100,
-                'eval_interval': 50
-            },
-            'environment': {
-                'num_partitions': 3,
-                'max_steps': 200,
-                'reward_weights': {
-                    'load_b': 0.4,
-                    'decoupling': 0.4,
-                    'power_b': 0.2
-                }
-            },
-            'gat': {
-                'hidden_channels': 64,
-                'gnn_layers': 3,
-                'heads': 4,
-                'output_dim': 128,
-                'dropout': 0.1
-            },
-            'agent': {
-                'type': 'ppo',  # ppo, sb3_ppo
-                'lr_actor': 3e-5,  # 降低10倍用于数值稳定
-                'lr_critic': 1e-4,  # 降低10倍用于数值稳定
-                'gamma': 0.99,
-                'eps_clip': 0.2,
-                'k_epochs': 4,
-                'entropy_coef': 0.01,
-                'value_coef': 0.5,
-                'hidden_dim': 256
-            },
-            'parallel_training': {
-                'enabled': False,
-                'num_cpus': 12,
-                'total_timesteps': 5_000_000,
-                'scenario_generation': True
-            },
-            'scenario_generation': {
-                'enabled': True,  # 默认启用场景生成
-                'perturb_prob': 0.8,
-                'perturb_types': ['n-1', 'load_gen_fluctuation', 'both', 'none'],
-                'scale_range': [0.8, 1.2]
-            },
-            'curriculum': {
-                'enabled': False,
-                'start_partitions': 2,
-                'end_partitions': 5,
-                'episodes_per_stage': 200
-            },
-            'evaluation': {
-                'num_episodes': 20,
-                'include_baselines': True,
-                'baseline_methods': ['spectral', 'kmeans', 'random']
-            },
-            'visualization': {
-                'enabled': True,
-                'save_figures': True,
-                'figures_dir': 'data/figures',
-                'interactive': True
-            },
-            'logging': {
-                'use_tensorboard': True,
-                'log_dir': 'data/logs',
-                'checkpoint_dir': 'data/checkpoints',
-                'console_log_interval': 10,
-                'metrics_save_interval': 50
-            },
-            # 【新增】简洁输出配置
-            'debug': {
-                'training_output': {
-                    'only_show_errors': True,  # 默认只显示关键信息
-                    'show_cache_loading': False,
-                    'show_attention_collection': False,
-                    'show_state_manager_details': False,
-                    'show_metis_details': False,
-                    'show_scenario_generation': False,
-                    'use_rich_status_panel': True  # 使用Rich状态面板
-                },
-                'verbose_logging': False
-            }
-        }
-
-    def _setup_device(self) -> torch.device:
-        """设置计算设备"""
-        device_config = self.config['system'].get('device', 'auto')
-        if device_config == 'auto':
-            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        else:
-            device = torch.device(device_config)
-
-        safe_print(f"🔧 使用设备: {device}")
-        return device
-
-    def setup_directories(self):
-        """创建必要的目录"""
-        dirs = [
-            self.config['data']['cache_dir'],
-            self.config['logging']['log_dir'],
-            self.config['logging']['checkpoint_dir'],
-            self.config['visualization']['figures_dir'],
-            'data/models', 'data/output', 'data/experiments'
-        ]
-
-        for dir_path in dirs:
-            Path(dir_path).mkdir(parents=True, exist_ok=True)
-
-    def get_training_configs(self) -> Dict[str, Dict[str, Any]]:
-        """获取不同训练模式的配置"""
-        base_config = self.config.copy()
-        
-        # 智能自适应默认启用
-        base_config['adaptive_curriculum'] = {'enabled': True}
-
-        configs = {
-            'fast': {
-                **base_config,
-                **base_config.get('fast', {}),
-                'training': {
-                    **base_config['training'],
-                    **base_config.get('fast', {}).get('training', {}),
-                    'mode': 'fast'
-                }
-            },
-            'full': {
-                **base_config,
-                **base_config.get('full', {}),
-                'training': {
-                    **base_config['training'],
-                    **base_config.get('full', {}).get('training', {}),
-                    'mode': 'full'
-                },
-                'parallel_training': {
-                    **base_config['parallel_training'],
-                    **base_config.get('full', {}).get('parallel_training', {})
-                }
-            },
-            'ieee118': {
-                **base_config,
-                **base_config.get('ieee118', {}),
-                'training': {
-                    **base_config['training'],
-                    **base_config.get('ieee118', {}).get('training', {}),
-                    'mode': 'ieee118'
-                },
-                'parallel_training': {
-                    **base_config['parallel_training'],
-                    **base_config.get('ieee118', {}).get('parallel_training', {})
-                }
-            }
-        }
-
-        return configs
-
-    def run_training(self, mode: str = 'fast', **kwargs) -> Dict[str, Any]:
-        """运行训练"""
-        print(f"\n开始{mode.upper()}模式训练")
-
-        # 获取模式配置
-        configs = self.get_training_configs()
-        if mode not in configs:
-            print(f"⚠️ 未知训练模式: {mode}，使用快速模式")
-            mode = 'fast'
-
-        config = configs[mode]
-
-        # 应用命令行参数覆盖
-        for key, value in kwargs.items():
-            if '.' in key:
-                keys = key.split('.')
-                current = config
-                for k in keys[:-1]:
-                    if k not in current:
-                        current[k] = {}
-                    current = current[k]
-                current[keys[-1]] = value
-            else:
-                config[key] = value
-
-
-
-        # 设置随机种子
-        torch.manual_seed(config['system']['seed'])
-        np.random.seed(config['system']['seed'])
-
-        try:
-            # 根据配置选择训练流程
-            if config['parallel_training']['enabled']:
-                return self._run_parallel_training(config)
-            elif config.get('adaptive_curriculum', {}).get('enabled', False):
-                return self._run_curriculum_training(config)
-            else:
-                return self._run_standard_training(config)
-
-        except Exception as e:
-            print(f"训练失败: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            return {'success': False, 'error': str(e)}
-
-    def _run_standard_training(self, config: Dict[str, Any]) -> Dict[str, Any]:
-        """运行标准训练"""
-        # 只在简洁模式下显示关键信息
-        from code.src.rich_output import rich_info
-        only_show_errors = config.get('debug', {}).get('training_output', {}).get('only_show_errors', True)
-        
-        if not only_show_errors:
-            print("📊 标准训练模式")
-            print("🔧 系统状态: 现代化重构完成 - 统一奖励系统")
-        else:
-            rich_info("启动标准训练模式", show_always=True)
-
-        # 1. 数据处理
-        if not only_show_errors:
-            print("\n1️⃣ 数据处理...")
-        
-        processor = PowerGridDataProcessor(
-            normalize=config['data']['normalize'],
-            cache_dir=config['data']['cache_dir']
-        )
-
-        # 加载数据
-        mpc = load_power_grid_data(config['data']['case_name'])
-        hetero_data = processor.graph_from_mpc(mpc, config).to(self.device)
-        
-        if not only_show_errors:
-            print(f"✅ 数据加载完成: {hetero_data}")
-
-        # 2. GAT编码器
-        if not only_show_errors:
-            print("\n2️⃣ GAT编码器...")
-            
-        gat_config = config['gat']
-        encoder = create_hetero_graph_encoder(
-            hetero_data,
-            hidden_channels=gat_config['hidden_channels'],
-            gnn_layers=gat_config['gnn_layers'],
-            heads=gat_config['heads'],
-            output_dim=gat_config['output_dim']
-        ).to(self.device)
-
-        with torch.no_grad():
-            node_embeddings, attention_weights = encoder.encode_nodes_with_attention(hetero_data, config)
-
-        if not only_show_errors:
-            print(f"✅ 编码器初始化完成")
-
-        # 3. 环境（支持场景生成）
-        if not only_show_errors:
-            print("\n3️⃣ 强化学习环境...")
-        
-        env, gym_env = create_environment_from_config(config, hetero_data, node_embeddings, attention_weights, mpc, self.device)
-        if env is None:
-            raise RuntimeError("环境创建失败，返回了None。")
-        
-        use_scenario_generation = gym_env is not None
-        if use_scenario_generation:
-            rich_info(f"场景生成环境: {env.total_nodes}节点, {env.num_partitions}分区", show_always=True)
-        else:
-            rich_info(f"标准环境: {env.total_nodes}节点, {env.num_partitions}分区", show_always=True)
-
-        # 4. 智能体
-        if not only_show_errors:
-            print("\n4️⃣ PPO智能体...")
-            
-        # 在 _run_standard_training 方法，替换 agent 初始化前
-        # 计算嵌入维度
-        node_dim_env = env.state_manager.embedding_dim if hasattr(env, 'state_manager') else next(iter(node_embeddings.values())).shape[1]
-        region_dim_env = node_dim_env * 2  # 根据 IntelligentRegionEmbedding 设计
-
-        agent_config = config['agent']
-        agent = PPOAgent(
-            node_embedding_dim=node_dim_env,
-            region_embedding_dim=region_dim_env,
-            num_partitions=config['environment']['num_partitions'],
-            agent_config=agent_config,
-            device=self.device
-        )
-        
-        if not only_show_errors:
-            print(f"✅ PPO智能体初始化完成")
-
-        # 5. 训练
-        rich_info("开始训练...", show_always=True)
-        trainer = UnifiedTrainer(agent=agent, env=env, config=config, gym_env=gym_env)
-
-        training_config = config['training']
-        history = trainer.train(
-            num_episodes=training_config['num_episodes'],
-            max_steps_per_episode=training_config['max_steps_per_episode'],
-            update_interval=training_config['update_interval']
-        )
-
-        # 6. 保存训练好的模型
-        model_dir = Path(config['logging']['checkpoint_dir']) / 'models'
-        model_dir.mkdir(parents=True, exist_ok=True)
-        timestamp = time.strftime('%Y%m%d_%H%M%S')
-        model_path = model_dir / f"agent_{config['data']['case_name']}_{timestamp}_best.pth"
-
-        agent.save(str(model_path))
-        rich_info(f"模型已保存: {model_path}", show_always=True)
-
-        # 7. 基础评估
-        rich_info("开始评估...", show_always=True)
-        # 评估时也使用同一个trainer实例
-        eval_stats = trainer.evaluate()
-
-        trainer.close()
-
-        return {
-            'success': True,
-            'mode': 'standard',
-            'config': config,
-            'history': history,
-            'eval_stats': eval_stats,
-            'best_reward': trainer.logger.best_reward,
-            'model_path': str(model_path)
-        }
-
-    def _run_parallel_training(self, config: Dict[str, Any]) -> Dict[str, Any]:
-        """运行并行训练"""
-        print("🌐 并行训练模式")
-
-        if not self.deps['stable_baselines3']:
-            print("❌ 并行训练需要stable-baselines3，请安装：pip install stable-baselines3")
-            return {'success': False, 'error': 'Missing stable-baselines3'}
-
-        try:
-            # 检查是否有gym和stable_baselines3
-            try:
-                import gymnasium as gym
-                from stable_baselines3 import PPO
-                has_sb3 = True
-            except ImportError:
-                has_sb3 = False
-
-            if has_sb3:
-                # 使用Stable-Baselines3的并行训练
-                return self._run_sb3_parallel_training(config)
-            else:
-                print("⚠️ 缺少stable-baselines3，跳过并行训练")
-                return {'success': False, 'error': 'Missing stable-baselines3'}
-
-        except Exception as e:
-            print(f"❌ 并行训练失败: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            return {'success': False, 'error': str(e)}
-
-    def _run_sb3_parallel_training(self, config: Dict[str, Any]) -> Dict[str, Any]:
-        from code.src.data_processing import PowerGridDataProcessor
-        from code.src.rl.gym_wrapper import make_parallel_env
-        from stable_baselines3 import PPO
-
-        # 【修复】在创建并行环境前，将主进程中已解析好的设备名称更新到配置字典中
-        # 避免子进程收到 "auto" 字符串导致 torch.device() 报错
-        config['system']['device'] = str(self.device)
-        print(f"🔧 并行训练设备配置已更新: {config['system']['device']}")
-
-        # 1. 数据处理
-        print("\n1️⃣ 数据处理...")
-        processor = PowerGridDataProcessor(
-            normalize=config['data']['normalize'],
-            cache_dir=config['data']['cache_dir']
-        )
-
-        # 加载数据
-        mpc = load_power_grid_data(config['data']['case_name'])
-
-        # 2. 创建并行环境
-        print("\n2️⃣ 创建并行环境...")
-        parallel_config = config['parallel_training']
-
-        parallel_env = make_parallel_env(
-            base_case_data=mpc,
-            config=config,
-            num_envs=parallel_config['num_cpus'],
-            use_scenario_generator=parallel_config['scenario_generation']
-        )
-
-        # 3. 创建并训练PPO智能体
-        print("\n3️⃣ 创建PPO智能体...")
-        model = PPO(
-            "MlpPolicy",
-            parallel_env,
-            verbose=1,
-            tensorboard_log=config['logging']['log_dir']
-        )
-
-        print("\n4️⃣ 开始并行训练...")
-        model.learn(total_timesteps=parallel_config['total_timesteps'])
-
-        # 4. 保存模型
-        model_path = Path(config['logging']['checkpoint_dir']) / "parallel_model"
-        model_path.parent.mkdir(exist_ok=True, parents=True)
-        model.save(str(model_path))
-
-        return {
-            'success': True,
-            'mode': 'parallel',
-            'model_path': str(model_path),
-            'total_timesteps': parallel_config['total_timesteps'],
-            'config': config
-        }
-
-    def _run_curriculum_training(self, config: Dict[str, Any]) -> Dict[str, Any]:
-        """运行课程学习训练"""
-        # 检查是否启用智能自适应课程学习
-        if config.get('adaptive_curriculum', {}).get('enabled', False):
-            return self._run_adaptive_curriculum_training(config)
-        else:
-            return self._run_traditional_curriculum_training(config)
-
-    def _run_traditional_curriculum_training(self, config: Dict[str, Any]) -> Dict[str, Any]:
-        """运行传统课程学习训练"""
-        print("📚 传统课程学习训练模式")
-
-        curriculum_config = config['curriculum']
-        start_partitions = curriculum_config['start_partitions']
-        end_partitions = curriculum_config['end_partitions']
-        episodes_per_stage = curriculum_config['episodes_per_stage']
-
-        results = []
-
-        for num_partitions in range(start_partitions, end_partitions + 1):
-            print(f"\n📖 课程阶段: {num_partitions}个分区")
-
-            # 更新配置
-            stage_config = config.copy()
-            stage_config['environment']['num_partitions'] = num_partitions
-            stage_config['training']['num_episodes'] = episodes_per_stage
-
-            # 运行该阶段的训练
-            stage_result = self._run_standard_training(stage_config)
-            results.append(stage_result)
-
-            if not stage_result['success']:
-                break
-
-        return {
-            'success': all(r['success'] for r in results),
-            'mode': 'traditional_curriculum',
-            'config': config,
-            'stage_results': results
-        }
-
-    def _run_adaptive_curriculum_training(self, config: Dict[str, Any]) -> Dict[str, Any]:
-        """运行智能自适应课程学习训练"""
-        print("智能自适应课程学习训练模式")
-        print("=" * 60)
-
-        try:
-            # 初始化智能导演
-            director = AdaptiveDirector(config, self._detect_base_mode(config))
-            print(f"智能导演系统已初始化 (基础模式: {self._detect_base_mode(config)})")
-
-            # 运行自适应训练
-            result = self._run_adaptive_training_with_director(config, director)
-
-            return {
-                'success': result.get('success', False),
-                'mode': 'adaptive_curriculum',
-                'config': config,
-                'director_status': director.get_status_summary(),
-                **result
-            }
-
-        except ImportError as e:
-            print(f"❌ 无法导入智能导演系统: {e}")
-            print("🔄 回退到传统课程学习模式")
-            return self._run_traditional_curriculum_training(config)
-        except Exception as e:
-            print(f"智能自适应课程学习失败: {e}")
-            import traceback
-            traceback.print_exc()
-            return {'success': False, 'error': str(e), 'mode': 'adaptive_curriculum'}
-
-    def _detect_base_mode(self, config: Dict[str, Any]) -> str:
-        """检测基础训练模式"""
-        # 根据配置特征检测基础模式
-        num_episodes = config.get('training', {}).get('num_episodes', 1500)
-        parallel_enabled = config.get('parallel_training', {}).get('enabled', False)
-
-        if num_episodes >= 4000 or parallel_enabled:
-            if num_episodes >= 4000:
-                return 'ieee118'
-            else:
-                return 'full'
-        else:
-            return 'fast'
-
-    def _run_adaptive_training_with_director(self, config: Dict[str, Any], director) -> Dict[str, Any]:
-        """运行由智能导演指导的自适应训练（已重构）"""
-        print("\n启动智能导演训练流程...")
-        from code.src.rich_output import rich_info, rich_warning
-
-        # 1. 统一的数据和模型资产初始化
-        # =================================================================
-        rich_info("1. 初始化核心数据资产 (数据处理器, GAT编码器)...")
-        try:
-            processor = PowerGridDataProcessor(
-                normalize=config['data']['normalize'],
-                cache_dir=config['data']['cache_dir']
-            )
-            mpc = load_power_grid_data(config['data']['case_name'])
-            hetero_data = processor.graph_from_mpc(mpc, config).to(self.device)
-            
-            gat_config = config['gat']
-            encoder = create_hetero_graph_encoder(
-                hetero_data,
-                hidden_channels=gat_config['hidden_channels'],
-                gnn_layers=gat_config['gnn_layers'],
-                heads=gat_config['heads'],
-                output_dim=gat_config['output_dim']
-            ).to(self.device)
-
-            with torch.no_grad():
-                node_embeddings, attention_weights = encoder.encode_nodes_with_attention(hetero_data, config)
-        except Exception as e:
-            rich_warning(f"核心资产初始化失败: {e}")
-            raise e
-        rich_info("✅ 核心数据资产初始化完成。")
-
-        # 2. 创建初始环境和Gym包装器 (如果需要)
-        # =================================================================
-        rich_info("2. 创建初始环境...")
-        env, gym_env = create_environment_from_config(config, hetero_data, node_embeddings, attention_weights, mpc, self.device)
-        if env is None:
-            raise RuntimeError("环境创建失败，返回了None。")
-        rich_info(f"✅ 初始环境创建完成 (类型: {'Gym-Wrapped' if gym_env else 'Standard'})")
-        
-        # 3. 创建PPO智能体
-        # =================================================================
-        rich_info("3. 创建PPO智能体...")
-        # 在 _run_adaptive_training_with_director 方法 创建PPOAgent
-        node_dim_env = env.state_manager.embedding_dim if hasattr(env, 'state_manager') else next(iter(node_embeddings.values())).shape[1]
-        region_dim_env = node_dim_env * 2
-        agent = PPOAgent(
-            node_embedding_dim=node_dim_env,
-            region_embedding_dim=region_dim_env,
-            num_partitions=env.num_partitions,
-            agent_config=config['agent'],
-            device=self.device
-        )
-        rich_info("✅ PPO智能体创建完成。")
-
-        # 4. 智能自适应训练循环
-        # =================================================================
-        print("\n2. 开始智能自适应训练...")
-        num_episodes = config['training']['num_episodes']
-        max_steps_per_episode = config['training']['max_steps_per_episode']
-        update_interval = config['training']['update_interval']
-
-        # 初始化训练日志
-        logger = TrainingLogger(config, num_episodes)
-
-        # 智能导演状态跟踪
-        director_decisions = []
-        stage_transitions = []
-
-        # 移除复杂的Rich表格，使用简单进度条
-        use_rich_table = False
-
-        # 创建简单的进度条
-        try:
-            from tqdm import tqdm
-            progress_bar = tqdm(total=num_episodes, desc="🧠 智能自适应训练",
-                              bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]')
-        except ImportError:
-            progress_bar = None
-
-        try:
-            for episode in range(num_episodes):
-                # 重置环境
-                if gym_env is not None:
-                    obs_array, info = gym_env.reset()
-                    env = gym_env.internal_env
-                    state, _ = env.reset()
-                else:
-                    state, _ = env.reset()
-
-                episode_reward = 0
-                episode_length = 0
-
-                # Episode执行
-                for step in range(max_steps_per_episode):
-                    action, log_prob, value = agent.select_action(state, training=True)
-
-                    if action is None:
-                        break
-
-                    state, reward, terminated, truncated, info = env.step(action)
-                    done = terminated or truncated
-
-                    agent.store_experience(state, action, reward, log_prob, value, done)
-                    episode_reward += reward
-                    episode_length += 1
-
-                    if done:
-                        break
-
-                # 收集episode信息 - 【修复】适配新奖励系统的指标名称
-                episode_info = {
-                    'episode': episode,
-                    'reward': episode_reward,
-                    'episode_length': episode_length,
-                    'success': info.get('success', False),
-                    # 新系统使用'cv'而不是'load_cv'，提供向后兼容
-                    'load_cv': info.get('cv', info.get('load_cv', 1.0)),
-                    'cv': info.get('cv', info.get('load_cv', 1.0)),  # 同时提供新名称
-                    'coupling_ratio': info.get('coupling_ratio', 1.0),
-                    'connectivity': info.get('connectivity', 0.0),
-                    **info
-                }
-
-                # 智能导演决策
-                director_decision = director.step(episode, episode_info)
-                director_decisions.append(director_decision)
-
-                # 应用智能导演的参数调整
-                self._apply_director_decision(env, agent, director_decision)
-
-                # 记录阶段转换
-                if 'stage_info' in director_decision:
-                    stage_info = director_decision['stage_info']
-                    if len(stage_transitions) == 0 or stage_transitions[-1]['stage'] != stage_info['current_stage']:
-                        stage_transitions.append({
-                            'episode': episode,
-                            'stage': stage_info['current_stage'],
-                            'stage_name': stage_info['stage_name']
-                        })
-
-                # 更新进度条
-                if progress_bar:
-                    # 获取当前阶段信息
-                    stage_name = "unknown"
-                    if director_decision and 'stage_info' in director_decision:
-                        stage_name = director_decision['stage_info'].get('stage_name', 'unknown')
-
-                    # 更新进度条描述
-                    current_best = max([r for r in logger.episode_rewards if r is not None] + [-float('inf')])
-                    desc = f"🧠 智能自适应训练 | 阶段: {stage_name} | 当前: {episode_reward:.3f} | 最佳: {current_best:.3f}"
-                    progress_bar.set_description(desc)
-                    progress_bar.update(1)
-
-                # 记录训练日志
-                logger.log_episode(episode, episode_reward, episode_length, episode_info)
-
-                # 智能体更新
-                if episode % update_interval == 0 and episode > 0:
-                    try:
-                        training_stats = agent.update()
-                        if training_stats:
-                            logger.log_training_step(
-                                episode,
-                                training_stats.get('actor_loss'),
-                                training_stats.get('critic_loss'),
-                                training_stats.get('entropy')
-                            )
-                    except Exception as e:
-                        print(f"⚠️ Episode {episode} 智能体更新失败: {e}")
-
-                # 定期保存中间结果
-                if episode % config['training']['save_interval'] == 0 and episode > 0:
-                    self._save_adaptive_intermediate_results(episode, director, logger)
-
-            # 保存训练好的模型
-            model_dir = Path(config['logging']['checkpoint_dir']) / 'models'
-            model_dir.mkdir(parents=True, exist_ok=True)
-            timestamp = time.strftime('%Y%m%d_%H%M%S')
-            model_path = model_dir / f"agent_{config['data']['case_name']}_adaptive_{timestamp}_best.pth"
-
-            agent.save(str(model_path))
-            print(f"💾 自适应训练模型已保存: {model_path}")
-
-            # 训练完成统计
-            final_stats = logger.get_statistics()
-            director_summary = director.get_status_summary()
-
-            # 关闭进度条
-            if progress_bar:
-                progress_bar.close()
-
-            # 统计阶段转换信息
-            emergency_transitions = sum(1 for t in stage_transitions if t['stage_name'] == 'emergency_recovery')
-            normal_transitions = len(stage_transitions) - emergency_transitions
-
-            # 简单的文本输出训练结果
-            print("\n🎯 智能自适应训练完成")
-            print("=" * 50)
-            print(f"总回合数: {final_stats.get('total_episodes', 0)}")
-            print(f"最佳奖励: {final_stats.get('best_reward', 0):.4f}")
-            print(f"平均奖励: {final_stats.get('mean_reward', 0):.4f}")
-            print(f"最终阶段: {director_summary['current_stage']}")
-            print(f"智能转换: {normal_transitions}次正常 + {emergency_transitions}次紧急恢复")
-
-            return {
-                'success': True,
-                'episode_rewards': logger.episode_rewards,
-                'episode_lengths': logger.episode_lengths,
-                'training_stats': final_stats,
-                'director_decisions': director_decisions,
-                'stage_transitions': stage_transitions,
-                'director_summary': director_summary,
-                'model_path': str(model_path)
-            }
-
-        except Exception as e:
-            # 确保关闭进度条
-            if progress_bar:
-                progress_bar.close()
-            print(f"❌ 智能自适应训练过程中出错: {e}")
-            import traceback
-            traceback.print_exc()
-            return {'success': False, 'error': str(e)}
-
-        finally:
-            # 清理资源
-            if progress_bar:
-                try:
-                    progress_bar.close()
-                except:
-                    pass
-
-    def _apply_director_decision(self, env, agent, decision: Dict[str, Any]):
-        """应用智能导演的决策到环境和智能体 - 增强版支持动态约束"""
-        import builtins
-
-        try:
-            # 静默模式：减少日志输出
-            verbose = self.config.get('debug', {}).get('adaptive_curriculum_verbose', False)
-
-            # 【新增】更新动态约束参数
-            constraint_params = {}
-
-            # 约束模式设置
-            if 'connectivity_penalty' in decision:
-                constraint_params['connectivity_penalty'] = decision['connectivity_penalty']
-                # 根据惩罚强度自动设置约束模式
-                if decision['connectivity_penalty'] > 0:
-                    constraint_params['constraint_mode'] = 'soft'
-                else:
-                    constraint_params['constraint_mode'] = 'hard'
-
-            if 'action_mask_relaxation' in decision:
-                constraint_params['action_mask_relaxation'] = decision['action_mask_relaxation']
-
-            # 应用动态约束参数到环境
-            if constraint_params and hasattr(env, 'update_dynamic_constraints'):
-                env.update_dynamic_constraints(constraint_params)
-                if verbose:
-                    print(f"🔧 更新动态约束参数: {constraint_params}")
-
-            # 更新环境奖励参数
-            if hasattr(env, 'reward_function') and 'reward_weights' in decision:
-                reward_weights = decision['reward_weights']
-                if hasattr(env.reward_function, 'update_weights'):
-                    if verbose:
-                        env.reward_function.update_weights(reward_weights)
-                    else:
-                        # 临时禁用打印
-                        original_print = builtins.print
-                        builtins.print = lambda *args, **kwargs: None
-                        env.reward_function.update_weights(reward_weights)
-                        builtins.print = original_print
-
-            # 【保留】向后兼容的连通性惩罚设置
-            if 'connectivity_penalty' in decision:
-                if hasattr(env, 'connectivity_penalty'):
-                    env.connectivity_penalty = decision['connectivity_penalty']
-
-            # 更新智能体学习率
-            if 'learning_rate_factor' in decision and decision['learning_rate_factor'] != 1.0:
-                if hasattr(agent, 'update_learning_rate'):
-                    if verbose:
-                        agent.update_learning_rate(decision['learning_rate_factor'])
-                    else:
-                        # 临时禁用打印
-                        original_print = builtins.print
-                        builtins.print = lambda *args, **kwargs: None
-                        agent.update_learning_rate(decision['learning_rate_factor'])
-                        builtins.print = original_print
-
-        except Exception as e:
-            # 确保使用原始的print函数，避免被临时替换影响
-            print(f"⚠️ 应用导演决策时出错: {e}")
-            import traceback
-            if verbose:
-                traceback.print_exc()
-
-    def _save_adaptive_intermediate_results(self, episode: int, director, logger):
-        """保存智能自适应训练的中间结果"""
-        try:
-            from pathlib import Path
-            import json
-
-            checkpoint_dir = Path(self.config['logging']['checkpoint_dir'])
-            checkpoint_dir.mkdir(parents=True, exist_ok=True)
-
-            # 保存训练统计
-            stats = logger.get_statistics()
-            stats_file = checkpoint_dir / f"adaptive_training_stats_episode_{episode}.json"
-            with open(stats_file, 'w') as f:
-                json.dump(stats, f, indent=2)
-
-            # 保存智能导演状态
-            director_status = director.get_status_summary()
-            director_file = checkpoint_dir / f"director_status_episode_{episode}.json"
-            with open(director_file, 'w') as f:
-                json.dump(director_status, f, indent=2)
-
-            print(f"💾 智能自适应中间结果已保存: episode {episode}")
-
-        except Exception as e:
-            print(f"⚠️ 保存智能自适应中间结果失败: {e}")
-
-    def save_results(self, results: Dict[str, Any], output_dir: str = 'data/experiments'):
-        """保存训练结果"""
-        timestamp = time.strftime('%Y%m%d_%H%M%S')
-        exp_dir = Path(output_dir) / f"training_{timestamp}"
-        exp_dir.mkdir(parents=True, exist_ok=True)
-
-        # 保存结果
-        results_file = exp_dir / "results.json"
-        with open(results_file, 'w') as f:
-            # 过滤不能序列化的对象
-            serializable_results = {}
-            for key, value in results.items():
-                if key not in ['env', 'agent', 'trainer']:
-                    try:
-                        json.dumps(value)
-                        serializable_results[key] = value
-                    except (TypeError, ValueError):
-                        serializable_results[key] = str(value)
-
-            json.dump(serializable_results, f, indent=2)
-
-        print(f"💾 训练结果已保存到: {exp_dir}")
-        return exp_dir
-
-
-def verify_dependencies():
-    """在程序启动时验证所有关键依赖是否都已安装。"""
-    if not CRITICAL_DEPS_AVAILABLE:
-        from code.src.rich_output import rich_warning
-        rich_warning("="*60)
-        rich_warning("错误：一个或多个核心依赖项未能成功导入。")
-        rich_warning(f"具体错误: {MISSING_DEP_ERROR}")
-        rich_warning("请确保您已根据 environment.yml 或 requirements.txt 正确安装了所有必需的包，")
-        rich_warning("特别是 `gymnasium`, `stable-baselines3`, `torch`, 和 `torch_geometric`。")
-        rich_warning("="*60)
-        sys.exit(1)
-
-def main():
-    """主函数"""
-    # 在执行任何操作前，首先验证关键依赖
-    verify_dependencies()
-
-    parser = argparse.ArgumentParser(description='电力网络分区强化学习统一训练系统')
-    parser.add_argument('--config', type=str, default=None, help='自定义配置文件路径')
-    parser.add_argument('--mode', type=str, default='standard', help='训练模式')
-    parser.add_argument('--case', type=str, default=None, help='覆盖电网案例')
-    parser.add_argument('--episodes', type=int, default=None, help='覆盖训练回合数')
-    parser.add_argument('--tui', action='store_true', help='启用Textual TUI监控器')
-    parser.add_argument('--device', type=str, default=None, help='覆盖计算设备 (cpu/cuda)')
-
+if __name__ == "__main__":
+    import argparse, yaml, copy, pprint, sys
+    
+    parser = argparse.ArgumentParser(description="RL Trainer for Power Grid Partitioning")
+    parser.add_argument("--mode", default="fast", help="配置预设名称 (fast / full / ieee118 等)")
+    parser.add_argument("--run", action="store_true", help="执行完整训练流程。若省略则仅打印合并后的配置")
     args = parser.parse_args()
 
-    # 将所有命令行参数统一处理为配置覆盖项
-    config_overrides = {
-        'training': {'mode': args.mode},
-        'tui': {'enabled': args.tui}
-    }
-    if args.case:
-        config_overrides['data'] = {'case_name': args.case}
-    if args.episodes:
-        config_overrides.setdefault('training', {})['num_episodes'] = args.episodes
-    if args.device:
-        config_overrides['system'] = {'device': args.device}
+    # 1. 读取配置文件
+    cfg_file = Path("config.yaml")
+    if not cfg_file.exists():
+        safe_print("❌ 找不到 config.yaml ，请检查项目目录")
+        sys.exit(1)
+    with open(cfg_file, "r", encoding="utf-8") as f:
+        base_cfg = yaml.safe_load(f)
 
-    try:
-        # 将配置覆盖项统一传递给系统
-        system = UnifiedTrainingSystem(
-            config_path=args.config,
-            **config_overrides
-        )
-        
-        # 直接使用系统内的最终配置来运行训练
-        results = system.run_training(mode=system.config['training']['mode'])
+    # 2. 递归合并预设
+    def deep_update(dest: Dict[str, Any], src: Dict[str, Any]):
+        for k, v in src.items():
+            if isinstance(v, dict) and k in dest:
+                deep_update(dest[k], v)
+            else:
+                dest[k] = copy.deepcopy(v)
 
-        # 保存结果
-        if results.get('success', False):
-            system.save_results(results, 'experiments')
+    if args.mode in base_cfg:
+        deep_update(base_cfg, base_cfg[args.mode])
+    else:
+        safe_print(f"⚠️ 未找到名为 '{args.mode}' 的预设，使用基础配置")
 
-        # 输出结果摘要
-        if results.get('success', False):
-            print(f"\n🎉 训练成功完成!")
-            if 'best_reward' in results:
-                print(f"🏆 最佳奖励: {results['best_reward']:.4f}")
-            if 'eval_stats' in results:
-                eval_stats = results['eval_stats']
-                print(f"📊 评估结果: 平均奖励 {eval_stats.get('avg_reward', 0):.4f}, "
-                      f"成功率 {eval_stats.get('success_rate', 0):.3f}")
-        else:
-            print(f"\n训练失败: {results.get('error', '未知错误')}")
-            return 1
+    if not args.run:
+        safe_print("🚀 配置已加载（未启动训练，添加 --run 可开始训练）\n─" * 40)
+        pprint.pp(base_cfg)
+        sys.exit(0)
 
-    except Exception as e:
-        try:
-            print(f"❌ 系统错误: {str(e)}")
-        except UnicodeEncodeError:
-            print(f"[ERROR] 系统错误: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        return 1
+    # 3. === 正式训练管道 ===
+    safe_print("🚀 开始训练流程 ...")
 
-    return 0
+    # 3.1 设备
+    device_str = base_cfg['system'].get('device', 'auto')
+    if device_str == 'auto':
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    else:
+        device = torch.device(device_str)
 
+    # 3.2 数据加载
+    mpc_data = load_power_grid_data(base_cfg['data']['case_name'])
 
-if __name__ == "__main__":
-    exit(main())
+    # 3.3 图处理
+    from code.src.data_processing import PowerGridDataProcessor
+    processor = PowerGridDataProcessor(
+        normalize=base_cfg['data'].get('normalize', True),
+        cache_dir=base_cfg['data'].get('cache_dir', 'data/cache')
+    )
+    hetero_data = processor.graph_from_mpc(mpc_data, config=base_cfg)
+
+    # 3.4 编码器 (GAT)
+    encoder_cfg = base_cfg.get('gat', {})
+    encoder = create_production_encoder(hetero_data, encoder_cfg).to(device)
+    hetero_data = hetero_data.to(device)
+
+    # 预计算节点嵌入 & 注意力权重
+    with torch.no_grad():
+        node_embeddings_dict, attention_weights = encoder.encode_nodes_with_attention(hetero_data, base_cfg)
+
+    # 将 node_embeddings_dict 转为同一维度张量字典（环境内部按 node_type 键访问）
+
+    # 3.5 创建环境
+    env, gym_env = create_environment_from_config(
+        base_cfg, hetero_data, node_embeddings_dict, attention_weights, mpc_data, device,
+        is_normalized=base_cfg['data'].get('normalize', True)
+    )
+
+    # 3.6 创建智能体（需先获取实际state维度）
+    # 先reset一次环境以拿到示例state
+    init_state, _ = env.reset()
+    node_emb_dim = init_state['node_embeddings'].shape[1]
+    region_emb_dim = init_state['region_embeddings'].shape[1]
+
+    agent = PPOAgent(
+        node_embedding_dim=node_emb_dim,
+        region_embedding_dim=region_emb_dim,
+        num_partitions=base_cfg['environment']['num_partitions'],
+        agent_config=base_cfg.get('agent', {}),
+        device=device
+    )
+
+     # 3.7 训练器
+    trainer = UnifiedTrainer(agent, env, base_cfg, gym_env=gym_env)
+
+    train_cfg = base_cfg['training']
+    trainer.train(
+        num_episodes=train_cfg['num_episodes'],
+        max_steps_per_episode=train_cfg['max_steps_per_episode'],
+        update_interval=train_cfg.get('update_interval', 10)
+    )
+
+    safe_print("🎉 训练流程结束。")
+    
