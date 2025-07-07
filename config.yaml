@@ -290,7 +290,7 @@ ieee118:
       cv_threshold: 0.35
       connectivity_threshold: 0.95
   parallel_training:
-    enabled: true
+    enabled: false
     num_cpus: 12
   scenario_generation:
     enabled: true
