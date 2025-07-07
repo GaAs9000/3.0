@@ -8,6 +8,7 @@
 """
 
 import numpy as np
+import torch
 from typing import Dict, Any, Optional, Tuple
 from .scenario_context import ScenarioContext
 from .scenario_aware_tracker import ScenarioAwareHistoryTracker
@@ -246,7 +247,7 @@ class PopArtNormalizer:
 
 class HybridRewardFunction:
     """
-    混合奖励函数 - 升级版
+    混合奖励函数 - 性能优化版
     
     支持：
     1. 两级查询基线系统（精确场景→类别平均→全局回退）
@@ -296,6 +297,9 @@ class HybridRewardFunction:
             self.config.get('relative_reward', {})
         )
         
+        # 性能优化：预计算常量
+        self.clip_min, self.clip_max = self.config.get('clip_range', [-1.0, 1.0])
+        
         # 统计信息
         self.total_computations = 0
         self.exploration_rewards_given = 0
@@ -306,7 +310,7 @@ class HybridRewardFunction:
                       previous_quality: Optional[float],
                       scenario_context: ScenarioContext) -> Tuple[float, Dict[str, Any]]:
         """
-        计算混合奖励 - 升级版
+        计算混合奖励 - 性能优化版
         
         Args:
             current_quality: 当前质量分数
@@ -318,7 +322,7 @@ class HybridRewardFunction:
         """
         self.total_computations += 1
         
-        # 获取两级查询基线
+        # 获取两级查询基线（已GPU优化）
         baseline_quality, baseline_source, baseline_details = \
             self.history_tracker.get_scenario_baseline(scenario_context)
         
@@ -329,45 +333,53 @@ class HybridRewardFunction:
         base_reward = current_quality - baseline_quality
         
         if previous_quality is not None:
-            relative_reward = self.relative_calculator.compute_relative_reward(
-                previous_quality, current_quality, scenario_context
-            )
+            # 简化的相对改进计算
+            if previous_quality > 1e-8:
+                relative_reward = (current_quality - previous_quality) / previous_quality
+            else:
+                relative_reward = current_quality - previous_quality
+            # 快速裁剪
+            relative_reward = max(self.clip_min, min(self.clip_max, relative_reward))
         else:
             relative_reward = 0.0
         
-        # 动态权重调整
+        # 简化的动态权重计算
         if self.use_dynamic_weights:
-            adjusted_weights = self._calculate_dynamic_weights(baseline_details)
+            query_level = baseline_details.get('query_level', 0)
+            if query_level == 1:  # 精确场景匹配
+                base_weight = self.base_reward_weight + self.weight_adjustment_factor
+            elif query_level == 2:  # 类别平均
+                base_weight = self.base_reward_weight
+            elif query_level == 3:  # 全局回退
+                base_weight = self.base_reward_weight - self.weight_adjustment_factor
+            else:  # 无数据
+                base_weight = 0.1
+            # 快速裁剪
+            base_weight = max(0.1, min(0.9, base_weight))
+            relative_weight = 1.0 - base_weight
         else:
-            adjusted_weights = {
-                'base_weight': self.base_reward_weight,
-                'relative_weight': 1.0 - self.base_reward_weight
-            }
+            base_weight = self.base_reward_weight
+            relative_weight = 1.0 - self.base_reward_weight
         
         # 计算主要奖励
-        main_reward = (
-            adjusted_weights['base_weight'] * base_reward + 
-            adjusted_weights['relative_weight'] * relative_reward
-        )
+        main_reward = base_weight * base_reward + relative_weight * relative_reward
         
         # 改进奖励加成
-        improvement_bonus = 0.0
-        if previous_quality is not None and current_quality > previous_quality:
-            improvement_bonus = self.improvement_bonus
+        improvement_bonus = self.improvement_bonus if (previous_quality is not None and current_quality > previous_quality) else 0.0
         
-        # 探索奖励
+        # 简化的探索奖励
         exploration_reward = 0.0
-        exploration_info = {}
+        exploration_info = {'enabled': self.exploration_enabled}
         
         if self.exploration_enabled:
-            exploration_reward, exploration_info = self._calculate_exploration_reward(
+            exploration_reward, exploration_info = self._calculate_exploration_reward_optimized(
                 scenario_context, current_quality
             )
         
         # 总奖励
         total_reward = main_reward + improvement_bonus + exploration_reward
         
-        # 详细信息
+        # 简化的详细信息
         reward_details = {
             'main_reward': float(main_reward),
             'base_reward': float(base_reward),
@@ -378,62 +390,22 @@ class HybridRewardFunction:
             'baseline_info': {
                 'baseline_quality': float(baseline_quality),
                 'baseline_source': baseline_source,
-                'query_level': baseline_details.get('query_level', 0),
-                'category': baseline_details.get('scenario_category', 'unknown'),
-                'details': baseline_details
+                'query_level': baseline_details.get('query_level', 0)
             },
-            'weight_info': adjusted_weights,
-            'exploration_info': exploration_info,
-            'computation_stats': {
-                'total_computations': self.total_computations,
-                'exploration_rewards_given': self.exploration_rewards_given,
-                'baseline_source_distribution': dict(self.baseline_source_stats)
-            }
+            'weight_info': {
+                'base_weight': float(base_weight),
+                'relative_weight': float(relative_weight)
+            },
+            'exploration_info': exploration_info
         }
         
         return total_reward, reward_details
 
-    def _calculate_dynamic_weights(self, baseline_details: Dict[str, Any]) -> Dict[str, float]:
+    def _calculate_exploration_reward_optimized(self, 
+                                              scenario_context: ScenarioContext,
+                                              current_quality: float) -> Tuple[float, Dict[str, Any]]:
         """
-        根据数据充足性动态调整权重
-        
-        Args:
-            baseline_details: 基线查询详细信息
-            
-        Returns:
-            动态调整后的权重字典
-        """
-        query_level = baseline_details.get('query_level', 0)
-        
-        # 根据查询级别调整权重
-        if query_level == 1:  # 精确场景匹配
-            # 数据充足，更多依赖基础奖励
-            base_weight = self.base_reward_weight + self.weight_adjustment_factor
-        elif query_level == 2:  # 类别平均
-            # 中等数据，使用配置权重
-            base_weight = self.base_reward_weight
-        elif query_level == 3:  # 全局回退
-            # 数据稀疏，更多依赖相对改进
-            base_weight = self.base_reward_weight - self.weight_adjustment_factor
-        else:  # 无数据
-            # 完全依赖相对改进
-            base_weight = 0.1
-        
-        # 权重范围限制
-        base_weight = np.clip(base_weight, 0.1, 0.9)
-        relative_weight = 1.0 - base_weight
-        
-        return {
-            'base_weight': float(base_weight),
-            'relative_weight': float(relative_weight),
-            'adjustment_reason': f'query_level_{query_level}'
-        }
-
-    def _calculate_exploration_reward(self, 
-                                    scenario_context: ScenarioContext,
-                                    current_quality: float) -> Tuple[float, Dict[str, Any]]:
-        """
-        计算探索奖励
+        计算探索奖励 - 性能优化版
         
         Args:
             scenario_context: 场景上下文
@@ -445,26 +417,28 @@ class HybridRewardFunction:
         if not self.exploration_enabled:
             return 0.0, {'enabled': False}
         
-        # 获取探索上下文
-        exploration_context = self.history_tracker.get_exploration_context(scenario_context)
-        
-        is_new_scenario = exploration_context['is_new_scenario']
-        exploration_priority = exploration_context['exploration_priority']
+        # 快速检查是否为新场景
+        is_new_scenario, new_scenario_type = self.history_tracker.is_new_scenario(scenario_context)
         
         if not is_new_scenario:
             return 0.0, {
                 'enabled': True,
                 'is_new_scenario': False,
-                'scenario_type': exploration_context['new_scenario_type']
+                'scenario_type': new_scenario_type
             }
         
-        # 计算基础探索奖励
+        # 简化的探索奖励计算
         base_exploration_reward = self.exploration_base_bonus
         
-        # 优先级调整
-        priority_adjusted_reward = base_exploration_reward * (
-            1.0 + exploration_priority * self.exploration_priority_multiplier
-        )
+        # 基于场景类型的简单调整
+        if new_scenario_type == 'new_category':
+            priority_multiplier = 1.5
+        elif new_scenario_type == 'new_exact_scenario':
+            priority_multiplier = 1.2
+        else:  # insufficient_data_scenario
+            priority_multiplier = 1.0
+        
+        priority_adjusted_reward = base_exploration_reward * priority_multiplier
         
         # 衰减调整（随着episode增加逐渐减少探索奖励）
         if self.exploration_decay_episodes > 0 and self.current_episode > 0:
@@ -483,15 +457,11 @@ class HybridRewardFunction:
         exploration_info = {
             'enabled': True,
             'is_new_scenario': True,
-            'new_scenario_type': exploration_context['new_scenario_type'],
-            'scenario_category': exploration_context['scenario_category'],
-            'exploration_priority': float(exploration_priority),
-            'base_reward': float(base_exploration_reward),
-            'priority_adjusted': float(priority_adjusted_reward),
+            'new_scenario_type': new_scenario_type,
+            'priority_multiplier': float(priority_multiplier),
             'decay_factor': float(decay_factor),
             'quality_multiplier': float(quality_multiplier),
-            'final_reward': float(final_exploration_reward),
-            'data_sparsity': exploration_context['data_sparsity']
+            'final_reward': float(final_exploration_reward)
         }
         
         return final_exploration_reward, exploration_info
@@ -527,4 +497,165 @@ class HybridRewardFunction:
         """重置统计信息"""
         self.total_computations = 0
         self.exploration_rewards_given = 0
-        self.baseline_source_stats.clear() 
+        self.baseline_source_stats.clear()
+        
+    def get_exploration_context(self, scenario_context: ScenarioContext) -> Dict[str, Any]:
+        """
+        获取完整的探索上下文信息（保持接口一致性）
+        
+        Args:
+            scenario_context: 场景上下文
+            
+        Returns:
+            探索上下文字典
+        """
+        is_new_scenario, new_scenario_type = self.history_tracker.is_new_scenario(scenario_context)
+        
+        if not is_new_scenario:
+            return {
+                'is_new_scenario': False,
+                'new_scenario_type': 'known_scenario',
+                'exploration_priority': 0.0,
+                'data_sparsity': {
+                    'exact_scenario_data_count': len(
+                        self.history_tracker.histories.get(
+                            self.history_tracker.classifier.classify(scenario_context), []
+                        )
+                    ),
+                    'category_data_count': 0,
+                    'data_sufficiency': 'sufficient'
+                }
+            }
+        
+        # 计算探索优先级
+        scenario_key = self.history_tracker.classifier.classify(scenario_context)
+        scenario_category = self.history_tracker.classifier.extract_category(scenario_key)
+        
+        exact_data_count = len(self.history_tracker.histories.get(scenario_key, []))
+        
+        category_scenarios = self.history_tracker.classifier.list_scenarios_in_category(scenario_category)
+        category_data_count = sum(
+            len(self.history_tracker.histories.get(cat_scenario, [])) 
+            for cat_scenario in category_scenarios
+        )
+        
+        # 计算探索优先级
+        if new_scenario_type == 'new_category':
+            exploration_priority = 1.0
+        elif new_scenario_type == 'new_exact_scenario':
+            # 基于类别数据的探索优先级
+            if category_data_count < self.min_data_threshold:
+                exploration_priority = 0.8
+            else:
+                exploration_priority = 0.5
+        else:  # insufficient_data_scenario
+            # 基于数据稀疏性的探索优先级
+            exploration_priority = max(0.2, 1.0 - (exact_data_count / self.min_data_threshold))
+        
+        return {
+            'is_new_scenario': True,
+            'new_scenario_type': new_scenario_type,
+            'scenario_category': scenario_category,
+            'exploration_priority': float(exploration_priority),
+            'data_sparsity': {
+                'exact_scenario_data_count': exact_data_count,
+                'category_data_count': category_data_count,
+                'data_sufficiency': 'insufficient' if exact_data_count < self.min_data_threshold else 'sufficient',
+                'sparsity_level': 'high' if exact_data_count == 0 else 'medium' if exact_data_count < self.min_data_threshold else 'low'
+            }
+        }
+    
+    def update_config(self, new_config: Dict[str, Any]):
+        """
+        动态更新配置（保持接口一致性）
+        
+        Args:
+            new_config: 新的配置字典
+        """
+        # 更新基础配置
+        if 'base_reward_weight' in new_config:
+            self.base_reward_weight = new_config['base_reward_weight']
+        
+        if 'improvement_bonus' in new_config:
+            self.improvement_bonus = new_config['improvement_bonus']
+            
+        # 更新探索奖励配置
+        exploration_config = new_config.get('exploration_reward', {})
+        if exploration_config:
+            self.exploration_enabled = exploration_config.get('enabled', self.exploration_enabled)
+            self.exploration_base_bonus = exploration_config.get('base_bonus', self.exploration_base_bonus)
+            self.exploration_priority_multiplier = exploration_config.get('priority_multiplier', self.exploration_priority_multiplier)
+            self.exploration_decay_episodes = exploration_config.get('decay_episodes', self.exploration_decay_episodes)
+        
+        # 更新动态权重配置
+        dynamic_config = new_config.get('dynamic_weighting', {})
+        if dynamic_config:
+            self.use_dynamic_weights = dynamic_config.get('enabled', self.use_dynamic_weights)
+            self.min_data_threshold = dynamic_config.get('min_data_threshold', self.min_data_threshold)
+            self.weight_adjustment_factor = dynamic_config.get('adjustment_factor', self.weight_adjustment_factor)
+        
+        # 更新裁剪范围
+        if 'clip_range' in new_config:
+            self.clip_min, self.clip_max = new_config['clip_range']
+        
+        # 更新相对奖励计算器配置
+        relative_config = new_config.get('relative_reward', {})
+        if relative_config and self.relative_calculator:
+            self.relative_calculator.config.update(relative_config)
+            
+            # 更新相关属性
+            self.relative_calculator.method = relative_config.get('method', self.relative_calculator.method)
+            self.relative_calculator.use_difficulty_scaling = relative_config.get('use_difficulty_scaling', self.relative_calculator.use_difficulty_scaling)
+            self.relative_calculator.clip_range = relative_config.get('clip_range', self.relative_calculator.clip_range)
+            
+        print(f"✅ HybridRewardFunction配置已更新")
+    
+    def get_reward_breakdown(self, 
+                           current_quality: float, 
+                           previous_quality: Optional[float],
+                           scenario_context: ScenarioContext) -> Dict[str, Any]:
+        """
+        获取详细的奖励分解（用于调试和分析）
+        
+        Args:
+            current_quality: 当前质量分数
+            previous_quality: 前一步质量分数
+            scenario_context: 场景上下文
+            
+        Returns:
+            详细的奖励分解字典
+        """
+        # 计算完整奖励
+        total_reward, reward_details = self.compute_reward(
+            current_quality, previous_quality, scenario_context
+        )
+        
+        # 添加额外的分析信息
+        breakdown = {
+            'reward_computation': reward_details,
+            'scenario_analysis': {
+                'scenario_key': self.history_tracker.classifier.classify(scenario_context),
+                'scenario_category': self.history_tracker.classifier.extract_category(
+                    self.history_tracker.classifier.classify(scenario_context)
+                ),
+                'scenario_statistics': self.history_tracker.get_scenario_statistics(scenario_context)
+            },
+            'comparison_analysis': {
+                'quality_improvement': current_quality - (previous_quality or 0.0),
+                'quality_improvement_percentage': (
+                    ((current_quality - previous_quality) / previous_quality * 100) 
+                    if previous_quality and previous_quality > 1e-8 else 0.0
+                ),
+                'baseline_comparison': current_quality - reward_details['baseline_info']['baseline_quality'],
+                'quality_ranking': self.history_tracker.compute_scenario_percentile(
+                    current_quality, scenario_context
+                ) * 100  # 转换为百分比
+            },
+            'system_status': {
+                'exploration_active': reward_details['exploration_info'].get('is_new_scenario', False),
+                'data_availability': reward_details['baseline_info']['baseline_source'],
+                'reward_mode': 'exploration' if reward_details['exploration_reward'] > 0 else 'exploitation'
+            }
+        }
+        
+        return breakdown 
