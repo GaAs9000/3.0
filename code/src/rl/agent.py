@@ -402,7 +402,11 @@ class PPOAgent:
         """
         self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.num_partitions = num_partitions
-        
+
+        # 存储维度信息（用于模型保存）
+        self.node_embedding_dim = node_embedding_dim
+        self.region_embedding_dim = region_embedding_dim
+
         # 从配置字典中解析超参数
         self.gamma = agent_config.get('gamma', 0.99)
         self.eps_clip = agent_config.get('eps_clip', 0.2)

@@ -102,18 +102,6 @@ class ActionSpace:
             neighbors = col[start_idx:end_idx]
             self.neighbors_cache[node_idx] = neighbors
 
-    # ---------------- 向后兼容接口 ----------------
-    @property
-    def adjacency_list(self):
-        """已弃用: 返回每个节点的邻居索引列表 (list[Tensor])"""
-        import warnings
-        warnings.warn(
-            "ActionSpace.adjacency_list 已弃用，请使用 neighbors_cache 或相关方法。",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        # 将 neighbors_cache 转为列表以保持旧接口
-        return [self.neighbors_cache[i] for i in range(self.total_nodes)]
         
     def _setup_node_mappings(self):
         """设置局部和全局节点索引之间的映射"""

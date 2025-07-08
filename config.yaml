@@ -333,6 +333,39 @@ full:
   evaluation:
     num_episodes: 50
 
+ieee57:
+  data:
+    case_name: ieee57
+    normalize: true
+  environment:
+    num_partitions: 4
+    max_steps: 300
+  gat:
+    hidden_channels: 128
+    gnn_layers: 4
+    heads: 8
+    output_dim: 256
+  agent:
+    lr_actor: 1.0e-4
+    lr_critic: 5.0e-4
+    hidden_dim: 256
+  training:
+    num_episodes: 3000
+    max_steps_per_episode: 300
+    success_criteria:
+      cv_threshold: 0.3
+      connectivity_threshold: 0.9
+  parallel_training:
+    enabled: false
+    num_cpus: 8
+  scenario_generation:
+    enabled: true
+  visualization:
+    partition_plot:
+      figsize: [16, 10]
+      node_size_scale: 400
+      font_size: 8
+
 ieee118:
   data:
     case_name: ieee118

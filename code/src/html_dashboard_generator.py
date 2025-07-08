@@ -833,28 +833,304 @@ class HTMLDashboardGenerator:
     
     def _generate_comparison_html_file(self, output_path: Path, comparison_data: Dict[str, Dict[str, Any]], 
                                      charts: Dict[str, str]):
-        """生成对比分析HTML文件"""
-        # 这里可以实现对比分析的HTML生成
-        # 暂时使用简化版本
+        """生成完整的对比分析HTML文件"""
+        # 计算统计数据
+        stats = self._calculate_comparison_stats(comparison_data)
+        
+        # 生成完整的HTML模板
         comparison_html = f"""
-        <!DOCTYPE html>
-        <html lang="zh-CN">
-        <head>
-            <meta charset="UTF-8">
-            <title>训练方法对比分析</title>
-            <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
-        </head>
-        <body>
-            <h1>训练方法对比分析</h1>
-            <div id="comparison-charts">
-                {charts.get('method_comparison', '<p>暂无对比图表</p>')}
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>训练方法对比分析仪表板</title>
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <style>
+        body {{ 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+            margin: 0; 
+            padding: 20px; 
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+        }}
+        .container {{ 
+            max-width: 1400px; 
+            margin: 0 auto; 
+            background: white; 
+            padding: 30px; 
+            border-radius: 15px; 
+            box-shadow: 0 8px 32px rgba(0,0,0,0.1);
+        }}
+        .header {{ 
+            text-align: center; 
+            margin-bottom: 40px; 
+            padding-bottom: 20px;
+            border-bottom: 2px solid #f0f0f0;
+        }}
+        .header h1 {{ 
+            color: #2c3e50; 
+            margin-bottom: 10px; 
+            font-size: 2.5em;
+        }}
+        .header p {{ 
+            color: #7f8c8d; 
+            font-size: 1.1em;
+        }}
+        .stats-grid {{ 
+            display: grid; 
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); 
+            gap: 20px; 
+            margin-bottom: 40px; 
+        }}
+        .stat-card {{ 
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
+            color: white; 
+            padding: 25px; 
+            border-radius: 12px; 
+            text-align: center; 
+            box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3);
+        }}
+        .stat-value {{ 
+            font-size: 2.2em; 
+            font-weight: bold; 
+            margin-bottom: 8px; 
+        }}
+        .stat-label {{ 
+            font-size: 1em; 
+            opacity: 0.9; 
+        }}
+        .chart-section {{ 
+            margin: 40px 0; 
+            padding: 25px; 
+            background: #fafafa; 
+            border-radius: 12px; 
+            border-left: 4px solid #667eea;
+        }}
+        .chart-title {{ 
+            font-size: 1.4em; 
+            font-weight: bold; 
+            margin-bottom: 20px; 
+            color: #34495e; 
+        }}
+        .method-summary {{ 
+            display: grid; 
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); 
+            gap: 20px; 
+            margin: 30px 0; 
+        }}
+        .method-card {{ 
+            background: white; 
+            border: 1px solid #e0e0e0; 
+            border-radius: 8px; 
+            padding: 20px; 
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }}
+        .method-name {{ 
+            font-size: 1.2em; 
+            font-weight: bold; 
+            color: #2c3e50; 
+            margin-bottom: 15px;
+        }}
+        .method-metric {{ 
+            display: flex; 
+            justify-content: space-between; 
+            margin-bottom: 8px;
+        }}
+        .metric-name {{ 
+            color: #7f8c8d; 
+        }}
+        .metric-value {{ 
+            font-weight: bold; 
+            color: #2c3e50;
+        }}
+        .controls {{ 
+            text-align: center; 
+            margin: 30px 0; 
+            padding: 20px; 
+            background: #f8f9fa; 
+            border-radius: 8px;
+        }}
+        .btn {{ 
+            background: #667eea; 
+            color: white; 
+            border: none; 
+            padding: 10px 20px; 
+            margin: 0 10px; 
+            border-radius: 5px; 
+            cursor: pointer; 
+            font-size: 1em;
+            transition: background 0.3s;
+        }}
+        .btn:hover {{ 
+            background: #5a6fd8; 
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🔬 训练方法对比分析</h1>
+            <p>生成时间: {time.strftime('%Y-%m-%d %H:%M:%S')} | 方法数量: {len(comparison_data)}</p>
+        </div>
+
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-value">{stats.get('best_method', 'N/A')}</div>
+                <div class="stat-label">最佳方法</div>
             </div>
-        </body>
-        </html>
+            <div class="stat-card">
+                <div class="stat-value">{stats.get('max_success_rate', 0):.1f}%</div>
+                <div class="stat-label">最高成功率</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value">{stats.get('max_avg_reward', 0):.3f}</div>
+                <div class="stat-label">最高平均奖励</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value">{stats.get('total_episodes', 0):,}</div>
+                <div class="stat-label">总训练回合</div>
+            </div>
+        </div>
+
+        <div class="method-summary">
+            {self._generate_method_cards(comparison_data)}
+        </div>
+
+        <div class="chart-section">
+            <div class="chart-title">📊 详细对比图表</div>
+            <div id="comparison-charts">
+                {charts.get('method_comparison', '<p>正在加载对比图表...</p>')}
+            </div>
+        </div>
+
+        <div class="controls">
+            <button class="btn" onclick="exportComparisonData()">📥 导出数据</button>
+            <button class="btn" onclick="printReport()">🖨️ 打印报告</button>
+            <button class="btn" onclick="refreshCharts()">🔄 刷新图表</button>
+        </div>
+    </div>
+
+    <script>
+        // 导出数据功能
+        function exportComparisonData() {{
+            const data = {self._prepare_comparison_csv(comparison_data)};
+            const csvContent = "data:text/csv;charset=utf-8," + data;
+            const encodedUri = encodeURI(csvContent);
+            const link = document.createElement("a");
+            link.setAttribute("href", encodedUri);
+            link.setAttribute("download", "method_comparison.csv");
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        }}
+
+        function printReport() {{
+            window.print();
+        }}
+
+        function refreshCharts() {{
+            location.reload();
+        }}
+
+        // 响应式图表
+        window.addEventListener('resize', function() {{
+            setTimeout(function() {{
+                if (typeof Plotly !== 'undefined') {{
+                    Plotly.Plots.resize();
+                }}
+            }}, 100);
+        }});
+
+        document.addEventListener('DOMContentLoaded', function() {{
+            console.log('🔬 对比分析仪表板加载完成');
+        }});
+    </script>
+</body>
+</html>
         """
         
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write(comparison_html)
+
+    def _calculate_comparison_stats(self, comparison_data: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+        """计算对比统计数据"""
+        if not comparison_data:
+            return {}
+
+        stats = {
+            'best_method': '',
+            'max_success_rate': 0,
+            'max_avg_reward': float('-inf'),
+            'total_episodes': 0
+        }
+
+        best_score = 0
+        for method_name, method_data in comparison_data.items():
+            success_rate = method_data.get('success_rate', 0) * 100
+            avg_reward = method_data.get('avg_reward', 0)
+            episodes = len(method_data.get('episode_rewards', []))
+
+            # 计算综合评分（成功率权重更高）
+            composite_score = success_rate * 0.7 + max(0, avg_reward + 5) * 10 * 0.3
+
+            if composite_score > best_score:
+                best_score = composite_score
+                stats['best_method'] = method_name
+
+            stats['max_success_rate'] = max(stats['max_success_rate'], success_rate)
+            stats['max_avg_reward'] = max(stats['max_avg_reward'], avg_reward)
+            stats['total_episodes'] += episodes
+
+        return stats
+
+    def _generate_method_cards(self, comparison_data: Dict[str, Dict[str, Any]]) -> str:
+        """生成方法卡片HTML"""
+        cards_html = ""
+        
+        for method_name, method_data in comparison_data.items():
+            success_rate = method_data.get('success_rate', 0) * 100
+            avg_reward = method_data.get('avg_reward', 0)
+            episodes = len(method_data.get('episode_rewards', []))
+            best_reward = method_data.get('best_reward', 0)
+            
+            cards_html += f"""
+            <div class="method-card">
+                <div class="method-name">{method_name}</div>
+                <div class="method-metric">
+                    <span class="metric-name">成功率:</span>
+                    <span class="metric-value">{success_rate:.1f}%</span>
+                </div>
+                <div class="method-metric">
+                    <span class="metric-name">平均奖励:</span>
+                    <span class="metric-value">{avg_reward:.3f}</span>
+                </div>
+                <div class="method-metric">
+                    <span class="metric-name">最佳奖励:</span>
+                    <span class="metric-value">{best_reward:.3f}</span>
+                </div>
+                <div class="method-metric">
+                    <span class="metric-name">训练回合:</span>
+                    <span class="metric-value">{episodes:,}</span>
+                </div>
+            </div>
+            """
+        
+        return cards_html
+
+    def _prepare_comparison_csv(self, comparison_data: Dict[str, Dict[str, Any]]) -> str:
+        """准备对比数据CSV"""
+        csv_lines = ["Method,Success_Rate,Avg_Reward,Best_Reward,Episodes"]
+        
+        for method_name, method_data in comparison_data.items():
+            success_rate = method_data.get('success_rate', 0) * 100
+            avg_reward = method_data.get('avg_reward', 0)
+            best_reward = method_data.get('best_reward', 0)
+            episodes = len(method_data.get('episode_rewards', []))
+            
+            csv_lines.append(f"{method_name},{success_rate:.1f},{avg_reward:.3f},{best_reward:.3f},{episodes}")
+        
+        return "\\n".join(csv_lines)
     
     def _calculate_convergence_speed(self, rewards: List[float]) -> float:
         """计算收敛速度"""

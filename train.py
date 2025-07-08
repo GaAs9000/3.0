@@ -19,6 +19,7 @@ import sys
 import time
 import json
 import warnings
+import shutil
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Any
 from collections import deque
@@ -195,7 +196,7 @@ def convert_pandapower_to_matpower(net) -> Dict:
 
     mpc_wrap = to_mpc(net)
 
-    # pandapower >=2.0 返回 {'mpc': dict}；向后兼容旧版本
+    # 提取MPC数据
     if isinstance(mpc_wrap, dict) and "mpc" in mpc_wrap:
         mpc = mpc_wrap["mpc"]
     else:
@@ -874,6 +875,9 @@ class UnifiedTrainer:
             # 备用简单输出
             print(f"\n🎯 训练完成: {total_episodes}回合, 最佳奖励: {best_reward:.4f}, 成功率: {positive_rewards/total_episodes*100:.1f}%")
 
+        # 🔥 保存最终训练模型
+        self._save_final_model(final_stats, best_reward)
+
         return {
             'episode_rewards': self.logger.episode_rewards,
             'episode_lengths': self.logger.episode_lengths,
@@ -924,6 +928,79 @@ class UnifiedTrainer:
             print(f"💾 中间结果已保存: episode {episode}")
         except Exception as e:
             print(f"⚠️ 保存中间结果失败: {e}")
+
+    def _save_final_model(self, final_stats: dict, best_reward: float):
+        """保存最终训练模型到data目录，按时间戳命名"""
+        try:
+            # 创建data/models目录
+            models_dir = Path("data/models")
+            models_dir.mkdir(parents=True, exist_ok=True)
+
+            # 生成时间戳
+            timestamp = time.strftime('%Y%m%d_%H%M%S')
+
+            # 获取网络信息（从配置中）
+            network_name = self.config.get('environment', {}).get('network_name', 'unknown')
+            if network_name == 'unknown':
+                # 尝试从其他地方获取网络信息
+                network_name = getattr(self.env, 'network_name', 'unknown')
+
+            # 生成模型文件名
+            model_filename = f"agent_{network_name}_{timestamp}.pth"
+            model_path = models_dir / model_filename
+
+            # 保存模型（包含完整信息）
+            checkpoint = {
+                'actor_state_dict': self.agent.actor.state_dict(),
+                'critic_state_dict': self.agent.critic.state_dict(),
+                'actor_optimizer_state_dict': self.agent.actor_optimizer.state_dict(),
+                'critic_optimizer_state_dict': self.agent.critic_optimizer.state_dict(),
+                'training_stats': final_stats,
+                'best_reward': best_reward,
+                'timestamp': timestamp,
+                'network_name': network_name,
+                'config': self.config,
+                'model_info': {
+                    'node_embedding_dim': self.agent.node_embedding_dim,
+                    'region_embedding_dim': self.agent.region_embedding_dim,
+                    'num_partitions': self.agent.num_partitions,
+                    'device': str(self.agent.device)
+                }
+            }
+
+            torch.save(checkpoint, model_path)
+
+            # 打印保存信息
+            print(f"\n💾 最终模型已保存:")
+            print(f"   文件路径: {model_path}")
+            print(f"   网络类型: {network_name}")
+            print(f"   最佳奖励: {best_reward:.4f}")
+            print(f"   训练时间: {timestamp}")
+
+            # 如果奖励足够好，创建一个"best"链接
+            if best_reward > 0:  # 可以根据需要调整阈值
+                best_model_path = models_dir / f"agent_{network_name}_best.pth"
+                try:
+                    # 如果已存在best模型，先备份
+                    if best_model_path.exists():
+                        backup_path = models_dir / f"agent_{network_name}_best_backup_{timestamp}.pth"
+                        shutil.copy2(best_model_path, backup_path)
+                        print(f"   旧的best模型已备份: {backup_path.name}")
+
+                    # 复制当前模型为best模型
+                    shutil.copy2(model_path, best_model_path)
+                    print(f"   🏆 已更新最佳模型: {best_model_path.name}")
+
+                except Exception as e:
+                    print(f"   ⚠️ 创建best模型链接失败: {e}")
+
+            return str(model_path)
+
+        except Exception as e:
+            print(f"❌ 保存最终模型失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
 
     def evaluate(self, num_episodes: int = 10):
         """评估智能体 - 使用合理的成功标准"""
