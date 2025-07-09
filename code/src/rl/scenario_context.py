@@ -8,8 +8,9 @@
 """
 
 from dataclasses import dataclass
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, List
 import hashlib
+from collections import defaultdict
 
 
 @dataclass
@@ -96,6 +97,14 @@ class ScenarioClassifier:
         
         # 已知场景计数
         self.scenario_counts = {}
+        
+        # 场景类别映射
+        self.category_mappings = {
+            'F': '故障类',
+            'N': '正常类', 
+            'F_G': '故障发电波动类',
+            'N_G': '正常发电波动类'
+        }
     
     def classify(self, scenario_context: ScenarioContext) -> str:
         """
@@ -128,6 +137,62 @@ class ScenarioClassifier:
         
         return scenario_id
     
+    def extract_category(self, scenario_id: str) -> str:
+        """
+        从场景ID中提取类别标识符
+        
+        Args:
+            scenario_id: 完整的场景标识符（如"F_L1.0"或"N_L1.2_G"）
+            
+        Returns:
+            场景类别标识符（如"F"或"N_G"）
+        """
+        if not scenario_id:
+            return "UNKNOWN"
+            
+        parts = scenario_id.split('_')
+        
+        # 基础类别（故障状态）
+        base_category = parts[0] if parts else "UNKNOWN"
+        
+        # 检查是否有发电波动
+        has_gen_fluctuation = 'G' in parts
+        
+        if has_gen_fluctuation:
+            return f"{base_category}_G"
+        else:
+            return base_category
+    
+    def get_category_description(self, category: str) -> str:
+        """
+        获取类别的人类可读描述
+        
+        Args:
+            category: 类别标识符
+            
+        Returns:
+            类别描述
+        """
+        return self.category_mappings.get(category, f"未知类别({category})")
+    
+    def list_scenarios_in_category(self, category: str) -> List[str]:
+        """
+        列出指定类别下的所有已知场景
+        
+        Args:
+            category: 类别标识符
+            
+        Returns:
+            属于该类别的场景ID列表
+        """
+        scenarios_in_category = []
+        
+        for scenario_id in self.scenario_counts.keys():
+            if self.extract_category(scenario_id) == category:
+                scenarios_in_category.append(scenario_id)
+                
+        return scenarios_in_category
+
     def get_signature(self, scenario_context: ScenarioContext) -> Tuple:
         """
         获取可哈希的场景签名，用于字典键
@@ -165,6 +230,35 @@ class ScenarioClassifier:
     def get_scenario_statistics(self) -> Dict[str, int]:
         """获取场景统计信息"""
         return self.scenario_counts.copy()
+    
+    def get_category_statistics(self) -> Dict[str, Dict[str, Any]]:
+        """
+        获取按类别统计的信息
+        
+        Returns:
+            类别统计字典
+        """
+        category_stats = defaultdict(lambda: {'count': 0, 'scenarios': []})
+        
+        for scenario_id, count in self.scenario_counts.items():
+            category = self.extract_category(scenario_id)
+            category_stats[category]['count'] += count
+            category_stats[category]['scenarios'].append({
+                'scenario_id': scenario_id,
+                'count': count
+            })
+        
+        # 转换为普通字典并添加描述
+        result = {}
+        for category, stats in category_stats.items():
+            result[category] = {
+                'description': self.get_category_description(category),
+                'total_count': stats['count'],
+                'scenario_count': len(stats['scenarios']),
+                'scenarios': stats['scenarios']
+            }
+        
+        return result
     
     def reset_statistics(self):
         """重置场景统计"""

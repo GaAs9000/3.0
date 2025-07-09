@@ -34,7 +34,8 @@ class PowerGridPartitioningEnv:
                  max_steps: int = 200,
                  device: torch.device = None,
                  attention_weights: Dict[str, torch.Tensor] = None,
-                 config: Dict[str, Any] = None):
+                 config: Dict[str, Any] = None,
+                 is_normalized: bool = True):
         """
         初始化电力网络分割环境
 
@@ -78,9 +79,10 @@ class PowerGridPartitioningEnv:
             reward_config['adaptive_quality'] = config['adaptive_quality']
 
         self.reward_function = RewardFunction(
-            hetero_data,
-            config=reward_config,
-            device=device
+            self.hetero_data,
+            config=self.config,
+            device=self.device,
+            is_normalized=is_normalized
         )
 
         self.metis_initializer = MetisInitializer(hetero_data, device, config)
@@ -484,8 +486,7 @@ class PowerGridPartitioningEnv:
         current_scenario_context = getattr(self.reward_function, 'current_scenario_context', None)
         # 使用自适应质量导向奖励函数
         reward, plateau_result = self.reward_function.compute_incremental_reward(
-            self.state_manager.current_partition,
-            action,
+            self.state_manager.current_partition.long(),
             current_scenario_context
         )
 
@@ -530,13 +531,21 @@ class PowerGridPartitioningEnv:
         # 6. 【新增】检查平台期早停条件
         early_stop_triggered = False
         early_stop_confidence = 0.0
-        if plateau_result is not None:
-            # 检查是否满足早停条件
-            early_stop_threshold = self.reward_function.adaptive_quality_config['efficiency_reward']['early_stop_confidence']
-            if (plateau_result.plateau_detected and
-                plateau_result.confidence > early_stop_threshold):
-                early_stop_triggered = True
-                early_stop_confidence = plateau_result.confidence
+        if plateau_result is not None and isinstance(plateau_result, dict):
+            # 从返回的详细信息中提取平台期检测结果
+            actual_plateau_result = plateau_result.get('plateau_result')
+            if actual_plateau_result is not None:
+                # 检查是否满足早停条件
+                early_stop_threshold = self.reward_function.adaptive_quality_config.get(
+                    'efficiency_reward', {}
+                ).get('early_stop_confidence', 0.9)
+                
+                plateau_detected = actual_plateau_result.get('plateau_detected', False)
+                confidence = actual_plateau_result.get('confidence', 0.0)
+                
+                if plateau_detected and confidence > early_stop_threshold:
+                    early_stop_triggered = True
+                    early_stop_confidence = confidence
 
         # 7. 更新步数和检查终止条件
         self.current_step += 1
@@ -550,7 +559,7 @@ class PowerGridPartitioningEnv:
                 'early_termination': True,
                 'termination_reason': 'quality_plateau_reached',
                 'plateau_confidence': early_stop_confidence,
-                'plateau_details': plateau_result._asdict() if plateau_result else {}
+                'plateau_details': actual_plateau_result if actual_plateau_result else {}
             }
         
         # 9. 【核心改进】区分结束类型，应用终局奖励
@@ -563,7 +572,7 @@ class PowerGridPartitioningEnv:
 
             # 使用奖励函数计算终局奖励
             final_reward, final_components = self.reward_function.compute_final_reward(
-                self.state_manager.current_partition,
+                self.state_manager.current_partition.long(),
                 termination_type
             )
             reward += final_reward

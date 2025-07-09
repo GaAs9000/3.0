@@ -1,0 +1,106 @@
+{
+  "experiment_summary": {
+    "total_episodes_per_method": 1000,
+    "scenarios_tested": [
+      "normal",
+      "high_load",
+      "light_fault",
+      "generation_fluctuation",
+      "severe_fault"
+    ],
+    "timestamp": "2025-07-02T21:29:02.806618"
+  },
+  "key_findings": [
+    "generation_fluctuation场景: 相对奖励比绝对奖励性能提升1.3%",
+    "困难场景整体: 相对奖励提升0.4%"
+  ],
+  "scenario_analysis": {
+    "absolute": {
+      "normal": {
+        "count": 407,
+        "avg_final_quality": 0.8970084928548766,
+        "avg_quality_improvement": 0.14057167698046402,
+        "avg_relative_improvement": 0.1909190404013217,
+        "avg_total_reward": -0.3086065799980712,
+        "std_final_quality": 0.0653810870418365
+      },
+      "high_load": {
+        "count": 155,
+        "avg_final_quality": 0.5735441249883785,
+        "avg_quality_improvement": 0.07871668390717464,
+        "avg_relative_improvement": 0.16993054668492782,
+        "avg_total_reward": -0.20876556610415176,
+        "std_final_quality": 0.033069050508675694
+      },
+      "light_fault": {
+        "count": 252,
+        "avg_final_quality": 0.6998137166142586,
+        "avg_quality_improvement": 0.10392128574797908,
+        "avg_relative_improvement": 0.18209081323443083,
+        "avg_total_reward": -0.2462721847871424,
+        "std_final_quality": 0.0480359754656332
+      },
+      "generation_fluctuation": {
+        "count": 50,
+        "avg_final_quality": 0.5128078368964504,
+        "avg_quality_improvement": 0.06462156070832094,
+        "avg_relative_improvement": 0.16236737114778824,
+        "avg_total_reward": -0.19400437496346812,
+        "std_final_quality": 0.03904077182438162
+      },
+      "severe_fault": {
+        "count": 136,
+        "avg_final_quality": 0.4114094703041469,
+        "avg_quality_improvement": 0.06138904299710002,
+        "avg_relative_improvement": 0.20308867531805705,
+        "avg_total_reward": -0.14346822514793559,
+        "std_final_quality": 0.030439518588960542
+      }
+    },
+    "relative": {
+      "light_fault": {
+        "count": 261,
+        "avg_final_quality": 0.6990711598124537,
+        "avg_quality_improvement": 0.09289256564990248,
+        "avg_relative_improvement": 0.16091616724770902,
+        "avg_total_reward": 0.40815964117143994,
+        "std_final_quality": 0.050882754959861
+      },
+      "normal": {
+        "count": 396,
+        "avg_final_quality": 0.8977832614107923,
+        "avg_quality_improvement": 0.15109179081366728,
+        "avg_relative_improvement": 0.20763017893807942,
+        "avg_total_reward": 0.48493250976732505,
+        "std_final_quality": 0.06615570932808502
+      },
+      "severe_fault": {
+        "count": 151,
+        "avg_final_quality": 0.4115045745177395,
+        "avg_quality_improvement": 0.06882199191115788,
+        "avg_relative_improvement": 0.22982674313439413,
+        "avg_total_reward": 0.5549798688495757,
+        "std_final_quality": 0.0334415119493206
+      },
+      "high_load": {
+        "count": 140,
+        "avg_final_quality": 0.5722843634102452,
+        "avg_quality_improvement": 0.07084085630892195,
+        "avg_relative_improvement": 0.15165517696324662,
+        "avg_total_reward": 0.3743189008037896,
+        "std_final_quality": 0.03662379477579964
+      },
+      "generation_fluctuation": {
+        "count": 52,
+        "avg_final_quality": 0.5197243000730633,
+        "avg_quality_improvement": 0.07497285351335184,
+        "avg_relative_improvement": 0.18384253185230456,
+        "avg_total_reward": 0.41914797314148333,
+        "std_final_quality": 0.03767057928104245
+      }
+    }
+  },
+  "recommendations": [
+    "建议采用简单相对奖励系统"
+  ]
+}

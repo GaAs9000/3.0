@@ -1,0 +1,12 @@
+{
+  "total_episodes": 301,
+  "best_reward": 0.7771512342435939,
+  "mean_reward": 0.4519778013213952,
+  "std_reward": 0.4514676849443744,
+  "mean_length": 14.122923588039868,
+  "training_time": 630.2224004268646,
+  "success_rate": 1.0,
+  "mean_load_cv": 1.0,
+  "mean_actor_loss": 0.3278780182202657,
+  "mean_critic_loss": 0.08022613166831434
+}

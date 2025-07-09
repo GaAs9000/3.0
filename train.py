@@ -19,12 +19,14 @@ import sys
 import time
 import json
 import warnings
+import shutil
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Any
 from collections import deque
 from tqdm import tqdm
 import queue
 import threading
+from rich.panel import Panel
 
 # 添加code/src到路径
 sys.path.append(str(Path(__file__).parent / 'code' / 'src'))
@@ -32,6 +34,21 @@ sys.path.append(str(Path(__file__).parent / 'code' / 'src'))
 sys.path.append(str(Path(__file__).parent / 'code'))
 # 添加code/utils到路径以便导入路径辅助工具
 sys.path.append(str(Path(__file__).parent / 'code' / 'utils'))
+
+# --- 核心模块导入 ---
+try:
+    import gymnasium as gym
+    from stable_baselines3 import PPO
+    from torch_geometric.data import HeteroData
+    from data_processing import PowerGridDataProcessor
+    from gat import create_production_encoder
+    from rl.environment import PowerGridPartitioningEnv
+    from rl.agent import PPOAgent
+    from rl.adaptive import AdaptiveDirector
+    CRITICAL_DEPS_AVAILABLE = True
+except ImportError as e:
+    CRITICAL_DEPS_AVAILABLE = False
+    MISSING_DEP_ERROR = e
 
 # --- 全局 NaN/Inf 异常检测开关 ---
 torch.autograd.set_detect_anomaly(False)
@@ -100,7 +117,9 @@ def check_dependencies():
 
 def load_power_grid_data(case_name: str) -> Dict:
     """
-    加载电力网络数据
+    加载电力网络数据。
+    该函数现在只从pandapower加载数据，以确保数据源的一致性和高质量。
+    如果加载失败，将直接抛出异常。
 
     Args:
         case_name: 案例名称 (ieee14, ieee30, ieee57, ieee118)
@@ -108,65 +127,17 @@ def load_power_grid_data(case_name: str) -> Dict:
     Returns:
         MATPOWER格式的电网数据字典
     """
-    # 首先尝试从PandaPower加载
-    if _pandapower_available:
-        try:
-            return load_from_pandapower(case_name)
-        except Exception as e:
-            print(f"PandaPower加载失败: {e}")
-            print("🔄 回退到内置数据...")
+    if not _pandapower_available:
+        raise ImportError("Pandapower库未安装或不可用，无法加载电网数据。")
 
-    # 回退到内置的IEEE标准测试系统数据
-    ieee_cases = {
-        'ieee14': {
-            'baseMVA': 100.0,
-            'bus': np.array([
-                [1, 3, 0, 0, 0, 0, 1, 1.06, 0, 345, 1, 1.06, 0.94],
-                [2, 2, 21.7, 12.7, 0, 0, 1, 1.045, -4.98, 345, 1, 1.06, 0.94],
-                [3, 2, 94.2, 19, 0, 0, 1, 1.01, -12.72, 345, 1, 1.06, 0.94],
-                [4, 1, 47.8, -3.9, 0, 0, 1, 1.019, -10.33, 345, 1, 1.06, 0.94],
-                [5, 1, 7.6, 1.6, 0, 0, 1, 1.02, -8.78, 345, 1, 1.06, 0.94],
-                [6, 2, 11.2, 7.5, 0, 12.2, 1, 1.07, -14.22, 345, 1, 1.06, 0.94],
-                [7, 1, 0, 0, 0, 0, 1, 1.062, -13.37, 345, 1, 1.06, 0.94],
-                [8, 2, 0, 0, 0, 17.4, 1, 1.09, -13.36, 345, 1, 1.06, 0.94],
-                [9, 1, 29.5, 16.6, 0, 0, 1, 1.056, -14.94, 345, 1, 1.06, 0.94],
-                [10, 1, 9, 5.8, 0, 0, 1, 1.051, -15.1, 345, 1, 1.06, 0.94],
-                [11, 1, 3.5, 1.8, 0, 0, 1, 1.057, -14.79, 345, 1, 1.06, 0.94],
-                [12, 1, 6.1, 1.6, 0, 0, 1, 1.055, -15.07, 345, 1, 1.06, 0.94],
-                [13, 1, 13.5, 5.8, 0, 0, 1, 1.05, -15.16, 345, 1, 1.06, 0.94],
-                [14, 1, 14.9, 5, 0, 0, 1, 1.036, -16.04, 345, 1, 1.06, 0.94]
-            ]),
-            'branch': np.array([
-                [1, 2, 0.01938, 0.05917, 0.0528, 0, 0, 0, 0, 0, 1, -360, 360],
-                [1, 5, 0.05403, 0.22304, 0.0492, 0, 0, 0, 0, 0, 1, -360, 360],
-                [2, 3, 0.04699, 0.19797, 0.0438, 0, 0, 0, 0, 0, 1, -360, 360],
-                [2, 4, 0.05811, 0.17632, 0.034, 0, 0, 0, 0, 0, 1, -360, 360],
-                [2, 5, 0.05695, 0.17388, 0.0346, 0, 0, 0, 0, 0, 1, -360, 360],
-                [3, 4, 0.06701, 0.17103, 0.0128, 0, 0, 0, 0, 0, 1, -360, 360],
-                [4, 5, 0.01335, 0.04211, 0, 0, 0, 0, 0, 0, 1, -360, 360],
-                [4, 7, 0, 0.20912, 0, 0.978, 0, 0, 0, 0, 1, -360, 360],
-                [4, 9, 0, 0.55618, 0, 0.969, 0, 0, 0, 0, 1, -360, 360],
-                [5, 6, 0, 0.25202, 0, 0.932, 0, 0, 0, 0, 1, -360, 360],
-                [6, 11, 0.09498, 0.1989, 0, 0, 0, 0, 0, 0, 1, -360, 360],
-                [6, 12, 0.12291, 0.25581, 0, 0, 0, 0, 0, 0, 1, -360, 360],
-                [6, 13, 0.06615, 0.13027, 0, 0, 0, 0, 0, 0, 1, -360, 360],
-                [7, 8, 0, 0.17615, 0, 0, 0, 0, 0, 0, 1, -360, 360],
-                [7, 9, 0, 0.11001, 0, 0, 0, 0, 0, 0, 1, -360, 360],
-                [9, 10, 0.03181, 0.0845, 0, 0, 0, 0, 0, 0, 1, -360, 360],
-                [9, 14, 0.12711, 0.27038, 0, 0, 0, 0, 0, 0, 1, -360, 360],
-                [10, 11, 0.08205, 0.19207, 0, 0, 0, 0, 0, 0, 1, -360, 360],
-                [12, 13, 0.22092, 0.19988, 0, 0, 0, 0, 0, 0, 1, -360, 360],
-                [13, 14, 0.17093, 0.34802, 0, 0, 0, 0, 0, 0, 1, -360, 360]
-            ])
-        }
-    }
-
-    if case_name in ieee_cases:
-        return ieee_cases[case_name]
-    else:
-        # 对于其他案例，返回默认的IEEE14数据
-        print(f"⚠️ 案例 {case_name} 未找到，使用IEEE14默认数据")
-        return ieee_cases['ieee14']
+    try:
+        # 这是唯一应该被执行的数据加载路径
+        return load_from_pandapower(case_name)
+    except Exception as e:
+        print(f"❌ 从PandaPower加载案例 '{case_name}' 时发生致命错误。")
+        print("这可能是由于拼写错误、案例不存在或PandaPower库本身的问题。")
+        # 重新抛出异常，以便程序停止
+        raise e
 
 
 def load_from_pandapower(case_name: str) -> Dict:
@@ -205,7 +176,7 @@ def load_from_pandapower(case_name: str) -> Dict:
 
 def convert_pandapower_to_matpower(net) -> Dict:
     """
-    将PandaPower网络转换为MATPOWER格式
+    将PandaPower网络转换为MATPOWER格式（使用官方converter）
 
     Args:
         net: PandaPower网络对象
@@ -213,107 +184,27 @@ def convert_pandapower_to_matpower(net) -> Dict:
     Returns:
         MATPOWER格式的电网数据字典
     """
-    # 基础MVA
-    baseMVA = net.sn_mva
+    # 使用官方 converter 进行可靠转换，避免手写转换中的精度和维护问题
+    import pandapower as pp
+    from pandapower.converter import to_mpc
 
-    # 节点数据转换
-    bus_data = []
-    for idx, bus in net.bus.iterrows():
-        # MATPOWER bus格式: [bus_i, type, Pd, Qd, Gs, Bs, area, Vm, Va, baseKV, zone, Vmax, Vmin]
-        bus_type = 1  # PQ节点
+    # 确保网络已有潮流结果；如果没有，则先运行一次平坦启动潮流
+    try:
+        if getattr(net, "res_bus", None) is None or net.res_bus.empty:
+            pp.runpp(net, init="flat", calculate_voltage_angles=False, numba=False)
+    except Exception:
+        # 如果潮流失败，仍继续转换（to_mpc 允许无结果转换，但会给出警告）
+        pass
 
-        # 检查是否为发电机节点
-        if idx in net.gen.bus.values:
-            gen_at_bus = net.gen[net.gen.bus == idx]
-            if not gen_at_bus.empty:
-                # 检查是否为slack节点
-                if any(gen_at_bus.slack):
-                    bus_type = 3  # slack节点
-                else:
-                    bus_type = 2  # PV节点
+    mpc_wrap = to_mpc(net)
 
-        # 获取负荷数据
-        pd = qd = 0
-        if idx in net.load.bus.values:
-            load_at_bus = net.load[net.load.bus == idx]
-            pd = load_at_bus.p_mw.sum()
-            qd = load_at_bus.q_mvar.sum()
+    # 提取MPC数据
+    if isinstance(mpc_wrap, dict) and "mpc" in mpc_wrap:
+        mpc = mpc_wrap["mpc"]
+    else:
+        mpc = mpc_wrap
 
-        # 获取电压等级
-        vn_kv = bus.vn_kv if hasattr(bus, 'vn_kv') else 345.0  # 默认345kV
-
-        bus_row = [
-            idx + 1,  # bus number (1-indexed)
-            bus_type,  # bus type
-            pd,  # Pd (MW)
-            qd,  # Qd (MVAr)
-            0,  # Gs (MW)
-            0,  # Bs (MVAr)
-            1,  # area
-            1.0,  # Vm (p.u.)
-            0,  # Va (degrees)
-            vn_kv,  # baseKV
-            1,  # zone
-            1.1,  # Vmax
-            0.9   # Vmin
-        ]
-        bus_data.append(bus_row)
-
-    # 线路数据转换
-    branch_data = []
-    for idx, line in net.line.iterrows():
-        # 获取线路电压等级（从连接的节点获取）
-        from_bus_vn = net.bus.loc[line.from_bus, 'vn_kv'] if line.from_bus in net.bus.index else 345.0
-
-        # MATPOWER branch格式: [fbus, tbus, r, x, b, rateA, rateB, rateC, ratio, angle, status, angmin, angmax]
-        # 简化的阻抗计算
-        r_pu = line.r_ohm_per_km * line.length_km / (from_bus_vn**2 / baseMVA) if hasattr(line, 'r_ohm_per_km') else 0.01
-        x_pu = line.x_ohm_per_km * line.length_km / (from_bus_vn**2 / baseMVA) if hasattr(line, 'x_ohm_per_km') else 0.05
-        b_pu = 0.0  # 简化处理
-        rate_a = line.max_i_ka * from_bus_vn * np.sqrt(3) / 1000 if hasattr(line, 'max_i_ka') else 100.0
-
-        branch_row = [
-            line.from_bus + 1,  # from bus (1-indexed)
-            line.to_bus + 1,    # to bus (1-indexed)
-            r_pu,  # r (p.u.)
-            x_pu,  # x (p.u.)
-            b_pu,  # b (p.u.)
-            rate_a,  # rateA (MVA)
-            0,  # rateB
-            0,  # rateC
-            0,  # ratio
-            0,  # angle
-            1,  # status
-            -360,  # angmin
-            360    # angmax
-        ]
-        branch_data.append(branch_row)
-
-    # 变压器数据（如果有）
-    for idx, trafo in net.trafo.iterrows():
-        # 简化的变压器模型
-        branch_row = [
-            trafo.hv_bus + 1,  # from bus (1-indexed)
-            trafo.lv_bus + 1,  # to bus (1-indexed)
-            trafo.vk_percent / 100 * (trafo.vn_hv_kv**2 / baseMVA),  # r (p.u.)
-            trafo.vkr_percent / 100 * (trafo.vn_hv_kv**2 / baseMVA),  # x (p.u.)
-            0,  # b (p.u.)
-            trafo.sn_mva,  # rateA (MVA)
-            0,  # rateB
-            0,  # rateC
-            trafo.vn_hv_kv / trafo.vn_lv_kv,  # ratio
-            0,  # angle
-            1,  # status
-            -360,  # angmin
-            360    # angmax
-        ]
-        branch_data.append(branch_row)
-
-    return {
-        'baseMVA': baseMVA,
-        'bus': np.array(bus_data),
-        'branch': np.array(branch_data)
-    }
+    return mpc
 
 
 class TrainingLogger:
@@ -986,6 +877,9 @@ class UnifiedTrainer:
             # 备用简单输出
             print(f"\n🎯 训练完成: {total_episodes}回合, 最佳奖励: {best_reward:.4f}, 成功率: {positive_rewards/total_episodes*100:.1f}%")
 
+        # 🔥 保存最终训练模型
+        self._save_final_model(final_stats, best_reward)
+
         return {
             'episode_rewards': self.logger.episode_rewards,
             'episode_lengths': self.logger.episode_lengths,
@@ -1036,6 +930,79 @@ class UnifiedTrainer:
             print(f"💾 中间结果已保存: episode {episode}")
         except Exception as e:
             print(f"⚠️ 保存中间结果失败: {e}")
+
+    def _save_final_model(self, final_stats: dict, best_reward: float):
+        """保存最终训练模型到data目录，按时间戳命名"""
+        try:
+            # 创建data/models目录
+            models_dir = Path("data/models")
+            models_dir.mkdir(parents=True, exist_ok=True)
+
+            # 生成时间戳
+            timestamp = time.strftime('%Y%m%d_%H%M%S')
+
+            # 获取网络信息（从配置中）
+            network_name = self.config.get('environment', {}).get('network_name', 'unknown')
+            if network_name == 'unknown':
+                # 尝试从其他地方获取网络信息
+                network_name = getattr(self.env, 'network_name', 'unknown')
+
+            # 生成模型文件名
+            model_filename = f"agent_{network_name}_{timestamp}.pth"
+            model_path = models_dir / model_filename
+
+            # 保存模型（包含完整信息）
+            checkpoint = {
+                'actor_state_dict': self.agent.actor.state_dict(),
+                'critic_state_dict': self.agent.critic.state_dict(),
+                'actor_optimizer_state_dict': self.agent.actor_optimizer.state_dict(),
+                'critic_optimizer_state_dict': self.agent.critic_optimizer.state_dict(),
+                'training_stats': final_stats,
+                'best_reward': best_reward,
+                'timestamp': timestamp,
+                'network_name': network_name,
+                'config': self.config,
+                'model_info': {
+                    'node_embedding_dim': self.agent.node_embedding_dim,
+                    'region_embedding_dim': self.agent.region_embedding_dim,
+                    'num_partitions': self.agent.num_partitions,
+                    'device': str(self.agent.device)
+                }
+            }
+
+            torch.save(checkpoint, model_path)
+
+            # 打印保存信息
+            print(f"\n💾 最终模型已保存:")
+            print(f"   文件路径: {model_path}")
+            print(f"   网络类型: {network_name}")
+            print(f"   最佳奖励: {best_reward:.4f}")
+            print(f"   训练时间: {timestamp}")
+
+            # 如果奖励足够好，创建一个"best"链接
+            if best_reward > 0:  # 可以根据需要调整阈值
+                best_model_path = models_dir / f"agent_{network_name}_best.pth"
+                try:
+                    # 如果已存在best模型，先备份
+                    if best_model_path.exists():
+                        backup_path = models_dir / f"agent_{network_name}_best_backup_{timestamp}.pth"
+                        shutil.copy2(best_model_path, backup_path)
+                        print(f"   旧的best模型已备份: {backup_path.name}")
+
+                    # 复制当前模型为best模型
+                    shutil.copy2(model_path, best_model_path)
+                    print(f"   🏆 已更新最佳模型: {best_model_path.name}")
+
+                except Exception as e:
+                    print(f"   ⚠️ 创建best模型链接失败: {e}")
+
+            return str(model_path)
+
+        except Exception as e:
+            print(f"❌ 保存最终模型失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
 
     def evaluate(self, num_episodes: int = 10):
         """评估智能体 - 使用合理的成功标准"""
@@ -1141,37 +1108,17 @@ class UnifiedTrainer:
             self.logger.close()
 
 
-class UnifiedTrainingSystem:
-    """统一训练系统 - 专注于训练功能"""
+def create_environment_from_config(config: Dict, hetero_data: HeteroData, node_embeddings: Dict, attention_weights: Dict, mpc_data: Dict, device: torch.device, is_normalized: bool = True) -> Tuple[PowerGridPartitioningEnv, Optional[gym.Env]]:
+    """根据配置创建环境实例，如果需要则使用Gym包装器。"""
+    should_use_gym_wrapper = config.get('scenario_generation', {}).get('enabled', True) or \
+                             config.get('parallel_training', {}).get('enabled', False)
 
-    def __init__(self, config_path: Optional[str] = None, **kwargs):
-        """
-        初始化统一训练系统
-
-        Args:
-            config_path: 自定义配置文件路径
-            **kwargs: 用于覆盖配置的键值对
-        """
-        # 1. 加载和合并配置
-        self.config = self._load_config(config_path, kwargs)
-
-        # 2. 设置设备
-        self.device = self._setup_device()
-
-        self.setup_directories()
-
-    def _load_config(self, config_path: Optional[str], overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """
-        加载配置，优先级如下: 命令行覆盖 > 文件配置 > 默认配置
-        """
-        # 1. 获取默认配置
-        final_config = self._create_default_config()
-
-        # 2. 确定要加载的配置文件路径
-        # 如果命令行没有指定 --config, 则使用项目根目录的 config.yaml
-        if config_path is None:
-            config_path = 'config.yaml'
+    if should_use_gym_wrapper:
+        from code.src.rl.gym_wrapper import PowerGridPartitionGymEnv
+        config_copy = config.copy()
+        config_copy['system']['device'] = str(device)
         
+<<<<<<< HEAD
         # 3. 如果配置文件存在，则加载并合并
         if os.path.exists(config_path):
             try:
@@ -2225,7 +2172,129 @@ def main():
         return 1
 
     return 0
+=======
+        gym_env = PowerGridPartitionGymEnv(
+            base_case_data=mpc_data,
+            config=config_copy,
+            use_scenario_generator=config.get('scenario_generation', {}).get('enabled', True),
+            scenario_seed=config['system']['seed']
+        )
+        _, _ = gym_env.reset()
+        env = gym_env.internal_env
+        return env, gym_env
+    
+    # 创建标准环境
+    env_config = config['environment']
+    env = PowerGridPartitioningEnv(
+        hetero_data,
+        node_embeddings=node_embeddings,
+        num_partitions=env_config['num_partitions'],
+        reward_weights=env_config.get('reward_weights', {}),
+        max_steps=env_config['max_steps'],
+        device=device,
+        attention_weights=attention_weights,
+        config=config,
+        is_normalized=is_normalized
+    )
+    return env, None
+>>>>>>> ed8d1e95fca30709741474b3a87607a3f613d99c
 
 
 if __name__ == "__main__":
-    exit(main())
+    import argparse, yaml, copy, pprint, sys
+    
+    parser = argparse.ArgumentParser(description="RL Trainer for Power Grid Partitioning")
+    parser.add_argument("--mode", default="fast", help="配置预设名称 (fast / full / ieee118 等)")
+    parser.add_argument("--run", action="store_true", help="执行完整训练流程。若省略则仅打印合并后的配置")
+    args = parser.parse_args()
+
+    # 1. 读取配置文件
+    cfg_file = Path("config.yaml")
+    if not cfg_file.exists():
+        safe_print("❌ 找不到 config.yaml ，请检查项目目录")
+        sys.exit(1)
+    with open(cfg_file, "r", encoding="utf-8") as f:
+        base_cfg = yaml.safe_load(f)
+
+    # 2. 递归合并预设
+    def deep_update(dest: Dict[str, Any], src: Dict[str, Any]):
+        for k, v in src.items():
+            if isinstance(v, dict) and k in dest:
+                deep_update(dest[k], v)
+            else:
+                dest[k] = copy.deepcopy(v)
+
+    if args.mode in base_cfg:
+        deep_update(base_cfg, base_cfg[args.mode])
+    else:
+        safe_print(f"⚠️ 未找到名为 '{args.mode}' 的预设，使用基础配置")
+
+    if not args.run:
+        safe_print("🚀 配置已加载（未启动训练，添加 --run 可开始训练）\n─" * 40)
+        pprint.pp(base_cfg)
+        sys.exit(0)
+
+    # 3. === 正式训练管道 ===
+    safe_print("🚀 开始训练流程 ...")
+
+    # 3.1 设备
+    device_str = base_cfg['system'].get('device', 'auto')
+    if device_str == 'auto':
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    else:
+        device = torch.device(device_str)
+
+    # 3.2 数据加载
+    mpc_data = load_power_grid_data(base_cfg['data']['case_name'])
+
+    # 3.3 图处理
+    from code.src.data_processing import PowerGridDataProcessor
+    processor = PowerGridDataProcessor(
+        normalize=base_cfg['data'].get('normalize', True),
+        cache_dir=base_cfg['data'].get('cache_dir', 'data/cache')
+    )
+    hetero_data = processor.graph_from_mpc(mpc_data, config=base_cfg)
+
+    # 3.4 编码器 (GAT)
+    encoder_cfg = base_cfg.get('gat', {})
+    encoder = create_production_encoder(hetero_data, encoder_cfg).to(device)
+    hetero_data = hetero_data.to(device)
+
+    # 预计算节点嵌入 & 注意力权重
+    with torch.no_grad():
+        node_embeddings_dict, attention_weights = encoder.encode_nodes_with_attention(hetero_data, base_cfg)
+
+    # 将 node_embeddings_dict 转为同一维度张量字典（环境内部按 node_type 键访问）
+
+    # 3.5 创建环境
+    env, gym_env = create_environment_from_config(
+        base_cfg, hetero_data, node_embeddings_dict, attention_weights, mpc_data, device,
+        is_normalized=base_cfg['data'].get('normalize', True)
+    )
+
+    # 3.6 创建智能体（需先获取实际state维度）
+    # 先reset一次环境以拿到示例state
+    init_state, _ = env.reset()
+    node_emb_dim = init_state['node_embeddings'].shape[1]
+    region_emb_dim = init_state['region_embeddings'].shape[1]
+
+    agent = PPOAgent(
+        node_embedding_dim=node_emb_dim,
+        region_embedding_dim=region_emb_dim,
+        num_partitions=base_cfg['environment']['num_partitions'],
+        agent_config=base_cfg.get('agent', {}),
+        device=device
+    )
+
+     # 3.7 训练器
+    trainer = UnifiedTrainer(agent, env, base_cfg, gym_env=gym_env)
+
+    train_cfg = base_cfg['training']
+    trainer.train(
+        num_episodes=train_cfg['num_episodes'],
+        max_steps_per_episode=train_cfg['max_steps_per_episode'],
+        update_interval=train_cfg.get('update_interval', 10)
+    )
+
+    safe_print("🎉 训练流程结束。")
+    
