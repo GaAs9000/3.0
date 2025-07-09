@@ -9,7 +9,7 @@ system:
 data:
   case_name: ieee57
   normalize: true
-  cache_dir: data/cache
+  cache_dir: data/latest/cache
 
 # 训练配置
 training:
@@ -147,8 +147,8 @@ parallel_training:
 logging:
   use_tensorboard: true
   generate_html_dashboard: true
-  log_dir: data/logs
-  checkpoint_dir: data/checkpoints
+  log_dir: data/latest/logs
+  checkpoint_dir: data/latest/checkpoints
   console_log_interval: 10
   metrics_save_interval: 50
   plot_save_interval: 100
@@ -170,7 +170,7 @@ logging:
 visualization:
   enabled: true
   save_figures: true
-  figures_dir: data/figures
+  figures_dir: data/latest/figures
   interactive: true
   figure_settings:
     dpi: 300
@@ -190,7 +190,7 @@ visualization:
 
 # HTML仪表板配置
 html_dashboard:
-  output_dir: output/dashboards
+  output_dir: evaluation/latest/dashboards
   max_data_points: 2000
   enable_compression: true
   chart_factory:

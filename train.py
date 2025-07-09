@@ -30,6 +30,8 @@ import threading
 sys.path.append(str(Path(__file__).parent / 'code' / 'src'))
 # 添加code到路径以便导入baseline
 sys.path.append(str(Path(__file__).parent / 'code'))
+# 添加code/utils到路径以便导入路径辅助工具
+sys.path.append(str(Path(__file__).parent / 'code' / 'utils'))
 
 # --- 全局 NaN/Inf 异常检测开关 ---
 torch.autograd.set_detect_anomaly(False)
@@ -1222,7 +1224,7 @@ class UnifiedTrainingSystem:
             'data': {
                 'case_name': 'ieee14',
                 'normalize': True,
-                'cache_dir': 'data/cache'
+                'cache_dir': 'data/latest/cache'
             },
             'training': {
                 'mode': 'standard',  # standard, parallel, curriculum, large_scale
@@ -1285,13 +1287,13 @@ class UnifiedTrainingSystem:
             'visualization': {
                 'enabled': True,
                 'save_figures': True,
-                'figures_dir': 'data/figures',
+                'figures_dir': 'data/latest/figures',
                 'interactive': True
             },
             'logging': {
                 'use_tensorboard': True,
-                'log_dir': 'data/logs',
-                'checkpoint_dir': 'data/checkpoints',
+                'log_dir': 'data/latest/logs',
+                'checkpoint_dir': 'data/latest/checkpoints',
                 'console_log_interval': 10,
                 'metrics_save_interval': 50
             },
@@ -1323,16 +1325,48 @@ class UnifiedTrainingSystem:
 
     def setup_directories(self):
         """创建必要的目录"""
+        from path_helper import resolve_latest_path, ensure_directory_exists, create_timestamp_directory
+
+        # 解析latest路径为实际路径
+        resolved_paths = {}
+        path_configs = [
+            ('data', 'cache_dir'),
+            ('logging', 'log_dir'),
+            ('logging', 'checkpoint_dir'),
+            ('visualization', 'figures_dir')
+        ]
+
+        for section, key in path_configs:
+            original_path = self.config[section][key]
+            resolved_path = resolve_latest_path(original_path)
+            resolved_paths[f"{section}.{key}"] = resolved_path
+            self.config[section][key] = resolved_path
+
+        # 如果没有找到现有的时间戳目录，创建新的
+        if 'latest' in self.config['data']['cache_dir']:
+            # 创建新的时间戳目录
+            timestamp_dir = create_timestamp_directory(
+                'data',
+                ['cache', 'logs', 'checkpoints', 'figures', 'models']
+            )
+            timestamp_name = Path(timestamp_dir).name
+
+            # 更新所有配置路径
+            self.config['data']['cache_dir'] = f"data/{timestamp_name}/cache"
+            self.config['logging']['log_dir'] = f"data/{timestamp_name}/logs"
+            self.config['logging']['checkpoint_dir'] = f"data/{timestamp_name}/checkpoints"
+            self.config['visualization']['figures_dir'] = f"data/{timestamp_name}/figures"
+
+        # 创建所有必要的目录
         dirs = [
             self.config['data']['cache_dir'],
             self.config['logging']['log_dir'],
             self.config['logging']['checkpoint_dir'],
-            self.config['visualization']['figures_dir'],
-            'data/models', 'data/output', 'data/experiments'
+            self.config['visualization']['figures_dir']
         ]
 
         for dir_path in dirs:
-            Path(dir_path).mkdir(parents=True, exist_ok=True)
+            ensure_directory_exists(dir_path)
 
     def get_training_configs(self) -> Dict[str, Dict[str, Any]]:
         """获取不同训练模式的配置"""
@@ -2100,10 +2134,15 @@ class UnifiedTrainingSystem:
         except Exception as e:
             print(f"⚠️ 保存智能自适应中间结果失败: {e}")
 
-    def save_results(self, results: Dict[str, Any], output_dir: str = 'data/experiments'):
+    def save_results(self, results: Dict[str, Any], output_dir: str = 'data/latest'):
         """保存训练结果"""
+        from path_helper import resolve_latest_path
+
+        # 解析latest路径
+        resolved_output_dir = resolve_latest_path(output_dir)
+
         timestamp = time.strftime('%Y%m%d_%H%M%S')
-        exp_dir = Path(output_dir) / f"training_{timestamp}"
+        exp_dir = Path(resolved_output_dir) / f"training_{timestamp}"
         exp_dir.mkdir(parents=True, exist_ok=True)
 
         # 保存结果
@@ -2161,7 +2200,7 @@ def main():
 
         # 保存结果
         if results.get('success', False):
-            system.save_results(results, 'experiments')
+            system.save_results(results)
 
         # 输出结果摘要
         if results.get('success', False):
