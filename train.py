@@ -165,7 +165,7 @@ def load_from_pandapower(case_name: str) -> Dict:
 
     # 加载PandaPower网络
     net = case_mapping[case_name]()
-    from code.src.rich_output import rich_success
+    from rich_output import rich_success
     rich_success(f"成功加载 {case_name.upper()}: {len(net.bus)} 节点, {len(net.line)} 线路")
 
     # 转换为MATPOWER格式
@@ -454,16 +454,16 @@ class TrainingLogger:
             log_dir = self.config['logging']['log_dir']
             timestamp = time.strftime('%Y%m%d_%H%M%S')
             tensorboard_writer = SummaryWriter(f"{log_dir}/training_{timestamp}")
-            from code.src.rich_output import rich_info
+            from rich_output import rich_info
             rich_info(f"TensorBoard日志目录: {log_dir}/training_{timestamp}", show_always=True)
             return tensorboard_writer
         except ImportError:
-            from code.src.rich_output import rich_warning
+            from rich_output import rich_warning
             rich_warning("TensorBoard不可用，跳过TensorBoard日志")
             self.use_tensorboard = False
             return None
         except Exception as e:
-            from code.src.rich_output import rich_warning
+            from rich_output import rich_warning
             rich_warning(f"TensorBoard初始化失败: {e}")
             self.use_tensorboard = False
             return None
@@ -478,7 +478,7 @@ class TrainingLogger:
 
         # 如果使用TUI，将更新推送到队列
         if self.use_tui and self.tui_update_queue:
-            from code.src.tui_monitor import TrainingUpdate
+            from tui_monitor import TrainingUpdate
             
             avg_reward = np.mean(self.episode_rewards) if self.episode_rewards else 0
             quality_score = info.get('quality_score', 0.5) if info else 0.5
@@ -705,7 +705,7 @@ class UnifiedTrainer:
             # 等待一小段时间以确保TUI启动
             time.sleep(1)
 
-        from code.src.rich_output import rich_info
+        from rich_output import rich_info
         if not self.config.get('debug', {}).get('training_output', {}).get('only_show_errors', True):
             rich_info(f"TensorBoard: {'已启用' if self.logger.use_tensorboard else '已禁用'}")
             rich_info(f"指标保存间隔: {self.logger.metrics_save_interval} 回合")
@@ -901,18 +901,18 @@ class UnifiedTrainer:
             # 检查CV指标
             cv_value = metrics.get('cv', metrics.get('load_cv', 1.0))
             if cv_value == 1.0 and episode > 1:
-                from code.src.rich_output import rich_warning
+                from rich_output import rich_warning
                 rich_warning(f"Episode {episode}: CV指标仍为固定值1.0，可能存在问题")
 
             # 输出指标摘要（仅前3个episode，更简洁）
             if episode <= 2:
                 coupling_ratio = metrics.get('coupling_ratio', 1.0)
                 connectivity = metrics.get('connectivity', 0.0)
-                from code.src.rich_output import rich_debug
+                from rich_output import rich_debug
                 rich_debug(f"Episode {episode} 指标: CV={cv_value:.3f}, Coupling={coupling_ratio:.3f}, Conn={connectivity:.3f}")
 
         except Exception as e:
-            from code.src.rich_output import rich_warning
+            from rich_output import rich_warning
             rich_warning(f"Episode {episode} 指标验证失败: {e}")
 
     def _save_intermediate_results(self, episode: int):
@@ -1114,7 +1114,7 @@ def create_environment_from_config(config: Dict, hetero_data: HeteroData, node_e
                              config.get('parallel_training', {}).get('enabled', False)
 
     if should_use_gym_wrapper:
-        from code.src.rl.gym_wrapper import PowerGridPartitionGymEnv
+        from rl.gym_wrapper import PowerGridPartitionGymEnv
         config_copy = config.copy()
         config_copy['system']['device'] = str(device)
         
@@ -1171,21 +1171,21 @@ class UnifiedTrainingSystem:
                 
                 if file_config: # 确保文件不是空的
                     final_config = self._deep_merge_config(final_config, file_config)
-                    from code.src.rich_output import rich_success
+                    from rich_output import rich_success
                     rich_success(f"✅ 配置文件加载成功: {config_path}")
             except Exception as e:
-                from code.src.rich_output import rich_warning
+                from rich_output import rich_warning
                 rich_warning(f"⚠️ 加载配置文件 {config_path} 失败: {e}，将使用默认配置。")
         else:
             # 只在用户明确指定了--config但文件不存在时发出警告
             if config_path != 'config.yaml':
-                 from code.src.rich_output import rich_warning
+                 from rich_output import rich_warning
                  rich_warning(f"⚠️ 指定的配置文件不存在: '{config_path}'，将使用默认配置。")
 
         # 4. 应用来自构造函数的命令行覆盖项
         if overrides:
             final_config = self._deep_merge_config(final_config, overrides)
-            from code.src.rich_output import rich_info
+            from rich_output import rich_info
             rich_info("✅ 已应用命令行参数覆盖配置。")
 
         return final_config
@@ -1455,7 +1455,7 @@ class UnifiedTrainingSystem:
     def _run_standard_training(self, config: Dict[str, Any]) -> Dict[str, Any]:
         """运行标准训练"""
         # 只在简洁模式下显示关键信息
-        from code.src.rich_output import rich_info
+        from rich_output import rich_info
         only_show_errors = config.get('debug', {}).get('training_output', {}).get('only_show_errors', True)
         
         if not only_show_errors:
@@ -1465,10 +1465,10 @@ class UnifiedTrainingSystem:
             rich_info("启动标准训练模式", show_always=True)
 
         # 导入必要模块
-        from code.src.data_processing import PowerGridDataProcessor
-        from code.src.gat import create_hetero_graph_encoder
-        from code.src.rl.environment import PowerGridPartitioningEnv
-        from code.src.rl.agent import PPOAgent
+        from data_processing import PowerGridDataProcessor
+        from gat import create_hetero_graph_encoder
+        from rl.environment import PowerGridPartitioningEnv
+        from rl.agent import PPOAgent
 
         # 1. 数据处理
         if not only_show_errors:
@@ -1518,7 +1518,7 @@ class UnifiedTrainingSystem:
                 
             # 使用支持场景生成的Gym环境包装器
             try:
-                from code.src.rl.gym_wrapper import PowerGridPartitionGymEnv
+                from rl.gym_wrapper import PowerGridPartitionGymEnv
 
                 # 确保设备配置正确传递
                 config_copy = config.copy()
@@ -1538,7 +1538,7 @@ class UnifiedTrainingSystem:
                 rich_info(f"场景生成环境: {env.total_nodes}节点, {env.num_partitions}分区", show_always=True)
 
             except ImportError as e:
-                from code.src.rich_output import rich_warning
+                from rich_output import rich_warning
                 rich_warning(f"场景生成模块导入失败: {e}")
                 use_scenario_generation = False
 
@@ -1656,8 +1656,8 @@ class UnifiedTrainingSystem:
             return {'success': False, 'error': str(e)}
 
     def _run_sb3_parallel_training(self, config: Dict[str, Any]) -> Dict[str, Any]:
-        from code.src.data_processing import PowerGridDataProcessor
-        from code.src.rl.gym_wrapper import make_parallel_env
+        from data_processing import PowerGridDataProcessor
+        from rl.gym_wrapper import make_parallel_env
         from stable_baselines3 import PPO
 
         # 【修复】在创建并行环境前，将主进程中已解析好的设备名称更新到配置字典中
@@ -1759,7 +1759,7 @@ class UnifiedTrainingSystem:
 
         try:
             # 导入智能导演系统
-            from code.src.rl.adaptive import AdaptiveDirector
+            from rl.adaptive import AdaptiveDirector
 
             # 获取基础训练模式
             base_mode = self._detect_base_mode(config)
@@ -1813,7 +1813,7 @@ class UnifiedTrainingSystem:
 
         # 创建环境（使用场景生成）
         if config['scenario_generation']['enabled']:
-            from code.src.rl.gym_wrapper import PowerGridPartitionGymEnv
+            from rl.gym_wrapper import PowerGridPartitionGymEnv
 
             # 确保设备配置正确传递
             config_copy = config.copy()
@@ -1829,12 +1829,12 @@ class UnifiedTrainingSystem:
             obs_array, info = gym_env.reset()
             env = gym_env.internal_env
         else:
-            from code.src.rl.environment import PowerGridPartitioningEnv
+            from rl.environment import PowerGridPartitioningEnv
             env = PowerGridPartitioningEnv(mpc, config)
             gym_env = None
 
         # 创建智能体
-        from code.src.rl.agent import PPOAgent
+        from rl.agent import PPOAgent
 
         # 获取正确的嵌入维度
         node_embedding_dim = env.state_manager.embedding_dim

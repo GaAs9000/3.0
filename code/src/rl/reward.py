@@ -507,7 +507,7 @@ class DataIntegrityManager:
             return
 
         # 检查是否启用简洁模式
-        from code.src.utils_common import safe_rich_debug
+        from utils_common import safe_rich_debug
         safe_rich_debug("数据补全报告:", "scenario")
         for entry in completion_log:
             safe_rich_debug(f"  - {entry['type']}: {entry['method']}", "scenario")

@@ -350,7 +350,7 @@ class MetisInitializer:
         if show_metis_details and not only_show_errors:
             edge_count = sum(len(neighbors) for neighbors in self.adjacency_list) // 2
             non_isolated = sum(1 for neighbors in self.adjacency_list if len(neighbors) > 0)
-            from code.src.utils_common import safe_rich_debug
+            from utils_common import safe_rich_debug
             safe_rich_debug(f"构建邻接列表: {edge_count} 条边, {non_isolated} 个非孤立节点", "metis")
         
     def initialize_partition(self, num_partitions: int) -> torch.Tensor:
@@ -376,18 +376,18 @@ class MetisInitializer:
                 print("🚀 使用 METIS 进行高质量的初始分区...")
             partition_labels = self._metis_partition(num_partitions)
             if show_metis_details and not only_show_errors:
-                from code.src.utils_common import safe_rich_debug
+                from utils_common import safe_rich_debug
                 safe_rich_debug("METIS 分区成功", "metis")
         except (ImportError, Exception) as e:
-            from code.src.utils_common import safe_rich_warning
+            from utils_common import safe_rich_warning
             safe_rich_warning(f"METIS 初始化失败: {e}，回退到谱聚类...")
             try:
                 # 2. 尝试谱聚类
                 partition_labels = self._spectral_partition(num_partitions)
-                from code.src.utils_common import safe_rich_debug
+                from utils_common import safe_rich_debug
                 safe_rich_debug("谱聚类分区成功", "metis")
             except Exception as e_spectral:
-                from code.src.utils_common import safe_rich_error
+                from utils_common import safe_rich_error
                 safe_rich_error(f"谱聚类也失败: {e_spectral}")
                 raise RuntimeError("无法使用 METIS 或谱聚类进行初始分区。请检查您的环境和数据。") from e_spectral
 

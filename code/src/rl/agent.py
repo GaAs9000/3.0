@@ -127,12 +127,12 @@ def safe_log_prob(probs: torch.Tensor, epsilon: float = 1e-12):
     return torch.log(probs.clamp(min=epsilon))
 
 try:
-    from code.src.gat import HeteroGraphEncoder
+    from gat import HeteroGraphEncoder
     from torch_scatter import scatter_mean, scatter_sum
 except ImportError:
     # 如果相对导入失败，尝试绝对导入
     try:
-        from code.src.gat import HeteroGraphEncoder
+        from gat import HeteroGraphEncoder
         from torch_scatter import scatter_mean, scatter_sum
     except ImportError:
         # 如果都失败了，定义一个占位符

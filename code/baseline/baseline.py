@@ -57,6 +57,24 @@ class BaselinePartitioner:
             elif self.method == 'kmeans':
                 from .kmeans_clustering import KMeansPartitioner
                 self._partitioner = KMeansPartitioner(self.seed)
+            elif self.method == 'louvain':
+                from .louvain_clustering import LouvainPartitioner
+                self._partitioner = LouvainPartitioner(self.seed)
+            elif self.method == 'admittance_spectral':
+                from .admittance_spectral_clustering import AdmittanceSpectralPartitioner
+                self._partitioner = AdmittanceSpectralPartitioner(self.seed)
+            elif self.method == 'jacobian_distance':
+                from .jacobian_electrical_distance import JacobianElectricalDistancePartitioner
+                self._partitioner = JacobianElectricalDistancePartitioner(self.seed)
+            elif self.method == 'mip_optimal':
+                from .mip_optimal_partitioner import MIPOptimalPartitioner
+                self._partitioner = MIPOptimalPartitioner(self.seed)
+            elif self.method == 'gae_kmeans':
+                from .gae_kmeans_partitioner import GAEKMeansPartitioner
+                self._partitioner = GAEKMeansPartitioner(self.seed)
+            elif self.method == 'supervised_embedding':
+                from .supervised_embedding_kmeans import SupervisedEmbeddingKMeansPartitioner
+                self._partitioner = SupervisedEmbeddingKMeansPartitioner(self.seed)
             else:
                 raise ValueError(f"Unknown method: {self.method}")
         return self._partitioner

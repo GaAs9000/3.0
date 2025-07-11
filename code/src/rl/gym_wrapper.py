@@ -8,16 +8,16 @@ try:
     from .environment import PowerGridPartitioningEnv
     from .scenario_generator import ScenarioGenerator
     from .scenario_context import ScenarioContext
-    from code.src.data_processing import PowerGridDataProcessor
-    from code.src.gat import create_hetero_graph_encoder
+    from data_processing import PowerGridDataProcessor
+    from gat import create_hetero_graph_encoder
 except ImportError:
     # 如果相对导入失败，使用绝对导入
     try:
-        from code.src.rl.environment import PowerGridPartitioningEnv
-        from code.src.rl.scenario_generator import ScenarioGenerator
-        from code.src.rl.scenario_context import ScenarioContext
-        from code.src.data_processing import PowerGridDataProcessor
-        from code.src.gat import create_hetero_graph_encoder
+        from rl.environment import PowerGridPartitioningEnv
+        from rl.scenario_generator import ScenarioGenerator
+        from rl.scenario_context import ScenarioContext
+        from data_processing import PowerGridDataProcessor
+        from gat import create_hetero_graph_encoder
     except ImportError:
         print("警告：无法导入所有依赖模块，某些功能可能不可用")
 

@@ -261,44 +261,74 @@ class PartitionComparator:
         fig.text(0.5, 0.02, safe_comparison_text, ha='center', fontsize=10,
                 bbox=dict(boxstyle='round,pad=0.5', facecolor='lightblue', alpha=0.8))
     
-    def create_scenario_comparison_grid(self,
-                                      results_dict: Dict[str, Dict],
-                                      save_path: str = None) -> str:
+    def compare_all_methods(self,
+                           adj_matrix: np.ndarray,
+                           partitions: Dict[str, np.ndarray],
+                           metrics: Dict[str, Dict[str, float]],
+                           node_positions: Optional[Dict] = None,
+                           scenario_name: str = "Normal",
+                           save_path: str = None) -> str:
         """
-        为多个场景创建对比网格
+        对比所有方法的分区结果 - 2x4布局
         
         Args:
-            results_dict: {scenario_name: {adj_matrix, baseline_partition, agent_partition, ...}}
+            adj_matrix: 邻接矩阵
+            partitions: 所有方法的分区结果 {method_name: partition}
+            metrics: 所有方法的性能指标 {method_name: metrics_dict}
+            node_positions: 节点位置字典，如果为None则自动计算
+            scenario_name: 场景名称
             save_path: 保存路径
             
         Returns:
             保存的文件路径
         """
-        num_scenarios = len(results_dict)
-        fig, axes = plt.subplots(num_scenarios, 2, figsize=(16, 8 * num_scenarios))
+        # 创建NetworkX图
+        G = nx.from_numpy_array(adj_matrix)
         
-        if num_scenarios == 1:
-            axes = axes.reshape(1, -1)
+        # 计算节点位置（如果未提供）
+        if node_positions is None:
+            # 使用spring layout，但固定随机种子保证一致性
+            node_positions = nx.spring_layout(G, k=2/np.sqrt(len(G)), seed=42)
         
-        fig.suptitle('Multi-Scenario Partition Comparison', fontsize=18, fontweight='bold')
+        # 创建2x4布局的图形
+        fig, axes = plt.subplots(2, 4, figsize=(20, 10))
+        fig.suptitle(f'All Methods Comparison - {scenario_name} Scenario', fontsize=16, fontweight='bold')
         
-        for idx, (scenario_name, data) in enumerate(results_dict.items()):
-            # 创建图
-            G = nx.from_numpy_array(data['adj_matrix'])
-            pos = nx.spring_layout(G, k=2/np.sqrt(len(G)), seed=42)
+        # 方法名称顺序 (确保Agent在第一位)
+        method_order = ['Agent']
+        other_methods = [name for name in partitions.keys() if name != 'Agent']
+        method_order.extend(other_methods)
+        
+        # 绘制所有方法的结果
+        for idx, method_name in enumerate(method_order):
+            if idx >= 8:  # 只显示前8个方法
+                break
+                
+            row = idx // 4
+            col = idx % 4
+            ax = axes[row, col]
             
-            # 绘制baseline
-            self._draw_partition(G, data['baseline_partition'], pos, axes[idx, 0],
-                               f"Baseline - {scenario_name}", data['baseline_metrics'])
-            
-            # 绘制agent
-            self._draw_partition(G, data['agent_partition'], pos, axes[idx, 1],
-                               f"Agent - {scenario_name}", data['agent_metrics'])
+            if method_name in partitions and method_name in metrics:
+                self._draw_partition(G, partitions[method_name], node_positions, ax, 
+                                   method_name, metrics[method_name])
+            else:
+                # 如果某个方法不存在，显示空白
+                ax.set_title(f'{method_name} (Not Available)', fontsize=14)
+                ax.axis('off')
         
+        # 如果方法数量少于8个，隐藏多余的子图
+        total_methods = len(method_order)
+        for idx in range(total_methods, 8):
+            row = idx // 4
+            col = idx % 4
+            axes[row, col].axis('off')
+        
+        # 调整布局
         plt.tight_layout()
         
+        # 保存图片
         if save_path is None:
-            save_path = "result/output/all_scenarios_comparison.png"
+            save_path = f"result/output/all_methods_comparison_{scenario_name.lower()}.png"
         
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
         plt.close()

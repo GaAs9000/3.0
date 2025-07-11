@@ -12,7 +12,7 @@ def safe_rich_debug(message: str, category: str = None):
         category: 消息分类（可选）
     """
     try:
-        from code.src.rich_output import rich_debug
+        from rich_output import rich_debug
         if category:
             rich_debug(message, category)
         else:
@@ -29,7 +29,7 @@ def safe_rich_warning(message: str):
         message: 警告消息
     """
     try:
-        from code.src.rich_output import rich_warning
+        from rich_output import rich_warning
         rich_warning(message)
     except ImportError:
         print(f"WARNING: {message}")
@@ -42,7 +42,7 @@ def safe_rich_error(message: str):
         message: 错误消息
     """
     try:
-        from code.src.rich_output import rich_error
+        from rich_output import rich_error
         rich_error(message)
     except ImportError:
         print(f"ERROR: {message}")
@@ -55,7 +55,7 @@ def safe_rich_success(message: str):
         message: 成功消息
     """
     try:
-        from code.src.rich_output import rich_success
+        from rich_output import rich_success
         rich_success(message)
     except ImportError:
         print(f"✅ {message}")
