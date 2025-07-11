@@ -26,8 +26,7 @@ from typing import Optional, List, Dict, Any
 # 添加路径
 sys.path.append(str(Path(__file__).parent / 'code' / 'src'))
 sys.path.append(str(Path(__file__).parent / 'code'))
-sys.path.append(str(Path(__file__).parent / 'code' / 'tests'))
-sys.path.append(str(Path(__file__).parent / 'code' / 'utils'))
+sys.path.append(str(Path(__file__).parent / 'code' / 'test'))
 
 try:
     from comprehensive_evaluator import ComprehensiveAgentEvaluator
@@ -874,7 +873,7 @@ def run_comprehensive_evaluation(config_path: Optional[str] = None, mode: str = 
             )
 
             print(f"\n🎉 完整评估完成！")
-            print(f"📁 结果保存在: evaluation/ 目录（按时间戳分类）")
+            print(f"📁 结果保存在: evaluation_results/ 目录")
 
             return True
         else:
@@ -1090,7 +1089,7 @@ def main():
 
         if success:
             print(f"\n🎉 评估完成！")
-            print(f"📁 详细结果请查看: evaluation/ 目录（按时间戳分类）")
+            print(f"📁 详细结果请查看: evaluation_results/ 目录")
             print(f"💡 提示: 可以使用不同的 --mode 参数来调整评估详细程度")
             return 0
         else:

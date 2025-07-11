@@ -1,0 +1,152 @@
+{
+  "network": "ieee57",
+  "model": "./data/2025-07-08-23-12-01/models/agent_ieee57_adaptive_best.pth",
+  "timestamp": "2025-07-11 14:10:07",
+  "test_configuration": {
+    "runs_per_scenario": 3,
+    "total_runs": 12,
+    "methods_tested": [
+      "Agent (PPO)",
+      "Spectral Clustering",
+      "K-means Clustering"
+    ]
+  },
+  "scenarios": {
+    "normal": {
+      "best_case": {
+        "agent": {
+          "cv": 1.048617959022522,
+          "coupling": 0.13831442594528198,
+          "reward": 0.6903493748163554,
+          "success": true
+        },
+        "spectral_clustering": {
+          "cv": 0.9279860258102417,
+          "coupling": 0.13099388778209686,
+          "reward": 0.6657742739870788,
+          "success": true
+        },
+        "kmeans_clustering": {
+          "cv": 0.8841620683670044,
+          "coupling": 0.5858054757118225,
+          "reward": 0.5657153437268202,
+          "success": true
+        }
+      },
+      "average_performance": {
+        "agent": 0.67845122318922,
+        "spectral_clustering": 0.6678717396101307,
+        "kmeans_clustering": 0.5657153414881902
+      },
+      "improvement_analysis": {
+        "agent_vs_spectral_pct": 3.6912061323885816,
+        "agent_vs_kmeans_pct": 22.0312269185543,
+        "best_improvement_over_spectral": 0.024575100829276608
+      }
+    },
+    "high_load": {
+      "best_case": {
+        "agent": {
+          "cv": 1.030006766319275,
+          "coupling": 0.14779803156852722,
+          "reward": 0.6725021698125948,
+          "success": true
+        },
+        "spectral_clustering": {
+          "cv": 0.9279860258102417,
+          "coupling": 0.13099388778209686,
+          "reward": 0.6689204724216566,
+          "success": true
+        },
+        "kmeans_clustering": {
+          "cv": 0.8841621279716492,
+          "coupling": 0.5858054757118225,
+          "reward": 0.5657153370109302,
+          "success": true
+        }
+      },
+      "average_performance": {
+        "agent": 0.6725021698125948,
+        "spectral_clustering": 0.6689204724216568,
+        "kmeans_clustering": 0.5657153370109302
+      },
+      "improvement_analysis": {
+        "agent_vs_spectral_pct": 0.5354444270440012,
+        "agent_vs_kmeans_pct": 18.87642526467359,
+        "best_improvement_over_spectral": 0.0035816973909381655
+      }
+    },
+    "unbalanced": {
+      "best_case": {
+        "agent": {
+          "cv": 1.1472601890563965,
+          "coupling": 0.14779803156852722,
+          "reward": 0.6509138857195121,
+          "success": true
+        },
+        "spectral_clustering": {
+          "cv": 1.0682202577590942,
+          "coupling": 0.13099388778209686,
+          "reward": 0.6439887431108396,
+          "success": true
+        },
+        "kmeans_clustering": {
+          "cv": 1.028062105178833,
+          "coupling": 0.5858054757118225,
+          "reward": 0.5389919546013664,
+          "success": true
+        }
+      },
+      "average_performance": {
+        "agent": 0.677194620649037,
+        "spectral_clustering": 0.6875947620379391,
+        "kmeans_clustering": 0.543109430433132
+      },
+      "improvement_analysis": {
+        "agent_vs_spectral_pct": 1.0753514999687783,
+        "agent_vs_kmeans_pct": 20.765046706666002,
+        "best_improvement_over_spectral": 0.0069251426086724965
+      }
+    },
+    "fault": {
+      "best_case": {
+        "agent": {
+          "cv": 0.9960756897926331,
+          "coupling": 0.12764661014080048,
+          "reward": 0.6851271441702312,
+          "success": true
+        },
+        "spectral_clustering": {
+          "cv": 0.7784947752952576,
+          "coupling": 0.17966710031032562,
+          "reward": 0.6721475316261268,
+          "success": true
+        },
+        "kmeans_clustering": {
+          "cv": 0.8906680941581726,
+          "coupling": 0.5823957324028015,
+          "reward": 0.5353928644148688,
+          "success": true
+        }
+      },
+      "average_performance": {
+        "agent": 0.6851271441702312,
+        "spectral_clustering": 0.6721475428436922,
+        "kmeans_clustering": 0.5353928644148688
+      },
+      "improvement_analysis": {
+        "agent_vs_spectral_pct": 1.9310660135436069,
+        "agent_vs_kmeans_pct": 27.967178815318572,
+        "best_improvement_over_spectral": 0.012979612544104402
+      }
+    }
+  },
+  "summary_statistics": {
+    "total_comparisons": 12,
+    "agent_wins_vs_spectral": 10,
+    "agent_win_rate_vs_spectral": 0.8333333333333334,
+    "average_improvement_over_spectral": 0.004185160226916063,
+    "best_improvement_over_spectral": 0.024575100829276608,
+    "worst_improvement_over_spectral": -0.028306393751675762
+  }
+}

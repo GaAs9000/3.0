@@ -1118,7 +1118,51 @@ def create_environment_from_config(config: Dict, hetero_data: HeteroData, node_e
         config_copy = config.copy()
         config_copy['system']['device'] = str(device)
         
-<<<<<<< HEAD
+        # 创建Gym环境包装器
+        gym_env = PowerGridPartitionGymEnv(
+            base_case_data=mpc_data,
+            config=config_copy,
+            use_scenario_generator=config.get('scenario_generation', {}).get('enabled', True),
+            scenario_seed=config['system']['seed']
+        )
+        _, _ = gym_env.reset()
+        env = gym_env.internal_env
+        return env, gym_env
+    
+    # 创建标准环境
+    env_config = config['environment']
+    env = PowerGridPartitioningEnv(
+        hetero_data,
+        node_embeddings=node_embeddings,
+        num_partitions=env_config['num_partitions'],
+        reward_weights=env_config.get('reward_weights', {}),
+        max_steps=env_config['max_steps'],
+        device=device,
+        attention_weights=attention_weights,
+        config=config,
+        is_normalized=is_normalized
+    )
+    return env, None
+
+
+class UnifiedTrainingSystem:
+    """统一训练系统"""
+    
+    def __init__(self, config_path: str = None, **overrides):
+        """初始化训练系统"""
+        self.config = self._load_config(config_path, overrides)
+        self.device = self._setup_device()
+        self.setup_directories()
+
+    def _load_config(self, config_path: str = None, overrides: Dict[str, Any] = None) -> Dict[str, Any]:
+        """加载和合并配置"""
+        # 1. 创建默认配置
+        final_config = self._create_default_config()
+        
+        # 2. 如果没有指定配置文件，使用默认的config.yaml
+        if config_path is None:
+            config_path = 'config.yaml'
+        
         # 3. 如果配置文件存在，则加载并合并
         if os.path.exists(config_path):
             try:
@@ -1800,16 +1844,8 @@ def create_environment_from_config(config: Dict, hetero_data: HeteroData, node_e
             node_embedding_dim=node_embedding_dim,
             region_embedding_dim=region_embedding_dim,
             num_partitions=env.num_partitions,
-            lr_actor=config['agent']['lr_actor'],
-            lr_critic=config['agent']['lr_critic'],
-            gamma=config['agent']['gamma'],
-            eps_clip=config['agent']['eps_clip'],
-            k_epochs=config['agent']['k_epochs'],
-            entropy_coef=config['agent']['entropy_coef'],
-            value_coef=config['agent']['value_coef'],
-            device=env.device,
-            actor_scheduler_config=config['agent'].get('actor_scheduler'),
-            critic_scheduler_config=config['agent'].get('critic_scheduler')
+            agent_config=config['agent'],
+            device=env.device
         )
 
         # 2. 智能自适应训练循环
@@ -2172,129 +2208,8 @@ def main():
         return 1
 
     return 0
-=======
-        gym_env = PowerGridPartitionGymEnv(
-            base_case_data=mpc_data,
-            config=config_copy,
-            use_scenario_generator=config.get('scenario_generation', {}).get('enabled', True),
-            scenario_seed=config['system']['seed']
-        )
-        _, _ = gym_env.reset()
-        env = gym_env.internal_env
-        return env, gym_env
-    
-    # 创建标准环境
-    env_config = config['environment']
-    env = PowerGridPartitioningEnv(
-        hetero_data,
-        node_embeddings=node_embeddings,
-        num_partitions=env_config['num_partitions'],
-        reward_weights=env_config.get('reward_weights', {}),
-        max_steps=env_config['max_steps'],
-        device=device,
-        attention_weights=attention_weights,
-        config=config,
-        is_normalized=is_normalized
-    )
-    return env, None
->>>>>>> ed8d1e95fca30709741474b3a87607a3f613d99c
 
 
 if __name__ == "__main__":
-    import argparse, yaml, copy, pprint, sys
-    
-    parser = argparse.ArgumentParser(description="RL Trainer for Power Grid Partitioning")
-    parser.add_argument("--mode", default="fast", help="配置预设名称 (fast / full / ieee118 等)")
-    parser.add_argument("--run", action="store_true", help="执行完整训练流程。若省略则仅打印合并后的配置")
-    args = parser.parse_args()
-
-    # 1. 读取配置文件
-    cfg_file = Path("config.yaml")
-    if not cfg_file.exists():
-        safe_print("❌ 找不到 config.yaml ，请检查项目目录")
-        sys.exit(1)
-    with open(cfg_file, "r", encoding="utf-8") as f:
-        base_cfg = yaml.safe_load(f)
-
-    # 2. 递归合并预设
-    def deep_update(dest: Dict[str, Any], src: Dict[str, Any]):
-        for k, v in src.items():
-            if isinstance(v, dict) and k in dest:
-                deep_update(dest[k], v)
-            else:
-                dest[k] = copy.deepcopy(v)
-
-    if args.mode in base_cfg:
-        deep_update(base_cfg, base_cfg[args.mode])
-    else:
-        safe_print(f"⚠️ 未找到名为 '{args.mode}' 的预设，使用基础配置")
-
-    if not args.run:
-        safe_print("🚀 配置已加载（未启动训练，添加 --run 可开始训练）\n─" * 40)
-        pprint.pp(base_cfg)
-        sys.exit(0)
-
-    # 3. === 正式训练管道 ===
-    safe_print("🚀 开始训练流程 ...")
-
-    # 3.1 设备
-    device_str = base_cfg['system'].get('device', 'auto')
-    if device_str == 'auto':
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    else:
-        device = torch.device(device_str)
-
-    # 3.2 数据加载
-    mpc_data = load_power_grid_data(base_cfg['data']['case_name'])
-
-    # 3.3 图处理
-    from code.src.data_processing import PowerGridDataProcessor
-    processor = PowerGridDataProcessor(
-        normalize=base_cfg['data'].get('normalize', True),
-        cache_dir=base_cfg['data'].get('cache_dir', 'data/cache')
-    )
-    hetero_data = processor.graph_from_mpc(mpc_data, config=base_cfg)
-
-    # 3.4 编码器 (GAT)
-    encoder_cfg = base_cfg.get('gat', {})
-    encoder = create_production_encoder(hetero_data, encoder_cfg).to(device)
-    hetero_data = hetero_data.to(device)
-
-    # 预计算节点嵌入 & 注意力权重
-    with torch.no_grad():
-        node_embeddings_dict, attention_weights = encoder.encode_nodes_with_attention(hetero_data, base_cfg)
-
-    # 将 node_embeddings_dict 转为同一维度张量字典（环境内部按 node_type 键访问）
-
-    # 3.5 创建环境
-    env, gym_env = create_environment_from_config(
-        base_cfg, hetero_data, node_embeddings_dict, attention_weights, mpc_data, device,
-        is_normalized=base_cfg['data'].get('normalize', True)
-    )
-
-    # 3.6 创建智能体（需先获取实际state维度）
-    # 先reset一次环境以拿到示例state
-    init_state, _ = env.reset()
-    node_emb_dim = init_state['node_embeddings'].shape[1]
-    region_emb_dim = init_state['region_embeddings'].shape[1]
-
-    agent = PPOAgent(
-        node_embedding_dim=node_emb_dim,
-        region_embedding_dim=region_emb_dim,
-        num_partitions=base_cfg['environment']['num_partitions'],
-        agent_config=base_cfg.get('agent', {}),
-        device=device
-    )
-
-     # 3.7 训练器
-    trainer = UnifiedTrainer(agent, env, base_cfg, gym_env=gym_env)
-
-    train_cfg = base_cfg['training']
-    trainer.train(
-        num_episodes=train_cfg['num_episodes'],
-        max_steps_per_episode=train_cfg['max_steps_per_episode'],
-        update_interval=train_cfg.get('update_interval', 10)
-    )
-
-    safe_print("🎉 训练流程结束。")
+    sys.exit(main())
     
