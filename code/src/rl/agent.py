@@ -153,120 +153,121 @@ except ImportError:
             return sum_
 
 
-class ActorNetwork(nn.Module):
-    """
-    用于两阶段动作选择的actor network
-    
-    接收异构图状态并输出：
-    1. 节点选择概率（在边界节点上）
-    2. 分区选择概率（对于每个节点-分区对）
-    """
-    
-    def __init__(self,
-                 node_embedding_dim: int,
-                 region_embedding_dim: int,
-                 num_partitions: int,
-                 hidden_dim: int = 256,
-                 dropout: float = 0.1):
-        """
-        初始化演员网络
-        
-        Args:
-            node_embedding_dim: 节点嵌入维度
-            region_embedding_dim: 区域嵌入维度  
-            num_partitions: 分区数量
-            hidden_dim: 隐藏层维度
-            dropout: Dropout概率
-        """
-        super().__init__()
-        
-        self.node_embedding_dim = node_embedding_dim
-        self.region_embedding_dim = region_embedding_dim
-        self.num_partitions = num_partitions
-        self.hidden_dim = hidden_dim
-        
-        # 节点选择网络
-        self.node_selector = nn.Sequential(
-            nn.Linear(node_embedding_dim + region_embedding_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim // 2, 1)  # 用于节点评分的单输出
-        )
-        
-        # 分区选择网络
-        self.partition_selector = nn.Sequential(
-            nn.Linear(node_embedding_dim + region_embedding_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim // 2, num_partitions)
-        )
-        
-        # 用于上下文的全局状态编码器
-        # 输出维度应匹配region_embedding_dim以便连接
-        self.global_encoder = nn.Sequential(
-            nn.Linear(region_embedding_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, region_embedding_dim)
-        )
-
-        # 初始化网络权重
-        self._init_weights()
-        
-    def forward(self, batched_state: BatchedState):
-        """
-        接收批处理后的图状态，并为边界节点输出动作logits。
-
-        Args:
-            batched_state (BatchedState): 包含批处理图数据的对象。
-
-        Returns:
-            Tuple[torch.Tensor, torch.Tensor]:
-                - node_logits: 每个边界节点的选择分数 [num_total_boundary_nodes]
-                - partition_logits: 每个边界节点的每个分区的选择分数 [num_total_boundary_nodes, num_partitions]
-        """
-        bs = batched_state
-        if bs.region_embeddings.numel() == 0:
-            # 空批次保护
-            return (torch.zeros(0, device=bs.node_embeddings.device),
-                    torch.zeros(0, self.num_partitions, device=bs.node_embeddings.device))
-
-        # —— 计算批次级全局上下文 ——
-        global_context_per_batch = self.global_encoder(
-            scatter_mean(bs.region_embeddings, bs.region_batch_idx, dim=0)
-        )  # [batch_size, region_dim]
-
-        if bs.boundary_nodes.numel() == 0:
-            return (torch.zeros(0, device=bs.node_embeddings.device),
-                    torch.zeros(0, self.num_partitions, device=bs.node_embeddings.device))
-
-        boundary_batch_idx = bs.node_batch_idx[bs.boundary_nodes]  # [num_boundary]
-        global_context = global_context_per_batch[boundary_batch_idx]  # [num_boundary, region_dim]
-        boundary_embeddings = bs.node_embeddings[bs.boundary_nodes]  # [num_boundary, node_dim]
-
-        combined_features = torch.cat([boundary_embeddings, global_context], dim=1)
-        node_logits = self.node_selector(combined_features).squeeze(-1)
-        partition_logits = self.partition_selector(combined_features)
-
-        # 掩码
-        boundary_mask = bs.action_mask[bs.boundary_nodes]
-        partition_logits = partition_logits.masked_fill(~boundary_mask, -1e9)
-        return node_logits, partition_logits
-
-    def _init_weights(self):
-        """初始化网络权重以提高数值稳定性"""
-        for module in self.modules():
-            if isinstance(module, nn.Linear):
-                # 使用Xavier初始化
-                nn.init.xavier_uniform_(module.weight)
-                if module.bias is not None:
-                    nn.init.constant_(module.bias, 0.0)
+# [已废弃 - 被EnhancedActorNetwork替代]
+# class ActorNetwork(nn.Module):
+#     """
+#     用于两阶段动作选择的actor network
+#     
+#     接收异构图状态并输出：
+#     1. 节点选择概率（在边界节点上）
+#     2. 分区选择概率（对于每个节点-分区对）
+#     """
+#     
+#     def __init__(self,
+#                  node_embedding_dim: int,
+#                  region_embedding_dim: int,
+#                  num_partitions: int,
+#                  hidden_dim: int = 256,
+#                  dropout: float = 0.1):
+#         """
+#         初始化演员网络
+#         
+#         Args:
+#             node_embedding_dim: 节点嵌入维度
+#             region_embedding_dim: 区域嵌入维度  
+#             num_partitions: 分区数量
+#             hidden_dim: 隐藏层维度
+#             dropout: Dropout概率
+#         """
+#         super().__init__()
+#         
+#         self.node_embedding_dim = node_embedding_dim
+#         self.region_embedding_dim = region_embedding_dim
+#         self.num_partitions = num_partitions
+#         self.hidden_dim = hidden_dim
+#         
+#         # 节点选择网络
+#         self.node_selector = nn.Sequential(
+#             nn.Linear(node_embedding_dim + region_embedding_dim, hidden_dim),
+#             nn.ReLU(),
+#             nn.Dropout(dropout),
+#             nn.Linear(hidden_dim, hidden_dim // 2),
+#             nn.ReLU(),
+#             nn.Dropout(dropout),
+#             nn.Linear(hidden_dim // 2, 1)  # 用于节点评分的单输出
+#         )
+#         
+#         # 分区选择网络
+#         self.partition_selector = nn.Sequential(
+#             nn.Linear(node_embedding_dim + region_embedding_dim, hidden_dim),
+#             nn.ReLU(),
+#             nn.Dropout(dropout),
+#             nn.Linear(hidden_dim, hidden_dim // 2),
+#             nn.ReLU(),
+#             nn.Dropout(dropout),
+#             nn.Linear(hidden_dim // 2, num_partitions)
+#         )
+#         
+#         # 用于上下文的全局状态编码器
+#         # 输出维度应匹配region_embedding_dim以便连接
+#         self.global_encoder = nn.Sequential(
+#             nn.Linear(region_embedding_dim, hidden_dim),
+#             nn.ReLU(),
+#             nn.Dropout(dropout),
+#             nn.Linear(hidden_dim, region_embedding_dim)
+#         )
+# 
+#         # 初始化网络权重
+#         self._init_weights()
+#         
+#     def forward(self, batched_state: BatchedState):
+#         """
+#         接收批处理后的图状态，并为边界节点输出动作logits。
+# 
+#         Args:
+#             batched_state (BatchedState): 包含批处理图数据的对象。
+# 
+#         Returns:
+#             Tuple[torch.Tensor, torch.Tensor]:
+#                 - node_logits: 每个边界节点的选择分数 [num_total_boundary_nodes]
+#                 - partition_logits: 每个边界节点的每个分区的选择分数 [num_total_boundary_nodes, num_partitions]
+#         """
+#         bs = batched_state
+#         if bs.region_embeddings.numel() == 0:
+#             # 空批次保护
+#             return (torch.zeros(0, device=bs.node_embeddings.device),
+#                     torch.zeros(0, self.num_partitions, device=bs.node_embeddings.device))
+# 
+#         # —— 计算批次级全局上下文 ——
+#         global_context_per_batch = self.global_encoder(
+#             scatter_mean(bs.region_embeddings, bs.region_batch_idx, dim=0)
+#         )  # [batch_size, region_dim]
+# 
+#         if bs.boundary_nodes.numel() == 0:
+#             return (torch.zeros(0, device=bs.node_embeddings.device),
+#                     torch.zeros(0, self.num_partitions, device=bs.node_embeddings.device))
+# 
+#         boundary_batch_idx = bs.node_batch_idx[bs.boundary_nodes]  # [num_boundary]
+#         global_context = global_context_per_batch[boundary_batch_idx]  # [num_boundary, region_dim]
+#         boundary_embeddings = bs.node_embeddings[bs.boundary_nodes]  # [num_boundary, node_dim]
+# 
+#         combined_features = torch.cat([boundary_embeddings, global_context], dim=1)
+#         node_logits = self.node_selector(combined_features).squeeze(-1)
+#         partition_logits = self.partition_selector(combined_features)
+# 
+#         # 掩码
+#         boundary_mask = bs.action_mask[bs.boundary_nodes]
+#         partition_logits = partition_logits.masked_fill(~boundary_mask, -1e9)
+#         return node_logits, partition_logits
+# 
+#     def _init_weights(self):
+#         """初始化网络权重以提高数值稳定性"""
+#         for module in self.modules():
+#             if isinstance(module, nn.Linear):
+#                 # 使用Xavier初始化
+#                 nn.init.xavier_uniform_(module.weight)
+#                 if module.bias is not None:
+#                     nn.init.constant_(module.bias, 0.0)
 
 
 class CriticNetwork(nn.Module):
@@ -424,9 +425,17 @@ class PPOAgent:
         critic_scheduler_config = agent_config.get('critic_scheduler', {})
 
         # 网络
-        self.actor = ActorNetwork(
-            node_embedding_dim, region_embedding_dim, num_partitions, hidden_dim, dropout
-        ).to(self.device)
+        # 使用新的EnhancedActorNetwork替代旧的ActorNetwork
+        from models.actor_network import create_actor_network
+        actor_config = {
+            'node_embedding_dim': node_embedding_dim,
+            'region_embedding_dim': region_embedding_dim,
+            'strategy_vector_dim': agent_config.get('strategy_vector_dim', 128),
+            'hidden_dim': hidden_dim,
+            'dropout': dropout,
+            'backward_compatible': True  # PPOAgent需要兼容模式
+        }
+        self.actor = create_actor_network(actor_config, use_two_tower=False).to(self.device)
 
         self.critic = CriticNetwork(
             node_embedding_dim, region_embedding_dim, hidden_dim, dropout

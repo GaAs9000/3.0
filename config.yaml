@@ -31,8 +31,9 @@ training:
 
 # 环境配置
 environment:
-  num_partitions: 3
+  num_partitions: 3                  # 默认分区数（双塔架构下可动态调整）
   max_steps: 200
+  enable_features_cache: true        # 启用分区特征缓存
   reward_weights:
     load_b: 0.4
     decoupling: 0.4
@@ -50,9 +51,44 @@ gat:
   temperature: 1.0
   physics_weight: 1.0
 
-# PPO智能体配置
+# GNN预训练配置（双塔架构必需）
+gnn_pretrain:
+  enabled: true                      # 双塔架构必须启用
+  epochs: 50                         # 预训练轮数
+  batch_size: 32                     # 批量大小
+  learning_rate: 1.0e-3              # 学习率
+  # 损失权重
+  loss_weights:
+    smoothness: 0.4                  # 平滑性损失权重
+    contrastive: 0.3                 # 对比学习损失权重
+    physics: 0.3                     # 物理一致性损失权重
+  # 数据增强
+  augmentation:
+    node_feature_noise: 0.1          # 节点特征噪声
+    edge_dropout: 0.1                # 边dropout率
+    subgraph_size: 0.8               # 子图采样比例
+  # 早停策略
+  early_stopping:
+    enabled: true
+    patience: 10
+    min_delta: 1.0e-4
+  # 检查点
+  checkpoint_dir: data/latest/pretrain_checkpoints
+  save_best_only: true
+
+# PPO智能体配置（双塔架构）
 agent:
   type: ppo
+  strategy_vector_dim: 128           # 策略向量维度
+  partition_encoder:                 # 动作塔（分区编码器）配置
+    embedding_dim: 128               # 嵌入维度（与策略向量维度一致）
+    hidden_dim: 64                   # 隐藏层维度
+    num_layers: 3                    # 网络层数
+    dropout_rate: 0.1                # Dropout率
+    use_layer_norm: true             # 使用层归一化
+    use_cache: true                  # 启用缓存
+    cache_size: 1000                 # 缓存大小
+  # 训练参数
   lr_actor: 3.0e-4
   lr_critic: 1.0e-3
   gamma: 0.99
@@ -83,6 +119,46 @@ scenario_generation:
     - both
     - none
   scale_range: [0.8, 1.2]
+
+# 多尺度数据生成配置（双塔架构）
+multi_scale_generation:
+  enabled: true                      # 启用多尺度数据生成
+  generator_type: scale_aware        # 使用ScaleAwareSyntheticGenerator
+  # 拓扑变形配置
+  topology_variation:
+    enabled: true
+    variation_prob: 0.2              # 拓扑变形概率
+    node_addition_prob: 0.1          # 节点添加概率
+    node_removal_prob: 0.05          # 节点删除概率
+    edge_addition_prob: 0.1          # 边添加概率
+    edge_removal_prob: 0.05          # 边删除概率
+    ensure_connectivity: true        # 确保连通性
+    min_degree: 2                    # 最小节点度数
+    max_degree: 6                    # 最大节点度数
+  # 负荷/发电扰动
+  load_gen_variation:
+    load_range: [0.7, 1.3]           # 负荷变化范围
+    gen_range: [0.8, 1.2]            # 发电变化范围
+  # 规模类别
+  scale_categories:
+    small:
+      node_range: [10, 40]
+      base_cases: [ieee14, ieee30, ieee39]
+      k_range: [3, 4]
+    medium:
+      node_range: [40, 100]
+      base_cases: [ieee57, ieee118]
+      k_range: [4, 6, 8]
+    large:
+      node_range: [100, 300]
+      base_cases: [ieee118]           # 会合成更大规模
+      k_range: [8, 12, 16]
+  # 渐进式训练计划
+  progressive_schedule:
+    early_phase: 0.2                 # 前20%专注小规模
+    mid_phase: 0.5                   # 20%-50%引入中等规模
+    balance_phase: 0.8               # 50%-80%平衡发展
+    # 各阶段的规模分布会自动调整
 
 # 智能自适应配置
 adaptive_curriculum:
@@ -346,6 +422,7 @@ ieee57:
     heads: 8
     output_dim: 256
   agent:
+    strategy_vector_dim: 256         # 更大的策略向量
     lr_actor: 1.0e-4
     lr_critic: 5.0e-4
     hidden_dim: 256
@@ -360,6 +437,8 @@ ieee57:
     num_cpus: 8
   scenario_generation:
     enabled: true
+  multi_scale_generation:
+    enabled: true                    # 启用多尺度生成
   visualization:
     partition_plot:
       figsize: [16, 10]
@@ -379,6 +458,7 @@ ieee118:
     heads: 8
     output_dim: 256
   agent:
+    strategy_vector_dim: 256         # 更大的策略向量
     lr_actor: 1.0e-4
     lr_critic: 5.0e-4
     hidden_dim: 512
@@ -393,6 +473,8 @@ ieee118:
     num_cpus: 12
   scenario_generation:
     enabled: true
+  multi_scale_generation:
+    enabled: true                    # 启用多尺度生成
   visualization:
     partition_plot:
       figsize: [20, 12]

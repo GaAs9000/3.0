@@ -388,6 +388,10 @@ class AdaptiveDirector:
         self.last_stage_transition_episode = -1
         self.emergency_count = 0
         self.normal_stage_count = 0
+        
+        # 数据复杂度管理
+        self.data_complexity_enabled = curriculum_config.get('data_complexity_enabled', True)
+        self.data_complexity_stats = defaultdict(int)  # 跟踪各规模的使用情况
 
         # 简化日志输出
         self.verbose = config.get('debug', {}).get('adaptive_curriculum_verbose', False)
@@ -410,7 +414,7 @@ class AdaptiveDirector:
                 logger.warning(f"平台期检测系统初始化失败: {e}")
                 self.plateau_detector = None
 
-        logger.info(f"智能自适应训练导演已初始化 (基础模式: {base_mode})")
+        logger.info(f"智能自适应训练导演已初始化 (基础模式: {base_mode}, 数据复杂度管理: {self.data_complexity_enabled})")
 
     def _create_mode_adapted_criteria(self, curriculum_config: Dict[str, Any]) -> StageTransitionCriteria:
         """根据基础模式创建适配的转换条件"""
@@ -460,6 +464,7 @@ class AdaptiveDirector:
             # 计算质量分数用于平台期检测
             quality_score = self._compute_quality_score(performance)
             plateau_result = self.plateau_detector.update(quality_score)
+            self._last_plateau_result = plateau_result  # 保存结果供数据复杂度管理使用
 
             # 如果检测到平台期且置信度足够高，可以考虑阶段转换
             if plateau_result.plateau_detected and plateau_result.confidence > self.plateau_detector.confidence_threshold:
@@ -592,7 +597,7 @@ class AdaptiveDirector:
 
     def get_status_summary(self) -> Dict[str, Any]:
         """获取当前状态摘要"""
-        return {
+        summary = {
             'base_mode': self.base_mode,
             'current_stage': self.parameter_scheduler.current_stage,
             'stage_progress': self.parameter_scheduler.stage_progress,
@@ -603,6 +608,14 @@ class AdaptiveDirector:
             'emergency_count': self.emergency_count,
             'normal_stage_count': self.normal_stage_count
         }
+        
+        # 添加数据使用统计
+        if self.data_complexity_enabled:
+            summary['data_usage'] = self.get_data_usage_summary()
+            summary['current_data_distribution'] = self.get_data_complexity_distribution()
+            summary['current_k_values'] = self.get_k_value_distribution()
+        
+        return summary
 
     def _compute_quality_score(self, performance: Dict[str, Any]) -> float:
         """
@@ -652,3 +665,155 @@ class AdaptiveDirector:
         except Exception as e:
             logger.warning(f"计算质量分数时出错: {e}")
             return 0.0
+    
+    def get_data_complexity_distribution(self) -> Dict[str, float]:
+        """
+        根据当前训练阶段返回数据复杂度分布
+        
+        Returns:
+            规模分布字典 {'small': 0.5, 'medium': 0.3, 'large': 0.2}
+        """
+        if not self.data_complexity_enabled:
+            # 如果未启用数据复杂度管理，返回默认分布
+            return {'current': 1.0}
+        
+        current_stage = self.parameter_scheduler.current_stage
+        stage_name = self.parameter_scheduler.get_stage_parameters(
+            current_stage, 
+            self.parameter_scheduler.stage_progress
+        )['stage_name']
+        
+        # 定义各阶段的数据复杂度分布
+        stage_distributions = {
+            'exploration': {      # 阶段1：探索期
+                'small': 0.8,    # 主要使用小规模
+                'medium': 0.2,   # 少量中等规模
+                'large': 0.0     # 不使用大规模
+            },
+            'transition': {       # 阶段2：过渡期
+                'small': 0.5,    # 平衡小规模
+                'medium': 0.4,   # 增加中等规模
+                'large': 0.1     # 开始引入大规模
+            },
+            'refinement': {       # 阶段3：精炼期
+                'small': 0.3,    # 减少小规模
+                'medium': 0.4,   # 保持中等规模
+                'large': 0.3     # 增加大规模
+            },
+            'fine_tuning': {      # 阶段4：微调期
+                'small': 0.2,    # 保持少量小规模（防止遗忘）
+                'medium': 0.3,   # 中等规模
+                'large': 0.5     # 主要使用大规模
+            },
+            'emergency_recovery': {  # 紧急恢复模式
+                'small': 0.9,    # 主要使用小规模快速恢复
+                'medium': 0.1,   # 极少中等规模
+                'large': 0.0     # 不使用大规模
+            }
+        }
+        
+        # 获取当前阶段的分布
+        distribution = stage_distributions.get(stage_name, {
+            'small': 0.33, 'medium': 0.34, 'large': 0.33  # 默认均匀分布
+        })
+        
+        # 如果处于平台期，调整分布以打破僵局
+        if self.plateau_detector and hasattr(self, '_last_plateau_result'):
+            if self._last_plateau_result and self._last_plateau_result.plateau_detected:
+                # 平台期时增加数据多样性
+                distribution = {
+                    'small': 0.25,
+                    'medium': 0.25,
+                    'large': 0.5   # 增加大规模挑战
+                }
+                if self.verbose:
+                    logger.info(f"平台期检测：调整数据分布为混合模式")
+        
+        # 更新统计
+        for scale, weight in distribution.items():
+            self.data_complexity_stats[scale] += weight
+        
+        return distribution
+    
+    def get_k_value_distribution(self) -> List[int]:
+        """
+        根据当前阶段返回合适的K值候选列表
+        
+        Returns:
+            K值列表，如 [3, 4, 6, 8]
+        """
+        current_stage = self.parameter_scheduler.current_stage
+        stage_progress = self.parameter_scheduler.stage_progress
+        
+        # 基础K值范围（根据基础模式调整）
+        if self.base_mode == "fast" or self.base_mode == "ieee14":
+            base_k_values = [3, 4]
+        elif self.base_mode == "ieee57":
+            base_k_values = [4, 6, 8]
+        elif self.base_mode == "ieee118":
+            base_k_values = [6, 8, 12, 16]
+        else:  # full or default
+            base_k_values = [3, 4, 6, 8]
+        
+        # 根据阶段调整K值范围
+        if current_stage == 1:  # 探索期
+            # 使用较小的K值
+            k_values = base_k_values[:len(base_k_values)//2 + 1]
+        elif current_stage == 2:  # 过渡期
+            # 逐渐增加K值范围
+            cutoff = int(len(base_k_values) * (0.5 + 0.5 * stage_progress))
+            k_values = base_k_values[:cutoff]
+        else:  # 精炼期和微调期
+            # 使用完整K值范围
+            k_values = base_k_values
+        
+        # 确保至少有2个K值选择
+        if len(k_values) < 2:
+            k_values = base_k_values[:2]
+        
+        return k_values
+    
+    def update_data_usage_stats(self, scale_category: str, k_value: int):
+        """
+        更新数据使用统计
+        
+        Args:
+            scale_category: 使用的规模类别 ('small', 'medium', 'large')
+            k_value: 使用的K值
+        """
+        self.data_complexity_stats[f"{scale_category}_k{k_value}"] += 1
+    
+    def get_data_usage_summary(self) -> Dict[str, Any]:
+        """
+        获取数据使用统计摘要
+        
+        Returns:
+            包含各规模和K值使用情况的统计字典
+        """
+        total_samples = sum(v for k, v in self.data_complexity_stats.items() if '_k' not in k)
+        
+        summary = {
+            'total_samples': total_samples,
+            'scale_distribution': {},
+            'k_value_distribution': defaultdict(int),
+            'scale_k_combinations': {}
+        }
+        
+        # 统计规模分布
+        for scale in ['small', 'medium', 'large']:
+            count = self.data_complexity_stats.get(scale, 0)
+            summary['scale_distribution'][scale] = {
+                'count': count,
+                'percentage': (count / total_samples * 100) if total_samples > 0 else 0
+            }
+        
+        # 统计K值分布和组合
+        for key, count in self.data_complexity_stats.items():
+            if '_k' in key:
+                parts = key.split('_k')
+                if len(parts) == 2:
+                    scale, k = parts[0], int(parts[1])
+                    summary['k_value_distribution'][k] += count
+                    summary['scale_k_combinations'][key] = count
+        
+        return summary

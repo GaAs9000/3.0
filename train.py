@@ -45,6 +45,11 @@ try:
     from rl.environment import PowerGridPartitioningEnv
     from rl.agent import PPOAgent
     from rl.adaptive import AdaptiveDirector
+    # 导入增强版组件（双塔架构）
+    from rl.enhanced_environment import EnhancedPowerGridPartitioningEnv, create_enhanced_environment
+    from rl.enhanced_agent import EnhancedPPOAgent, create_enhanced_agent
+    from pretrain.gnn_pretrainer import GNNPretrainer, PretrainConfig
+    from rl.scale_aware_generator import ScaleAwareSyntheticGenerator, GridGenerationConfig
     CRITICAL_DEPS_AVAILABLE = True
 except ImportError as e:
     CRITICAL_DEPS_AVAILABLE = False
@@ -1129,18 +1134,15 @@ def create_environment_from_config(config: Dict, hetero_data: HeteroData, node_e
         env = gym_env.internal_env
         return env, gym_env
     
-    # 创建标准环境
+    # 创建增强环境（双塔架构）
     env_config = config['environment']
-    env = PowerGridPartitioningEnv(
-        hetero_data,
+    
+    env = create_enhanced_environment(
+        hetero_data=hetero_data,
         node_embeddings=node_embeddings,
         num_partitions=env_config['num_partitions'],
-        reward_weights=env_config.get('reward_weights', {}),
-        max_steps=env_config['max_steps'],
-        device=device,
-        attention_weights=attention_weights,
         config=config,
-        is_normalized=is_normalized
+        use_enhanced=True
     )
     return env, None
 
@@ -1546,15 +1548,12 @@ class UnifiedTrainingSystem:
             if not only_show_errors:
                 print("📊 使用标准环境（无场景生成）...")
                 
-            env = PowerGridPartitioningEnv(
+            env = create_enhanced_environment(
                 hetero_data=hetero_data,
                 node_embeddings=node_embeddings,
                 num_partitions=env_config['num_partitions'],
-                reward_weights=env_config['reward_weights'],
-                max_steps=env_config['max_steps'],
-                device=self.device,
-                attention_weights=attention_weights,
-                config=config
+                config=config,
+                use_enhanced=True
             )
 
             rich_info(f"标准环境: {env.total_nodes}节点, {env.num_partitions}分区", show_always=True)
@@ -1562,30 +1561,63 @@ class UnifiedTrainingSystem:
         # 4. 智能体
         if not only_show_errors:
             print("\n4️⃣ PPO智能体...")
+        
+        # 创建增强智能体（双塔架构）
         agent_config = config['agent']
         node_embedding_dim = env.state_manager.embedding_dim
         region_embedding_dim = node_embedding_dim * 2
-
-        agent = PPOAgent(
-            node_embedding_dim=node_embedding_dim,
-            region_embedding_dim=region_embedding_dim,
+        
+        agent = create_enhanced_agent(
+            state_dim=env.state_manager.embedding_dim,
             num_partitions=env.num_partitions,
-            lr_actor=agent_config['lr_actor'],
-            lr_critic=agent_config['lr_critic'],
-            gamma=agent_config['gamma'],
-            eps_clip=agent_config['eps_clip'],
-            k_epochs=agent_config['k_epochs'],
-            entropy_coef=agent_config['entropy_coef'],
-            value_coef=agent_config['value_coef'],
-            device=self.device,
-            max_grad_norm=agent_config.get('max_grad_norm', None),
-            # 【修改】传递独立的调度器配置
-            actor_scheduler_config=agent_config.get('actor_scheduler', {}),
-            critic_scheduler_config=agent_config.get('critic_scheduler', {})
+            config=agent_config,
+            device=self.device
         )
 
         if not only_show_errors:
             print(f"✅ 智能体创建完成")
+        
+        # 5. GNN预训练（双塔架构必需）
+        if config.get('gnn_pretrain', {}).get('enabled', True):
+            if not only_show_errors:
+                print("\n5️⃣ GNN预训练...")
+            
+            pretrain_config = PretrainConfig(
+                epochs=config['gnn_pretrain'].get('epochs', 50),
+                batch_size=config['gnn_pretrain'].get('batch_size', 32),
+                learning_rate=config['gnn_pretrain'].get('learning_rate', 1e-3),
+                loss_weights=config['gnn_pretrain'].get('loss_weights', {
+                    'smoothness': 0.4,
+                    'contrastive': 0.3,
+                    'physics': 0.3
+                }),
+                augmentation=config['gnn_pretrain'].get('augmentation', {}),
+                early_stopping=config['gnn_pretrain'].get('early_stopping', {}),
+                checkpoint_dir=config['gnn_pretrain'].get('checkpoint_dir', 'data/latest/pretrain_checkpoints'),
+                save_best_only=config['gnn_pretrain'].get('save_best_only', True)
+            )
+            
+            # 获取GAT编码器
+            gat_encoder = next(m for m in agent.actor.modules() 
+                             if hasattr(m, 'convs') and hasattr(m, 'heads'))
+            
+            # 创建预训练器
+            pretrainer = GNNPretrainer(gat_encoder, pretrain_config)
+            
+            # 执行预训练
+            try:
+                if hasattr(env, 'hetero_data'):
+                    train_data = [env.hetero_data]
+                else:
+                    train_data = [hetero_data]
+                    
+                final_loss = pretrainer.train(train_data)
+                
+                if not only_show_errors:
+                    print(f"✅ GNN预训练完成，最终损失: {final_loss:.4f}")
+            except Exception as e:
+                print(f"⚠️ GNN预训练失败: {e}")
+                print("继续使用未预训练的模型...")
 
         # 5. 训练
         rich_info("开始训练...", show_always=True)
@@ -1833,18 +1865,18 @@ class UnifiedTrainingSystem:
             env = PowerGridPartitioningEnv(mpc, config)
             gym_env = None
 
-        # 创建智能体
+        # 创建增强智能体（双塔架构）
         from rl.agent import PPOAgent
+        from rl.enhanced_agent import create_enhanced_agent
 
         # 获取正确的嵌入维度
         node_embedding_dim = env.state_manager.embedding_dim
         region_embedding_dim = node_embedding_dim * 2
-
-        agent = PPOAgent(
-            node_embedding_dim=node_embedding_dim,
-            region_embedding_dim=region_embedding_dim,
+        
+        agent = create_enhanced_agent(
+            state_dim=node_embedding_dim,
             num_partitions=env.num_partitions,
-            agent_config=config['agent'],
+            config=config['agent'],
             device=env.device
         )
 
