@@ -51,9 +51,9 @@ class EnhancedPPOAgent(PPOAgent):
                 - use_two_tower: 是否使用双塔架构
             device: 计算设备
         """
-        # 从config中提取维度信息
-        node_embedding_dim = config.get('gnn_hidden', 64)
-        region_embedding_dim = config.get('gnn_hidden', 64) * 2  # 通常是2倍
+        # 从传入的state_dim参数中提取维度信息
+        node_embedding_dim = state_dim  # 使用传入的state_dim
+        region_embedding_dim = state_dim * 2  # 区域嵌入通常是节点嵌入的2倍
         
         # 处理设备参数
         if isinstance(device, str):
@@ -98,11 +98,15 @@ class EnhancedPPOAgent(PPOAgent):
             ).to(self.device)
             
             # 重新初始化优化器以包含新参数
-            self.optimizer = torch.optim.Adam([
+            # 保持与父类一致的优化器命名
+            lr = config.get('lr', 3e-4)
+            self.actor_optimizer = torch.optim.Adam([
                 {'params': self.actor.parameters()},
-                {'params': self.critic.parameters()},
                 {'params': self.partition_encoder.parameters()}
-            ], lr=config.get('lr', 3e-4))
+            ], lr=lr)
+            self.critic_optimizer = torch.optim.Adam(
+                self.critic.parameters(), lr=lr
+            )
             
             logger.info("EnhancedPPOAgent initialized with two-tower architecture")
         else:

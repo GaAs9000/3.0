@@ -88,13 +88,15 @@ class EnhancedPowerGridPartitioningEnv(PowerGridPartitioningEnv):
         current_assignment = self.state_manager.current_partition[node_id]
         
         # 获取节点的邻居分区（这是必要的计算）
-        neighbors = list(self.nx_graph.neighbors(node_id))
+        # 确保node_id是Python int类型，用于NetworkX接口
+        node_id_int = int(node_id.item()) if torch.is_tensor(node_id) else int(node_id)
+        neighbors = list(self.nx_graph.neighbors(node_id_int))
         neighbor_partitions = set()
         for neighbor in neighbors:
-            if neighbor in self.state_manager.current_partition:
-                partition = self.state_manager.current_partition[neighbor]
-                if partition != current_assignment and partition > 0:
-                    neighbor_partitions.add(partition)
+            # neighbor已经是int类型，可以直接用作索引
+            partition = self.state_manager.current_partition[neighbor]
+            if partition != current_assignment and partition > 0:
+                neighbor_partitions.add(partition)
         
         # 对每个邻居分区进行连通性测试
         safe_partitions = []
@@ -108,7 +110,7 @@ class EnhancedPowerGridPartitioningEnv(PowerGridPartitioningEnv):
                     safe_partitions.append(target_partition)
             else:
                 # 临时移动节点
-                test_partition = self.state_manager.current_partition.copy()
+                test_partition = self.state_manager.current_partition.clone()
                 test_partition[node_id] = target_partition
                 
                 # 检查连通性
@@ -137,9 +139,17 @@ class EnhancedPowerGridPartitioningEnv(PowerGridPartitioningEnv):
         """
         # 按分区分组节点
         partition_nodes = defaultdict(set)
-        for node, pid in partition.items():
-            if pid > 0:  # 忽略未分配的节点
-                partition_nodes[pid].add(node)
+        # 处理张量类型的partition
+        if torch.is_tensor(partition):
+            for node in range(len(partition)):
+                pid = partition[node].item()
+                if pid > 0:  # 忽略未分配的节点
+                    partition_nodes[pid].add(node)
+        else:
+            # 处理字典类型的partition
+            for node, pid in partition.items():
+                if pid > 0:  # 忽略未分配的节点
+                    partition_nodes[pid].add(node)
         
         # 检查每个分区的连通性
         for pid, nodes in partition_nodes.items():
@@ -180,10 +190,9 @@ class EnhancedPowerGridPartitioningEnv(PowerGridPartitioningEnv):
             return self.partition_features_cache[partition_id]
         
         # 获取分区节点
-        partition_nodes = [
-            node for node, pid in self.state_manager.current_partition.items()
-            if pid == partition_id
-        ]
+        # current_partition是一个张量，需要使用张量操作
+        mask = (self.state_manager.current_partition == partition_id)
+        partition_nodes = torch.where(mask)[0].cpu().tolist()
         
         if not partition_nodes:
             return self._empty_partition_features()
@@ -237,9 +246,11 @@ class EnhancedPowerGridPartitioningEnv(PowerGridPartitioningEnv):
         # 边界节点数
         boundary_nodes = 0
         for node in nodes:
-            neighbors = list(self.nx_graph.neighbors(node))
+            # 确保node是Python int类型，用于NetworkX接口
+            node_int = int(node) if not isinstance(node, int) else node
+            neighbors = list(self.nx_graph.neighbors(node_int))
             for neighbor in neighbors:
-                if neighbor in self.state_manager.current_partition:
+                if neighbor < len(self.state_manager.current_partition):
                     if self.state_manager.current_partition[neighbor] != partition_id:
                         boundary_nodes += 1
                         break
@@ -318,10 +329,11 @@ class EnhancedPowerGridPartitioningEnv(PowerGridPartitioningEnv):
         # 清理缓存
         self.partition_features_cache.clear()
         self.connectivity_cache.clear()
-        
+
         # 重新计算所有分区的特征
-        if self.enable_features_cache:
-            partition_ids = set(self.state_manager.current_partition.values())
+        if self.enable_features_cache and self.state_manager.current_partition is not None:
+            # current_partition是一个张量，不是字典，需要获取唯一值
+            partition_ids = torch.unique(self.state_manager.current_partition).cpu().tolist()
             for pid in partition_ids:
                 if pid > 0:  # 忽略未分配
                     self.get_partition_features(pid)
@@ -359,14 +371,17 @@ class EnhancedPowerGridPartitioningEnv(PowerGridPartitioningEnv):
         boundary_nodes = self.state_manager.get_boundary_nodes()
         
         for node in boundary_nodes:
+            # 确保node是Python int类型，用于字典键
+            node_int = int(node.item()) if torch.is_tensor(node) else int(node)
             safe_partitions = self.get_connectivity_safe_partitions(node)
-            connectivity_info[node] = safe_partitions
+            connectivity_info[node_int] = safe_partitions
         
         obs['connectivity_safe_partitions'] = connectivity_info
         
         # 添加分区特征信息
         partition_info = {}
-        partition_ids = set(self.state_manager.current_partition.values())
+        # current_partition是一个张量，需要获取唯一值
+        partition_ids = torch.unique(self.state_manager.current_partition).cpu().tolist()
         
         for pid in partition_ids:
             if pid > 0:
@@ -407,9 +422,11 @@ class EnhancedPowerGridPartitioningEnv(PowerGridPartitioningEnv):
         boundary_nodes = self.state_manager.get_boundary_nodes()
         
         for node in boundary_nodes:
+            # 确保node是Python int类型用于索引
+            node_int = int(node.item()) if torch.is_tensor(node) else int(node)
             safe_partitions = self.get_connectivity_safe_partitions(node)
             for pid in safe_partitions:
-                mask[node, pid - 1] = True  # 转换为0-indexed
+                mask[node_int, pid - 1] = True  # 转换为0-indexed
         
         return mask
     

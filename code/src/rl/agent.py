@@ -617,7 +617,7 @@ class PPOAgent:
         # PPO更新
         stats = {'actor_loss': 0, 'critic_loss': 0, 'entropy': 0}
 
-        for _ in range(self.k_epochs):
+        for epoch in range(self.k_epochs):
             epoch_stats = self._ppo_epoch(states, actions, old_log_probs_tensor, advantages, returns)
             for key in stats:
                 stats[key] += epoch_stats[key]
@@ -690,11 +690,11 @@ class PPOAgent:
 
         return advantages, returns
         
-    def _ppo_epoch(self, 
-                   states: List[Dict[str, torch.Tensor]], 
-                   actions: List[Tuple[int, int]], 
-                   old_log_probs: torch.Tensor, 
-                   advantages: torch.Tensor, 
+    def _ppo_epoch(self,
+                   states: List[Dict[str, torch.Tensor]],
+                   actions: List[Tuple[int, int]],
+                   old_log_probs: torch.Tensor,
+                   advantages: torch.Tensor,
                    returns: torch.Tensor) -> Dict[str, float]:
         """
         执行单个PPO更新周期。
@@ -790,14 +790,19 @@ class PPOAgent:
 
         self.scaler.scale(total_loss).backward()
 
+        # 梯度裁剪（如果启用）
         if self.max_grad_norm is not None:
+            # 在梯度裁剪前unscale梯度
             self.scaler.unscale_(self.actor_optimizer)
             self.scaler.unscale_(self.critic_optimizer)
             all_params = list(self.actor.parameters()) + list(self.critic.parameters())
             torch.nn.utils.clip_grad_norm_(all_params, self.max_grad_norm)
 
+        # 执行优化器步骤
         self.scaler.step(self.actor_optimizer)
         self.scaler.step(self.critic_optimizer)
+
+        # 每次都更新scaler - 这是PyTorch AMP的正确使用方式
         self.scaler.update()
 
         return {

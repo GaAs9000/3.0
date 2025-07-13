@@ -147,16 +147,37 @@ class EnvironmentFactory:
     def create_basic_environment(hetero_data: HeteroData, config: Dict[str, Any]) -> EnhancedPowerGridPartitioningEnv:
         """创建基础环境（无场景生成）"""
         env_config = config['environment']
-        
+
+        # 确保设备配置正确
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        config_copy = config.copy()
+        config_copy['device'] = device
+        config_copy['reward_weights'] = env_config.get('reward_weights', {})
+        config_copy['max_steps'] = env_config.get('max_steps', 200)
+        config_copy['enable_features_cache'] = env_config.get('enable_features_cache', True)
+
+        # 使用预训练的GAT编码器生成节点嵌入
+        encoder = AgentFactory.setup_gnn_pretraining(hetero_data, config)
+        encoder = encoder.to(device)
+
+        with torch.no_grad():
+            node_embeddings = encoder.encode_nodes(hetero_data)
+
+        # 调试：打印节点嵌入的维度信息
+        for node_type, embeddings in node_embeddings.items():
+            logger.info(f"节点类型 {node_type}: 嵌入形状 {embeddings.shape}")
+
+        logger.info(f"GAT编码器生成节点嵌入完成: {list(node_embeddings.keys())}")
+
         # 使用原有的create_enhanced_environment函数，这个函数会处理所有必需参数
         env = create_enhanced_environment(
             hetero_data=hetero_data,
-            node_embeddings={},  # 空字典，将在GAT编码后填充
+            node_embeddings=node_embeddings,
             num_partitions=env_config['num_partitions'],
-            config=config,
+            config=config_copy,
             use_enhanced=True
         )
-        
+
         logger.info(f"基础环境创建完成: {env.total_nodes}节点, {env.num_partitions}分区")
         return env
     
@@ -198,7 +219,11 @@ class AgentFactory:
                     device: torch.device) -> Any:
         """创建增强智能体（双塔架构）"""
         agent_config = config['agent']
-        
+
+        # 调试：打印状态维度信息
+        logger.info(f"环境状态维度: {env.state_manager.embedding_dim}")
+        logger.info(f"分区数: {env.num_partitions}")
+
         agent = create_enhanced_agent(
             state_dim=env.state_manager.embedding_dim,
             num_partitions=env.num_partitions,
@@ -210,43 +235,75 @@ class AgentFactory:
         return agent
     
     @staticmethod
-    def setup_gnn_pretraining(agent: Any, config: Dict[str, Any], 
-                            training_source: Union[List, Any]) -> bool:
-        """设置GNN预训练（双塔架构必需）"""
+    def setup_gnn_pretraining(hetero_data: Any, config: Dict[str, Any],
+                            training_source: Union[List, Any] = None) -> Any:
+        """设置GNN预训练（双塔架构必需）
+
+        Args:
+            hetero_data: 异构图数据，用于创建GAT编码器
+            config: 配置字典
+            training_source: 训练数据源（可选）
+
+        Returns:
+            预训练后的GAT编码器，如果失败则返回新创建的编码器
+        """
         if not config.get('gnn_pretrain', {}).get('enabled', True):
-            return False
-            
+            # 如果不启用预训练，直接创建新的编码器
+            from gat import create_production_encoder
+            gat_config = config.get('gat', {})
+            return create_production_encoder(hetero_data, gat_config)
+
         try:
+            # 提取损失权重
+            loss_weights = config['gnn_pretrain'].get('loss_weights', {
+                'smoothness': 0.4,
+                'contrastive': 0.3,
+                'physics': 0.3
+            })
+
+            # 提取早停配置
+            early_stopping = config['gnn_pretrain'].get('early_stopping', {})
+
             pretrain_config = PretrainConfig(
                 epochs=config['gnn_pretrain'].get('epochs', 50),
                 batch_size=config['gnn_pretrain'].get('batch_size', 32),
                 learning_rate=config['gnn_pretrain'].get('learning_rate', 1e-3),
-                loss_weights=config['gnn_pretrain'].get('loss_weights', {
-                    'smoothness': 0.4,
-                    'contrastive': 0.3,
-                    'physics': 0.3
-                }),
-                augmentation=config['gnn_pretrain'].get('augmentation', {}),
-                early_stopping=config['gnn_pretrain'].get('early_stopping', {}),
-                checkpoint_dir=config['gnn_pretrain'].get('checkpoint_dir', 'data/latest/pretrain_checkpoints'),
-                save_best_only=config['gnn_pretrain'].get('save_best_only', True)
+                # 分别设置损失权重
+                smoothness_weight=loss_weights.get('smoothness', 0.4),
+                contrastive_weight=loss_weights.get('contrastive', 0.3),
+                physics_weight=loss_weights.get('physics', 0.3),
+                # 早停参数
+                early_stopping_patience=early_stopping.get('patience', 10),
+                early_stopping_min_delta=early_stopping.get('min_delta', 1e-4),
+                # 检查点参数
+                checkpoint_dir=config['gnn_pretrain'].get('checkpoint_dir', 'data/latest/pretrain_checkpoints')
             )
-            
-            # 获取GAT编码器
-            gat_encoder = next(m for m in agent.actor.modules() 
-                             if hasattr(m, 'convs') and hasattr(m, 'heads'))
-            
+
+            # 创建GAT编码器
+            from gat import create_production_encoder
+            gat_config = config.get('gat', {})
+            gat_encoder = create_production_encoder(hetero_data, gat_config)
+            logger.info(f"创建GAT编码器: {type(gat_encoder).__name__}")
+
             # 创建预训练器
             pretrainer = GNNPretrainer(gat_encoder, pretrain_config)
-            
-            # 执行预训练
-            pretrainer.train(training_source)
-            logger.info("GNN预训练完成")
-            return True
-            
+            logger.info("GNNPretrainer创建成功")
+
+            # 执行预训练（如果有训练数据源）
+            if training_source:
+                pretrainer.train(training_source)
+                logger.info("GNN预训练完成")
+            else:
+                logger.info("跳过GNN预训练（无训练数据源）")
+
+            return gat_encoder
+
         except Exception as e:
-            logger.warning(f"GNN预训练失败: {e}，继续使用未预训练的模型")
-            return False
+            logger.warning(f"GNN预训练失败: {e}，使用未预训练的模型")
+            # 返回新创建的编码器
+            from gat import create_production_encoder
+            gat_config = config.get('gat', {})
+            return create_production_encoder(hetero_data, gat_config)
 
 
 class LoggerFactory:
@@ -522,7 +579,12 @@ class BaseTrainer(ABC):
             episode_info = {}
             
             for step in range(200):  # 最大步数
-                action, _, _ = agent.select_action(state, training=False)
+                # EnhancedPPOAgent返回4个值，普通PPOAgent返回3个值
+                result = agent.select_action(state, training=False)
+                if len(result) == 4:
+                    action, _, _, _ = result  # 忽略log_prob, value, embeddings
+                else:
+                    action, _, _ = result  # 忽略log_prob, value
                 
                 if action is None:
                     break
@@ -642,16 +704,26 @@ class BasicTrainer(BaseTrainer):
             ref_case = self.config['data'].get('reference_case', 'ieee14')
             mpc = self.data_manager.load_power_grid_data(ref_case)
             hetero_data = self.data_manager.process_data(mpc, self.config, self.device)
-            
+
             # 2. 创建基础环境（无场景生成）
-            env = EnvironmentFactory.create_basic_environment(hetero_data, self.config)
-            
+            try:
+                env = EnvironmentFactory.create_basic_environment(hetero_data, self.config)
+            except Exception as e:
+                logger.error(f"创建基础环境失败: {e}")
+                import traceback
+                logger.error(f"详细错误信息: {traceback.format_exc()}")
+                raise
+
             # 3. 创建智能体
-            agent = AgentFactory.create_agent(env, self.config, self.device)
+            try:
+                agent = AgentFactory.create_agent(env, self.config, self.device)
+            except Exception as e:
+                logger.error(f"创建智能体失败: {e}")
+                import traceback
+                logger.error(f"详细错误信息: {traceback.format_exc()}")
+                raise
             
-            # 4. GNN预训练
-            training_source = [hetero_data]
-            AgentFactory.setup_gnn_pretraining(agent, self.config, training_source)
+            # 4. GNN预训练已在环境创建时完成
             
             # 5. 训练配置
             training_config = self.config['training']
@@ -664,33 +736,50 @@ class BasicTrainer(BaseTrainer):
             
             # 7. 基础训练循环
             logger.info(f"开始基础训练: {num_episodes} episodes")
-            
+
             for episode in range(num_episodes):
-                state, _ = env.reset()
-                episode_reward = 0
-                episode_length = 0
-                episode_info = {}
-                
-                # Episode执行
-                for step in range(max_steps_per_episode):
-                    action, log_prob, value = agent.select_action(state, training=True)
-                    
-                    if action is None:
-                        break
-                    
-                    next_state, reward, terminated, truncated, info = env.step(action)
-                    done = terminated or truncated
-                    
-                    agent.store_experience(state, action, reward, log_prob, value, done)
-                    episode_reward += reward
-                    episode_length += 1
-                    state = next_state
-                    
-                    if info:
-                        episode_info.update(info)
-                    
-                    if done:
-                        break
+                try:
+                    state, _ = env.reset()
+                    episode_reward = 0
+                    episode_length = 0
+                    episode_info = {}
+
+                    # Episode执行
+                    for step in range(max_steps_per_episode):
+                        try:
+                            # EnhancedPPOAgent返回4个值，普通PPOAgent返回3个值
+                            result = agent.select_action(state, training=True)
+                            if len(result) == 4:
+                                action, log_prob, value, _ = result  # 忽略embeddings
+                            else:
+                                action, log_prob, value = result
+
+                            if action is None:
+                                break
+
+                            next_state, reward, terminated, truncated, info = env.step(action)
+                            done = terminated or truncated
+
+                            agent.store_experience(state, action, reward, log_prob, value, done)
+                            episode_reward += reward
+                            episode_length += 1
+                            state = next_state
+
+                            if info:
+                                episode_info.update(info)
+
+                            if done:
+                                break
+                        except Exception as e:
+                            logger.error(f"Episode {episode}, Step {step} 执行失败: {e}")
+                            import traceback
+                            logger.error(f"详细错误信息: {traceback.format_exc()}")
+                            raise
+                except Exception as e:
+                    logger.error(f"Episode {episode} 失败: {e}")
+                    import traceback
+                    logger.error(f"详细错误信息: {traceback.format_exc()}")
+                    raise
                 
                 # 记录训练日志
                 self.logger.log_episode(episode, episode_reward, episode_length, episode_info)

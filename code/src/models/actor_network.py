@@ -25,21 +25,39 @@ logger = logging.getLogger(__name__)
 def scatter_mean(src: torch.Tensor, index: torch.Tensor, dim: int = 0) -> torch.Tensor:
     """
     计算分组平均（scatter mean）
-    
+
     Args:
         src: 源张量
         index: 分组索引
         dim: 聚合维度
-    
+
     Returns:
         分组平均结果
     """
+    if src.numel() == 0:
+        return torch.zeros(0, *src.shape[1:], dtype=src.dtype, device=src.device)
+
     dim_size = int(index.max()) + 1
     out = torch.zeros(dim_size, *src.shape[1:], dtype=src.dtype, device=src.device)
-    ones = torch.ones_like(index, dtype=src.dtype)
+
+    # 确保index的形状与src的第一个维度匹配
+    if index.dim() != 1 or index.size(0) != src.size(0):
+        print(f"DEBUG: src shape: {src.shape}, index shape: {index.shape}")
+        print(f"DEBUG: src device: {src.device}, index device: {index.device}")
+        print(f"DEBUG: src dtype: {src.dtype}, index dtype: {index.dtype}")
+        raise ValueError(f"Index shape {index.shape} doesn't match src first dimension {src.size(0)}")
+
+    ones = torch.ones(index.size(0), dtype=src.dtype, device=src.device)
     count = torch.zeros(dim_size, dtype=src.dtype, device=src.device)
     count.scatter_add_(0, index, ones)
-    out.scatter_add_(0, index, src)
+
+    # 扩展索引张量以匹配源张量的维度
+    if src.dim() > 1:
+        # 将1维索引扩展为与src相同的维度
+        index_expanded = index.unsqueeze(-1).expand(-1, src.size(1))
+        out.scatter_add_(0, index_expanded, src)
+    else:
+        out.scatter_add_(0, index, src)
     count = count.clamp(min=1)
     count = count.view(-1, *([1] * (src.dim() - 1)))
     return out / count

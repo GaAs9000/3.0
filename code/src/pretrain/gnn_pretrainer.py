@@ -306,8 +306,8 @@ class GNNPretrainer:
             min_lr=1e-6
         )
         
-        # 混合精度训练
-        self.scaler = torch.cuda.amp.GradScaler() if torch.cuda.is_available() else None
+        # 混合精度训练 - 使用PyTorch 2025最佳实践
+        self.scaler = torch.amp.GradScaler(enabled=(torch.cuda.is_available()))
         
         # 训练状态
         self.current_epoch = 0
