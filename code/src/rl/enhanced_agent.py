@@ -31,17 +31,17 @@ class EnhancedPPOAgent(PPOAgent):
     继承自原PPOAgent，重写关键方法以支持双塔架构
     """
     
-    def __init__(self, 
-                 state_dim: int,  # 保留以兼容，但不使用
+    def __init__(self,
+                 state_dim: int,
                  num_partitions: int,
                  config: Dict[str, Any],
                  device: str = 'auto'):
         """
         初始化增强的PPO智能体
-        
+
         Args:
-            state_dim: 状态维度（保留以兼容）
-            num_partitions: 初始分区数（用于兼容）
+            state_dim: 状态维度
+            num_partitions: 初始分区数
             config: 配置字典，需包含:
                 - node_dim: 节点特征维度
                 - edge_dim: 边特征维度
@@ -87,7 +87,7 @@ class EnhancedPPOAgent(PPOAgent):
                 'strategy_vector_dim': self.strategy_vector_dim,
                 'hidden_dim': config.get('actor_hidden_dim', 256),
                 'dropout': config.get('dropout', 0.1),
-                'backward_compatible': False  # 使用新接口
+
             }, use_two_tower=True).to(self.device)
             
             # 创建分区编码器
@@ -132,10 +132,7 @@ class EnhancedPPOAgent(PPOAgent):
             value: 状态价值估计
             embeddings: 嵌入信息（如果return_embeddings=True）
         """
-        if not self.use_two_tower:
-            # 回退到原始实现
-            action, log_prob, value = super().select_action(state, training)
-            return action, log_prob, value, None
+        # 增强智能体始终使用双塔架构
         
         with torch.no_grad():
             # 1. 准备批处理状态
@@ -241,7 +238,7 @@ class EnhancedPPOAgent(PPOAgent):
             node_safe_partitions = state['connectivity_safe_partitions'].get(node_id, [])
             return node_safe_partitions
         
-        # 兼容模式：使用action_mask
+        # 使用action_mask
         if hasattr(batched_state, 'action_mask'):
             # 找到节点在boundary_nodes中的位置
             node_positions = (batched_state.boundary_nodes == node_id).nonzero(as_tuple=True)[0]
@@ -329,22 +326,17 @@ class EnhancedPPOAgent(PPOAgent):
 def create_enhanced_agent(state_dim: int,
                          num_partitions: int,
                          config: Dict[str, Any],
-                         device: str = 'auto') -> Union[EnhancedPPOAgent, PPOAgent]:
+                         device: str = 'auto') -> EnhancedPPOAgent:
     """
-    工厂函数：创建PPO智能体
-    
+    工厂函数：创建增强PPO智能体
+
     Args:
         state_dim: 状态维度
         num_partitions: 分区数
         config: 配置字典
         device: 设备
-    
+
     Returns:
-        PPO智能体实例
+        增强PPO智能体实例
     """
-    use_enhanced = config.get('use_two_tower', True)
-    
-    if use_enhanced:
-        return EnhancedPPOAgent(state_dim, num_partitions, config, device)
-    else:
-        return PPOAgent(state_dim, num_partitions, config, device)
+    return EnhancedPPOAgent(state_dim, num_partitions, config, device)

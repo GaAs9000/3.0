@@ -42,9 +42,6 @@ def scatter_mean(src: torch.Tensor, index: torch.Tensor, dim: int = 0) -> torch.
 
     # 确保index的形状与src的第一个维度匹配
     if index.dim() != 1 or index.size(0) != src.size(0):
-        print(f"DEBUG: src shape: {src.shape}, index shape: {index.shape}")
-        print(f"DEBUG: src device: {src.device}, index device: {index.device}")
-        print(f"DEBUG: src dtype: {src.dtype}, index dtype: {index.dtype}")
         raise ValueError(f"Index shape {index.shape} doesn't match src first dimension {src.size(0)}")
 
     ones = torch.ones(index.size(0), dtype=src.dtype, device=src.device)
@@ -232,64 +229,7 @@ class EnhancedActorNetwork(nn.Module):
         return F.softmax(masked_logits, dim=-1)
 
 
-class BackwardCompatibleActorNetwork(EnhancedActorNetwork):
-    """
-    向后兼容的Actor网络
-    
-    提供与原ActorNetwork相同的接口，
-    但内部使用双塔架构。
-    """
-    
-    def __init__(self, 
-                 node_embedding_dim: int,
-                 region_embedding_dim: int,
-                 num_partitions: int,  # 保留以兼容
-                 hidden_dim: int = 256,
-                 dropout: float = 0.1,
-                 strategy_vector_dim: int = 128):
-        """
-        保持原有接口，但添加strategy_vector_dim参数
-        """
-        super().__init__(
-            node_embedding_dim=node_embedding_dim,
-            region_embedding_dim=region_embedding_dim,
-            strategy_vector_dim=strategy_vector_dim,
-            hidden_dim=hidden_dim,
-            dropout=dropout
-        )
-        
-        self.num_partitions = num_partitions
-        
-        # 添加一个简单的线性投影层，用于兼容模式
-        # 将策略向量投影到num_partitions维
-        self.compatibility_projection = nn.Linear(strategy_vector_dim, num_partitions)
-        
-        logger.info(f"BackwardCompatibleActorNetwork: num_partitions={num_partitions}")
-    
-    def forward_compatible(self, batched_state):
-        """
-        兼容模式的前向传播
-        
-        返回与原ActorNetwork相同格式的输出
-        """
-        bs = batched_state
-        
-        # 获取基础输出
-        node_logits, strategy_vectors = super().forward(batched_state)
-        
-        if strategy_vectors.size(0) == 0:
-            return (node_logits, 
-                    torch.zeros(0, self.num_partitions, device=node_logits.device))
-        
-        # 将策略向量投影到partition空间（仅用于兼容）
-        partition_logits = self.compatibility_projection(strategy_vectors)
-        
-        # 应用动作掩码
-        if hasattr(bs, 'action_mask') and bs.action_mask is not None:
-            boundary_mask = bs.action_mask[bs.boundary_nodes]
-            partition_logits = partition_logits.masked_fill(~boundary_mask, -1e9)
-        
-        return node_logits, partition_logits
+
 
 
 def create_actor_network(config: Dict, use_two_tower: bool = True) -> nn.Module:
@@ -303,34 +243,10 @@ def create_actor_network(config: Dict, use_two_tower: bool = True) -> nn.Module:
     Returns:
         Actor网络实例
     """
-    if use_two_tower:
-        if config.get('backward_compatible', False):
-            return BackwardCompatibleActorNetwork(
-                node_embedding_dim=config['node_embedding_dim'],
-                region_embedding_dim=config['region_embedding_dim'],
-                num_partitions=config.get('num_partitions', 3),
-                hidden_dim=config.get('hidden_dim', 256),
-                dropout=config.get('dropout', 0.1),
-                strategy_vector_dim=config.get('strategy_vector_dim', 128)
-            )
-        else:
-            return EnhancedActorNetwork(
-                node_embedding_dim=config['node_embedding_dim'],
-                region_embedding_dim=config['region_embedding_dim'],
-                strategy_vector_dim=config.get('strategy_vector_dim', 128),
-                hidden_dim=config.get('hidden_dim', 256),
-                dropout=config.get('dropout', 0.1)
-            )
-    else:
-        # [已废弃] 不再支持旧的ActorNetwork
-        # 如果需要兼容模式，使用backward_compatible=True的EnhancedActorNetwork
-        if config.get('backward_compatible', False):
-            return EnhancedActorNetwork(
-                node_embedding_dim=config['node_embedding_dim'],
-                region_embedding_dim=config['region_embedding_dim'],
-                strategy_vector_dim=config.get('strategy_vector_dim', 128),
-                hidden_dim=config.get('hidden_dim', 256),
-                dropout=config.get('dropout', 0.1)
-            )
-        else:
-            raise ValueError("Old ActorNetwork is deprecated. Use use_two_tower=True or set backward_compatible=True")
+    return EnhancedActorNetwork(
+        node_embedding_dim=config['node_embedding_dim'],
+        region_embedding_dim=config['region_embedding_dim'],
+        strategy_vector_dim=config.get('strategy_vector_dim', 128),
+        hidden_dim=config.get('hidden_dim', 256),
+        dropout=config.get('dropout', 0.1)
+    )

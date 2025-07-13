@@ -66,6 +66,7 @@ gat:
 # =====================================================
 agent:
   type: ppo
+  use_two_tower: true             # 使用双塔架构（生产级）
   strategy_vector_dim: 128        # 策略向量维度
   partition_encoder:              # 动作塔（分区编码器）
     embedding_dim: 128

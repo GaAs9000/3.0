@@ -18,14 +18,11 @@ try:
     from gat import create_hetero_graph_encoder
 except ImportError:
     # 如果相对导入失败，使用绝对导入
-    try:
-        from rl.environment import PowerGridPartitioningEnv
-        from rl.scenario_generator import ScenarioGenerator
-        from rl.scenario_context import ScenarioContext
-        from data_processing import PowerGridDataProcessor
-        from gat import create_hetero_graph_encoder
-    except ImportError:
-        print("警告：无法导入所有依赖模块，某些功能可能不可用")
+    from rl.environment import PowerGridPartitioningEnv
+    from rl.scenario_generator import ScenarioGenerator
+    from rl.scenario_context import ScenarioContext
+    from data_processing import PowerGridDataProcessor
+    from gat import create_hetero_graph_encoder
 
 
 class PowerGridPartitionGymEnv(gym.Env):

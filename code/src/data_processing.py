@@ -457,29 +457,7 @@ class PowerGridDataProcessor:
         else:
             return getattr(self, scaler_attr).transform(features)
 
-    # 向后兼容方法
-    def process_matpower_data(self, mpc: Dict) -> Tuple[float, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-        """
-        向后兼容的方法，现在调用私有的_process_matpower_data方法
-        """
-        print("⚠️ 提示：process_matpower_data现在使用简化异构图实现")
-        return self._process_matpower_data(mpc)
-    
-    def create_pyg_hetero_data(self, df_nodes: pd.DataFrame, df_edges: pd.DataFrame, 
-                               df_edge_features: pd.DataFrame) -> HeteroData:
-        """
-        向后兼容的方法，现在调用简化的异构图创建方法
-        """
-        print("⚠️ 提示：create_pyg_hetero_data现在使用简化异构图实现")
-        return self._create_simplified_hetero_data(df_nodes, df_edges, df_edge_features)
 
-    def create_pyg_data(self, df_nodes: pd.DataFrame, df_edges: pd.DataFrame,
-                       df_edge_features: pd.DataFrame):
-        """
-        向后兼容的方法，现在重定向到简化异构图创建
-        """
-        print("⚠️ 提示：create_pyg_data现在使用简化异构图实现")
-        return self._create_simplified_hetero_data(df_nodes, df_edges, df_edge_features)
 
     def _estimate_voltage_constraints(self, bus: np.ndarray, baseMVA: float, constraint_type: str) -> np.ndarray:
         """

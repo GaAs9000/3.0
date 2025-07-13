@@ -93,6 +93,7 @@ class DataManager:
             case_mapping = {
                 'ieee14': pn.case14,
                 'ieee30': pn.case30,
+                'ieee39': pn.case39,
                 'ieee57': pn.case57,
                 'ieee118': pn.case118
             }
@@ -866,7 +867,7 @@ class TopologyTrainer(BaseTrainer):
             
             # 5. GNN预训练（使用多尺度数据）
             training_source = scale_generator
-            AgentFactory.setup_gnn_pretraining(agent, self.config, training_source)
+            AgentFactory.setup_gnn_pretraining(env.hetero_data, self.config, training_source)
             
             # 6. 训练配置
             training_config = self.config['training']
@@ -997,7 +998,7 @@ class AdaptiveTrainer(BaseTrainer):
             
             # 5. GNN预训练
             training_source = [env.hetero_data] if hasattr(env, 'hetero_data') else [mpc]
-            AgentFactory.setup_gnn_pretraining(agent, self.config, training_source)
+            AgentFactory.setup_gnn_pretraining(env.hetero_data, self.config, training_source)
             
             # 6. 训练配置
             training_config = self.config['training']
@@ -1209,7 +1210,7 @@ class UnifiedTrainer(BaseTrainer):
             
             # 8. GNN预训练
             training_source = scale_generator if scale_generator else [env.hetero_data] if hasattr(env, 'hetero_data') else [mpc]
-            AgentFactory.setup_gnn_pretraining(agent, self.config, training_source)
+            AgentFactory.setup_gnn_pretraining(env.hetero_data, self.config, training_source)
             
             # 9. 训练配置
             training_config = self.config['training']

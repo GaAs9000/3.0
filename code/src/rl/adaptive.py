@@ -13,7 +13,7 @@ import numpy as np
 import torch
 from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass
-from collections import deque
+from collections import deque, defaultdict
 import logging
 import time
 
