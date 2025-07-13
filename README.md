@@ -36,17 +36,18 @@ pip install pandapower networkx seaborn rich
 
 ### 立即开始训练
 ```bash
-# 查看配置（不启动训练）
-python train.py --mode ieee118
+# 查看配置（不启动训练，仅加载参考拓扑）
+python train.py --show-config
 
-# 开始训练
-python train.py --mode ieee118 --run
+# 开始跨拓扑训练（推荐）
+python train.py --run
 
-# 其他训练选项
-python train.py --mode fast --run      # 快速训练 - IEEE14网络
-python train.py --mode full --run      # 完整训练 - IEEE30网络
-python train.py --mode ieee57 --run    # 中等规模 - IEEE57网络
-python train.py --mode ieee118 --run   # 大规模 - IEEE118网络
+# 单拓扑复现（可选）
+python train.py --single --case ieee57 --run
+
+# 传统预设仍支持：
+python train.py --mode fast --run      # 快速验证 (IEEE14 参考网)
+python train.py --mode full --run      # 中等规模 (IEEE30 参考网)
 ```
 
 ### 模型测试和评估

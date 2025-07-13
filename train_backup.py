@@ -1,0 +1,2589 @@
+#!/usr/bin/env python3
+"""
+电力网络分区强化学习训练模块
+
+专注于模型训练功能：
+- 配置加载和验证
+- 数据处理和环境创建
+- 模型训练和优化
+- 基础可视化和结果保存
+- 训练监控和日志记录
+"""
+
+import torch
+import numpy as np
+import argparse
+import yaml
+import os
+import sys
+import time
+import json
+import warnings
+import shutil
+from pathlib import Path
+from typing import Dict, List, Tuple, Optional, Any
+from collections import deque
+from tqdm import tqdm
+import queue
+import threading
+from rich.panel import Panel
+
+# 添加code/src到路径
+sys.path.append(str(Path(__file__).parent / 'code' / 'src'))
+# 添加code到路径以便导入baseline
+sys.path.append(str(Path(__file__).parent / 'code'))
+# 添加code/utils到路径以便导入路径辅助工具
+sys.path.append(str(Path(__file__).parent / 'code' / 'utils'))
+
+# --- 核心模块导入 ---
+try:
+    import gymnasium as gym
+    from torch_geometric.data import HeteroData
+    from data_processing import PowerGridDataProcessor
+    from gat import create_production_encoder
+    from rl.environment import PowerGridPartitioningEnv
+    from rl.agent import PPOAgent
+    from rl.adaptive import AdaptiveDirector
+    # 导入增强版组件（双塔架构）
+    from rl.enhanced_environment import EnhancedPowerGridPartitioningEnv, create_enhanced_environment
+    from rl.enhanced_agent import EnhancedPPOAgent, create_enhanced_agent
+    from pretrain.gnn_pretrainer import GNNPretrainer, PretrainConfig
+    from rl.scale_aware_generator import ScaleAwareSyntheticGenerator, GridGenerationConfig
+    CRITICAL_DEPS_AVAILABLE = True
+except ImportError as e:
+    CRITICAL_DEPS_AVAILABLE = False
+    MISSING_DEP_ERROR = e
+
+# --- 全局 NaN/Inf 异常检测开关 ---
+torch.autograd.set_detect_anomaly(False)
+warnings.filterwarnings("error", message=".*NaN.*", category=RuntimeWarning)
+warnings.filterwarnings('ignore', category=UserWarning)
+
+def safe_print(message: str):
+    """安全的Unicode打印函数，避免编码错误"""
+    try:
+        print(message)
+    except UnicodeEncodeError:
+        # 移除Unicode字符，使用ASCII替代
+        ascii_message = message.encode('ascii', 'replace').decode('ascii')
+        print(ascii_message)
+
+# 导入电力系统数据加载函数
+try:
+    from scipy.io import loadmat
+except ImportError:
+    print("⚠️ 警告: scipy未安装，无法加载MATPOWER文件")
+
+try:
+    import pandapower as pp
+    import pandapower.networks as pn
+    _pandapower_available = True
+except ImportError:
+    _pandapower_available = False
+    print("⚠️ 警告: pandapower未安装，无法加载IEEE标准测试系统")
+
+
+def check_dependencies():
+    """检查可选依赖"""
+    deps = {
+        'use_tensorboard': False,
+        'plotly': False,
+        'networkx': False
+    }
+
+    try:
+        from torch.utils.tensorboard import SummaryWriter
+        deps['use_tensorboard'] = True
+    except ImportError:
+        pass
+
+    try:
+        import plotly.graph_objects as go
+        deps['plotly'] = True
+    except ImportError:
+        pass
+
+    try:
+        import networkx as nx
+        deps['networkx'] = True
+    except ImportError:
+        pass
+
+    return deps
+
+
+def load_power_grid_data(case_name: str) -> Dict:
+    """
+    加载电力网络数据。
+    该函数现在只从pandapower加载数据，以确保数据源的一致性和高质量。
+    如果加载失败，将直接抛出异常。
+
+    Args:
+        case_name: 案例名称 (ieee14, ieee30, ieee57, ieee118)
+
+    Returns:
+        MATPOWER格式的电网数据字典
+    """
+    if not _pandapower_available:
+        raise ImportError("Pandapower库未安装或不可用，无法加载电网数据。")
+
+    try:
+        # 这是唯一应该被执行的数据加载路径
+        return load_from_pandapower(case_name)
+    except Exception as e:
+        print(f"❌ 从PandaPower加载案例 '{case_name}' 时发生致命错误。")
+        print("这可能是由于拼写错误、案例不存在或PandaPower库本身的问题。")
+        # 重新抛出异常，以便程序停止
+        raise e
+
+
+def load_from_pandapower(case_name: str) -> Dict:
+    """
+    从PandaPower加载IEEE标准测试系统
+
+    Args:
+        case_name: 案例名称 (ieee14, ieee30, ieee57, ieee118)
+
+    Returns:
+        MATPOWER格式的电网数据字典
+    """
+    print(f"从PandaPower加载 {case_name.upper()} 数据...")
+
+    # 映射案例名称到PandaPower函数
+    case_mapping = {
+        'ieee14': pn.case14,
+        'ieee30': pn.case30,
+        'ieee57': pn.case57,
+        'ieee118': pn.case118
+    }
+
+    if case_name not in case_mapping:
+        raise ValueError(f"不支持的案例: {case_name}")
+
+    # 加载PandaPower网络
+    net = case_mapping[case_name]()
+    from rich_output import rich_success
+    rich_success(f"成功加载 {case_name.upper()}: {len(net.bus)} 节点, {len(net.line)} 线路")
+
+    # 转换为MATPOWER格式
+    mpc = convert_pandapower_to_matpower(net)
+
+    return mpc
+
+
+def convert_pandapower_to_matpower(net) -> Dict:
+    """
+    将PandaPower网络转换为MATPOWER格式（使用官方converter）
+
+    Args:
+        net: PandaPower网络对象
+
+    Returns:
+        MATPOWER格式的电网数据字典
+    """
+    # 使用官方 converter 进行可靠转换，避免手写转换中的精度和维护问题
+    import pandapower as pp
+    from pandapower.converter import to_mpc
+
+    # 确保网络已有潮流结果；如果没有，则先运行一次平坦启动潮流
+    try:
+        if getattr(net, "res_bus", None) is None or net.res_bus.empty:
+            pp.runpp(net, init="flat", calculate_voltage_angles=False, numba=False)
+    except Exception:
+        # 如果潮流失败，仍继续转换（to_mpc 允许无结果转换，但会给出警告）
+        pass
+
+    mpc_wrap = to_mpc(net)
+
+    # 提取MPC数据
+    if isinstance(mpc_wrap, dict) and "mpc" in mpc_wrap:
+        mpc = mpc_wrap["mpc"]
+    else:
+        mpc = mpc_wrap
+
+    return mpc
+
+
+class TrainingLogger:
+    """训练日志记录器 - 支持TensorBoard监控"""
+
+    def __init__(self, config: Dict[str, Any], total_episodes: int):
+        """初始化日志记录器"""
+        self.config = config
+        self.start_time = time.time()
+        self.episode_rewards = []
+        self.episode_lengths = []
+        self.actor_losses = []
+        self.critic_losses = []
+        self.entropies = []
+        self.success_rates = []
+        self.load_cvs = []
+        self.coupling_edges = []
+        self.best_reward = -float('inf')
+        self.total_episodes = total_episodes
+
+        # 智能自适应课程学习相关指标
+        self.curriculum_stages = []
+        self.stage_transitions = []
+        self.director_decisions = []
+
+        log_config = config.get('logging', {})
+        self.metrics_save_interval = log_config.get('metrics_save_interval', 100)
+
+        # 移除Rich状态面板，简化输出
+        
+        # 使用简单进度条
+        try:
+            from tqdm import tqdm
+            self.progress_bar = tqdm(total=total_episodes, desc="🚀 训练进度",
+                                   bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]')
+            self.use_rich = False
+        except ImportError:
+            # 如果tqdm也不可用，使用最基本的进度显示
+            self.progress_bar = None
+            self.use_rich = False
+
+        # 设置TensorBoard
+        self.use_tensorboard = log_config.get('use_tensorboard', False)
+        self.tensorboard_writer = self._setup_tensorboard() if self.use_tensorboard else None
+
+        # HTML仪表板已移动到test.py中用于性能分析
+
+        # 移除TUI集成，简化为基本输出
+        self.use_tui = False
+
+
+
+    def _create_status_panel(self, episode: int, reward: float, info: Dict = None):
+        """创建简洁的状态面板"""
+        try:
+            from rich.panel import Panel
+            from rich.table import Table
+            
+            # 计算统计数据
+            avg_reward = sum(self.episode_rewards[-10:]) / min(len(self.episode_rewards), 10) if self.episode_rewards else 0
+            progress_pct = (episode + 1) / self.total_episodes * 100
+            
+            # 【改进】计算多层次成功率
+            success_stats = self._compute_multi_level_success_rate()
+            
+            # 提取质量指标
+            quality_score = None
+            if info and 'reward_components' in info:
+                components = info['reward_components']
+                quality_score = components.get('quality_score')
+            
+            # 创建主表格
+            table = Table.grid(padding=1)
+            table.add_column("指标", style="bold cyan", min_width=12)
+            table.add_column("数值", justify="right", min_width=15)
+            table.add_column("状态", justify="center", min_width=8)
+            
+            # 进度信息
+            table.add_row("训练进度", f"{episode+1:,}/{self.total_episodes:,} ({progress_pct:.1f}%)", "📊")
+            
+            # 奖励信息
+            reward_color = "bold green" if reward > 0 else "yellow" if reward > -1 else "red"
+            reward_icon = "🎉" if reward > 0 else "⚡" if reward > -1 else "❌"
+            table.add_row("当前奖励", f"[{reward_color}]{reward:.3f}[/{reward_color}]", reward_icon)
+            
+            # 最佳奖励
+            best_color = "bold green" if self.best_reward > 0 else "cyan"
+            best_icon = "🏆" if self.best_reward > 0 else "🎯"
+            table.add_row("最佳奖励", f"[{best_color}]{self.best_reward:.3f}[/{best_color}]", best_icon)
+            
+            # 平均奖励（最近10轮）
+            avg_color = "green" if avg_reward > -1 else "yellow" if avg_reward > -2 else "red"
+            table.add_row("平均奖励", f"[{avg_color}]{avg_reward:.3f}[/{avg_color}]", "📈")
+            
+            # 【改进】智能成功率显示
+            success_display, success_icon = self._format_success_rate_display(success_stats)
+            table.add_row("学习进展", success_display, success_icon)
+            
+            # 质量分数
+            if quality_score is not None:
+                quality_color = "green" if quality_score > 0.4 else "yellow" if quality_score > 0.3 else "red"
+                table.add_row("质量分数", f"[{quality_color}]{quality_score:.3f}[/{quality_color}]", "⭐")
+            
+            # 【改进】智能系统状态评估
+            system_status = self._evaluate_system_status(success_stats, avg_reward)
+            table.add_row("系统状态", system_status, "🔧")
+            
+            # 运行时间
+            elapsed = time.time() - self.start_time
+            if elapsed < 60:
+                time_str = f"{elapsed:.0f}秒"
+            elif elapsed < 3600:
+                time_str = f"{elapsed/60:.1f}分钟"
+            else:
+                time_str = f"{elapsed/3600:.1f}小时"
+            table.add_row("运行时间", time_str, "⏱️")
+            
+            title = "[bold blue]🚀 电力网络分区训练监控[/bold blue]"
+            return Panel(table, title=title, border_style="blue", padding=(1, 2))
+            
+        except Exception as e:
+            # 出错时返回简单文本
+            return f"Episode {episode+1}/{self.total_episodes} | 奖励: {reward:.3f} | 最佳: {self.best_reward:.3f}"
+
+    def _compute_multi_level_success_rate(self) -> Dict[str, Any]:
+        """
+        计算多层次成功率指标
+        
+        Returns:
+            包含不同层次成功率的字典
+        """
+        if not self.episode_rewards:
+            return {
+                'positive_count': 0,
+                'positive_rate': 0.0,
+                'improvement_count': 0,
+                'improvement_rate': 0.0,
+                'learning_count': 0,
+                'learning_rate': 0.0,
+                'total_episodes': 0
+            }
+        
+        total = len(self.episode_rewards)
+        
+        # 1. 传统正奖励成功率
+        positive_count = sum(1 for r in self.episode_rewards if r > 0)
+        positive_rate = positive_count / total
+        
+        # 2. 相对改进成功率（相比于初始几轮的表现）
+        baseline_reward = np.mean(self.episode_rewards[:min(3, total)]) if total >= 3 else min(self.episode_rewards)
+        improvement_count = sum(1 for r in self.episode_rewards if r > baseline_reward)
+        improvement_rate = improvement_count / total
+        
+        # 3. 学习进展成功率（超过合理阈值）
+        # 对于电力网络分区任务，-1.0是一个合理的学习阈值
+        learning_threshold = -1.0
+        learning_count = sum(1 for r in self.episode_rewards if r > learning_threshold)
+        learning_rate = learning_count / total
+        
+        return {
+            'positive_count': positive_count,
+            'positive_rate': positive_rate,
+            'improvement_count': improvement_count,
+            'improvement_rate': improvement_rate,
+            'learning_count': learning_count,
+            'learning_rate': learning_rate,
+            'total_episodes': total,
+            'baseline_reward': baseline_reward,
+            'learning_threshold': learning_threshold
+        }
+    
+    def _format_success_rate_display(self, success_stats: Dict[str, Any]) -> Tuple[str, str]:
+        """
+        格式化成功率显示
+        
+        Args:
+            success_stats: 多层次成功率统计
+            
+        Returns:
+            (显示文本, 图标)
+        """
+        total = success_stats['total_episodes']
+        
+        # 选择最有意义的成功率指标进行显示
+        if success_stats['positive_rate'] > 0:
+            # 有正奖励时显示正奖励率
+            count = success_stats['positive_count']
+            rate = success_stats['positive_rate']
+            color = "bold green"
+            label = "正奖励"
+            icon = "🎉"
+        elif success_stats['learning_rate'] > 0.3:
+            # 学习进展良好时显示学习率
+            count = success_stats['learning_count']
+            rate = success_stats['learning_rate']
+            color = "green"
+            label = "学习进展"
+            icon = "📚"
+        elif success_stats['improvement_rate'] > 0.2:
+            # 有相对改进时显示改进率
+            count = success_stats['improvement_count']
+            rate = success_stats['improvement_rate']
+            color = "yellow"
+            label = "相对改进"
+            icon = "📈"
+        else:
+            # 早期训练阶段
+            count = success_stats['learning_count']
+            rate = success_stats['learning_rate']
+            color = "dim"
+            label = "早期学习"
+            icon = "🌱"
+        
+        display = f"[{color}]{count}/{total} ({rate*100:.1f}%) {label}[/{color}]"
+        return display, icon
+    
+    def _evaluate_system_status(self, success_stats: Dict[str, Any], avg_reward: float) -> str:
+        """
+        智能评估系统状态
+        
+        Args:
+            success_stats: 成功率统计
+            avg_reward: 平均奖励
+            
+        Returns:
+            状态显示文本
+        """
+        positive_rate = success_stats['positive_rate']
+        learning_rate = success_stats['learning_rate']
+        improvement_rate = success_stats['improvement_rate']
+        
+        if positive_rate > 0.3:
+            return "[bold green]🟢 训练成功[/bold green]"
+        elif positive_rate > 0.1 or learning_rate > 0.5:
+            return "[green]🟡 学习良好[/green]"
+        elif learning_rate > 0.3 or improvement_rate > 0.4:
+            return "[yellow]🟠 稳步改进[/yellow]"
+        elif avg_reward > -3.0 and improvement_rate > 0.2:
+            return "[yellow]🟡 正在学习[/yellow]"
+        else:
+            return "[red]🔴 需要更多训练[/red]"
+
+    def _setup_tensorboard(self):
+        """设置TensorBoard"""
+        try:
+            from torch.utils.tensorboard import SummaryWriter
+            log_dir = self.config['logging']['log_dir']
+            timestamp = time.strftime('%Y%m%d_%H%M%S')
+            tensorboard_writer = SummaryWriter(f"{log_dir}/training_{timestamp}")
+            from rich_output import rich_info
+            rich_info(f"TensorBoard日志目录: {log_dir}/training_{timestamp}", show_always=True)
+            return tensorboard_writer
+        except ImportError:
+            from rich_output import rich_warning
+            rich_warning("TensorBoard不可用，跳过TensorBoard日志")
+            self.use_tensorboard = False
+            return None
+        except Exception as e:
+            from rich_output import rich_warning
+            rich_warning(f"TensorBoard初始化失败: {e}")
+            self.use_tensorboard = False
+            return None
+
+    def log_episode(self, episode: int, reward: float, length: int, info: Dict = None):
+        """记录单个回合"""
+        self.episode_rewards.append(reward)
+        self.episode_lengths.append(length)
+
+        if reward > self.best_reward:
+            self.best_reward = reward
+
+        # 如果使用TUI，将更新推送到队列
+        if self.use_tui and self.tui_update_queue:
+            from tui_monitor import TrainingUpdate
+            
+            avg_reward = np.mean(self.episode_rewards) if self.episode_rewards else 0
+            quality_score = info.get('quality_score', 0.5) if info else 0.5
+            success_rate = np.mean(self.success_rates) * 100 if self.success_rates else 0.0
+
+            update = TrainingUpdate(
+                episode=episode,
+                total_episodes=self.total_episodes,
+                reward=reward,
+                best_reward=self.best_reward,
+                avg_reward=avg_reward,
+                quality_score=quality_score,
+                success_rate=success_rate,
+                log_message=f"[{episode+1}/{self.total_episodes}] Reward: {reward:.3f}"
+            )
+            self.tui_update_queue.put(update)
+            # 注释掉提前返回，让代码继续执行TensorBoard记录
+            # return # TUI接管显示，直接返回
+
+        # 使用简单进度条
+        if self.progress_bar:
+            # 计算一些基本统计信息
+            avg_reward = sum(self.episode_rewards[-10:]) / min(len(self.episode_rewards), 10) if self.episode_rewards else reward
+
+            # 更新进度条描述
+            desc = f"🚀 训练进度 | 当前: {reward:.3f} | 最佳: {self.best_reward:.3f} | 平均: {avg_reward:.3f}"
+            self.progress_bar.set_description(desc)
+            self.progress_bar.update(1)
+        else:
+            # 如果没有进度条，使用简单的文本输出
+            if episode % 100 == 0 or episode == self.total_episodes - 1:
+                avg_reward = sum(self.episode_rewards[-10:]) / min(len(self.episode_rewards), 10) if self.episode_rewards else reward
+                print(f"Episode {episode+1}/{self.total_episodes} | 奖励: {reward:.3f} | 最佳: {self.best_reward:.3f} | 平均: {avg_reward:.3f}")
+
+        # 记录额外信息 - 【修复】适配新系统指标名称
+        if info:
+            if 'success' in info:
+                self.success_rates.append(1.0 if info['success'] else 0.0)
+            # 优先使用新指标名称，向后兼容旧名称
+            if 'cv' in info or 'load_cv' in info:
+                cv_value = info.get('cv', info.get('load_cv', 0.0))
+                self.load_cvs.append(cv_value)
+            if 'coupling_ratio' in info or 'coupling_edges' in info:
+                coupling_value = info.get('coupling_ratio', info.get('coupling_edges', 0.0))
+                self.coupling_edges.append(coupling_value)
+
+        # TensorBoard日志 - 重新设计的分组记录
+        if self.use_tensorboard and self.tensorboard_writer:
+            self._log_tensorboard_metrics(episode, reward, length, info)
+
+    def _log_tensorboard_metrics(self, episode: int, reward: float, length: int, info: dict):
+        """
+        分组记录TensorBoard指标，提供清晰的可视化结构
+
+        指标分组：
+        - Core: 核心训练指标
+        - Reward: 奖励组件详情
+        - Quality: 质量评估指标
+        - Debug: 调试和诊断信息
+        """
+        if not (self.use_tensorboard and self.tensorboard_writer):
+            return
+
+        # === 1. 核心训练指标 (Core Training Metrics) ===
+        self.tensorboard_writer.add_scalar('Core/Episode_Reward', reward, episode)
+        self.tensorboard_writer.add_scalar('Core/Episode_Length', length, episode)
+
+        if info:
+            # 成功率和基础状态
+            if 'success' in info:
+                self.tensorboard_writer.add_scalar('Core/Success_Rate', float(info['success']), episode)
+            if 'step' in info:
+                self.tensorboard_writer.add_scalar('Core/Current_Step', info['step'], episode)
+
+        # === 2. 奖励组件详情 (Reward Components) ===
+        if info:
+            # 终局奖励组件
+            reward_components = {
+                'balance_reward': 'Balance_Component',
+                'decoupling_reward': 'Decoupling_Component',
+                'power_reward': 'Power_Component',
+                'quality_reward': 'Quality_Total',
+                'final_reward': 'Final_Total'
+            }
+
+            for key, display_name in reward_components.items():
+                if key in info and isinstance(info[key], (int, float)):
+                    self.tensorboard_writer.add_scalar(f'Reward/{display_name}', info[key], episode)
+
+            # 奖励调节因子
+            adjustment_factors = {
+                'threshold_bonus': 'Threshold_Bonus',
+                'termination_discount': 'Termination_Discount'
+            }
+
+            for key, display_name in adjustment_factors.items():
+                if key in info and isinstance(info[key], (int, float)):
+                    self.tensorboard_writer.add_scalar(f'Reward/{display_name}', info[key], episode)
+
+        # === 3. 质量评估指标 (Quality Assessment) ===
+        if info:
+            quality_metrics = {
+                'quality_score': 'Unified_Quality_Score',
+                'plateau_confidence': 'Plateau_Confidence'
+            }
+
+            for key, display_name in quality_metrics.items():
+                if key in info and isinstance(info[key], (int, float)):
+                    self.tensorboard_writer.add_scalar(f'Quality/{display_name}', info[key], episode)
+
+        # === 4. 调试和诊断信息 (Debug & Diagnostics) ===
+        if info:
+            debug_metrics = {
+                'reward_mode': 'Current_Reward_Mode'
+            }
+
+            for key, display_name in debug_metrics.items():
+                if key in info:
+                    # 对于字符串类型，转换为数值编码
+                    if isinstance(info[key], str):
+                        # 简单的字符串哈希编码用于可视化
+                        value = hash(info[key]) % 1000
+                        self.tensorboard_writer.add_scalar(f'Debug/{display_name}', value, episode)
+                    elif isinstance(info[key], (int, float)):
+                        self.tensorboard_writer.add_scalar(f'Debug/{display_name}', info[key], episode)
+
+        # 定期刷新以确保数据写入
+        if episode % 10 == 0:
+            self.tensorboard_writer.flush()
+
+    def log_training_step(self, episode: int, actor_loss: float = None,
+                         critic_loss: float = None, entropy: float = None):
+        """记录训练步骤 - 使用分组记录"""
+        if actor_loss is not None:
+            self.actor_losses.append(actor_loss)
+            if self.use_tensorboard and self.tensorboard_writer:
+                self.tensorboard_writer.add_scalar('Training/Actor_Loss', actor_loss, episode)
+
+        if critic_loss is not None:
+            self.critic_losses.append(critic_loss)
+            if self.use_tensorboard and self.tensorboard_writer:
+                self.tensorboard_writer.add_scalar('Training/Critic_Loss', critic_loss, episode)
+
+        if entropy is not None:
+            self.entropies.append(entropy)
+            if self.use_tensorboard and self.tensorboard_writer:
+                self.tensorboard_writer.add_scalar('Training/Policy_Entropy', entropy, episode)
+
+        # TensorBoard数据会在_log_tensorboard_metrics中定期刷新
+
+
+
+    def get_statistics(self) -> Dict[str, Any]:
+        """获取训练统计信息"""
+        if not self.episode_rewards:
+            return {}
+
+        stats = {
+            'total_episodes': len(self.episode_rewards),
+            'best_reward': self.best_reward,
+            'mean_reward': np.mean(self.episode_rewards),
+            'std_reward': np.std(self.episode_rewards),
+            'mean_length': np.mean(self.episode_lengths),
+            'training_time': time.time() - self.start_time
+        }
+
+        if self.success_rates:
+            stats['success_rate'] = np.mean(self.success_rates)
+        if self.load_cvs:
+            stats['mean_load_cv'] = np.mean(self.load_cvs)
+        if self.actor_losses:
+            stats['mean_actor_loss'] = np.mean(self.actor_losses)
+        if self.critic_losses:
+            stats['mean_critic_loss'] = np.mean(self.critic_losses)
+
+        return stats
+
+    def set_training_mode(self, training: bool = True):
+        """
+        设置训练/评估模式，控制TensorBoard指标记录
+
+        Args:
+            training: True为训练模式（只记录训练相关指标），False为评估模式（记录所有指标）
+        """
+        self.training_mode = training
+
+    # HTML仪表板生成功能已移动到test.py中用于性能分析
+
+    def close(self):
+        """关闭日志记录器"""
+        # 关闭进度条
+        if hasattr(self, 'progress_bar') and self.progress_bar:
+            self.progress_bar.close()
+
+        if self.tensorboard_writer:
+            self.tensorboard_writer.close()
+
+
+class UnifiedTrainer:
+    """统一训练器"""
+
+    def __init__(self, agent, env, config, gym_env=None):
+        self.agent = agent
+        self.env = env
+        self.config = config
+        self.gym_env = gym_env  # 场景生成环境包装器（如果使用）
+        # 处理设备配置
+        device_config = config['system']['device']
+        if device_config == 'auto':
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        else:
+            self.device = torch.device(device_config)
+        self.logger = None # 将在train方法中初始化
+        self.tui_thread = None
+
+    def train(self, num_episodes: int, max_steps_per_episode: int, update_interval: int = 10):
+        """训练智能体"""
+        self.logger = TrainingLogger(self.config, num_episodes)
+        
+        # 如果启用TUI，在单独的线程中运行它
+        if self.logger.use_tui:
+            self.tui_thread = threading.Thread(target=self.logger.tui_app.run, daemon=True)
+            self.tui_thread.start()
+            # 等待一小段时间以确保TUI启动
+            time.sleep(1)
+
+        from rich_output import rich_info
+        if not self.config.get('debug', {}).get('training_output', {}).get('only_show_errors', True):
+            rich_info(f"TensorBoard: {'已启用' if self.logger.use_tensorboard else '已禁用'}")
+            rich_info(f"指标保存间隔: {self.logger.metrics_save_interval} 回合")
+
+        for episode in range(num_episodes):
+            # 如果使用场景生成环境，需要重置Gym环境以生成新场景
+            if self.gym_env is not None:
+                obs_array, info = self.gym_env.reset()
+                # 更新内部环境引用（因为每次重置都会创建新的内部环境）
+                self.env = self.gym_env.internal_env
+                state, _ = self.env.reset()  # 重置内部环境状态
+            else:
+                state, _ = self.env.reset()  # 标准环境重置
+
+            episode_reward = 0
+            episode_length = 0
+            episode_info = {}
+
+            for step in range(max_steps_per_episode):
+                # 选择动作
+                action, log_prob, value = self.agent.select_action(state)
+
+                if action is None:  # 没有有效动作
+                    break
+
+                # 执行动作
+                next_state, reward, terminated, truncated, info = self.env.step(action)
+                done = terminated or truncated
+
+                # 存储经验
+                self.agent.store_experience(state, action, reward, log_prob, value, done)
+
+                episode_reward += reward
+                episode_length += 1
+                state = next_state
+
+                # 收集回合信息
+                if info:
+                    episode_info.update(info)
+
+                if done:
+                    break
+
+            # 记录到logger（包含详细信息）
+            self.logger.log_episode(episode, episode_reward, episode_length, episode_info)
+
+            # 【新增】验证指标完整性，确保修复生效 - 简化版
+            if episode < 3 and not self.config.get('debug', {}).get('training_output', {}).get('only_show_errors', True):
+                self._validate_metrics_integrity(episode_info, episode)
+
+            # 更新智能体并记录训练指标
+            if episode % update_interval == 0 and episode > 0:
+                try:
+                    # --- 使用 try-except 包裹 agent.update() ---
+                    training_stats = self.agent.update()
+                    if training_stats:
+                        self.logger.log_training_step(
+                            episode,
+                            training_stats.get('actor_loss'),
+                            training_stats.get('critic_loss'),
+                            training_stats.get('entropy')
+                        )
+
+                except RuntimeError as e:
+                    if "[NaNGuard]" in str(e) or "NaN" in str(e):
+                        print(f"\n❌ [NaN Dumper] 捕获到致命错误: {e}")
+
+                        dump_dir = "diagnostics"
+                        os.makedirs(dump_dir, exist_ok=True)
+                        dump_path = os.path.join(dump_dir, f"nan_dump_episode_{episode}.pt")
+
+                        print(f"  ... 正在保存诊断信息到: {dump_path}")
+
+                        # 收集触发异常的批量数据
+                        batch_data = {
+                            'states': self.agent.memory.states,
+                            'actions': self.agent.memory.actions,
+                            'logprobs': self.agent.memory.logprobs,
+                            'rewards': self.agent.memory.rewards,
+                            'is_terminals': self.agent.memory.is_terminals,
+                        }
+
+                        torch.save({
+                            "error_message": str(e),
+                            "episode": episode,
+                            "actor_state_dict": self.agent.actor.state_dict(),
+                            "critic_state_dict": self.agent.critic.state_dict(),
+                            "actor_optimizer_state_dict": self.agent.actor_optimizer.state_dict(),
+                            "critic_optimizer_state_dict": self.agent.critic_optimizer.state_dict(),
+                            "triggering_batch": batch_data,
+                        }, dump_path)
+
+                        print("  ... 保存完成。正在中断训练。")
+                        # 重新抛出异常，以正常退出训练循环
+                        raise e
+                    else:
+                        # 如果是其他运行时错误，则直接抛出
+                        raise
+
+            # 保存中间结果
+            if episode % self.logger.metrics_save_interval == 0 and episode > 0:
+                self._save_intermediate_results(episode)
+
+        # 简洁的训练完成统计
+        final_stats = self.logger.get_statistics()
+        positive_rewards = sum(1 for r in self.logger.episode_rewards if r > 0)
+        total_episodes = final_stats.get('total_episodes', 0)
+        best_reward = final_stats.get('best_reward', 0)
+        mean_reward = final_stats.get('mean_reward', 0)
+
+        # 使用Rich创建简洁的完成表格
+        try:
+            from rich.console import Console
+            from rich.table import Table
+            from rich.panel import Panel
+            
+            console = Console()
+            table = Table.grid(padding=1)
+            table.add_column("指标", style="bold cyan")
+            table.add_column("结果", style="green", justify="right")
+            
+            table.add_row("回合数", f"{total_episodes:,}")
+            table.add_row("最佳奖励", f"{best_reward:.4f}")
+            table.add_row("平均奖励", f"{mean_reward:.4f}")
+            
+            # 【改进】使用智能成功率统计
+            if hasattr(self.logger, '_compute_multi_level_success_rate'):
+                success_stats = self.logger._compute_multi_level_success_rate()
+                if success_stats['positive_rate'] > 0:
+                    success_text = f"正奖励: {success_stats['positive_count']}/{total_episodes} ({success_stats['positive_rate']*100:.1f}%)"
+                elif success_stats['learning_rate'] > 0.3:
+                    success_text = f"学习进展: {success_stats['learning_count']}/{total_episodes} ({success_stats['learning_rate']*100:.1f}%)"
+                else:
+                    success_text = f"相对改进: {success_stats['improvement_count']}/{total_episodes} ({success_stats['improvement_rate']*100:.1f}%)"
+            else:
+                # 备用传统计算
+                success_text = f"{positive_rewards}/{total_episodes} ({positive_rewards/total_episodes*100:.1f}%)"
+            
+            table.add_row("学习效果", success_text)
+            table.add_row("训练时间", f"{final_stats.get('training_time', 0)/60:.1f} 分钟")
+            
+            # 【改进】智能系统状态评估
+            if hasattr(self.logger, '_compute_multi_level_success_rate'):
+                success_stats = self.logger._compute_multi_level_success_rate()
+                if success_stats['positive_rate'] > 0.3:
+                    status = "[bold green]🎉 训练成功[/bold green]"
+                elif success_stats['positive_rate'] > 0.1 or success_stats['learning_rate'] > 0.5:
+                    status = "[green]✅ 学习良好[/green]"
+                elif success_stats['learning_rate'] > 0.3 or success_stats['improvement_rate'] > 0.4:
+                    status = "[yellow]🟠 稳步改进[/yellow]"
+                elif mean_reward > -3.0 and success_stats['improvement_rate'] > 0.2:
+                    status = "[yellow]🟡 正在学习[/yellow]"
+                else:
+                    status = "[red]⚠️ 需要更多训练[/red]"
+            else:
+                # 备用传统评估
+                if best_reward > 0:
+                    status = "[bold green]🎉 重构成功[/bold green]"
+                elif positive_rewards > 0:
+                    status = "[yellow]✅ 重构有效[/yellow]"
+                else:
+                    status = "[red]⚠️ 需要更多训练[/red]"
+            table.add_row("系统状态", status)
+            
+            panel = Panel(table, title="[bold blue]🎯 训练完成统计[/bold blue]", border_style="blue")
+            console.print(panel)
+            
+        except ImportError:
+            # 备用简单输出
+            print(f"\n🎯 训练完成: {total_episodes}回合, 最佳奖励: {best_reward:.4f}, 成功率: {positive_rewards/total_episodes*100:.1f}%")
+
+        # 🔥 保存最终训练模型
+        self._save_final_model(final_stats, best_reward)
+
+        return {
+            'episode_rewards': self.logger.episode_rewards,
+            'episode_lengths': self.logger.episode_lengths,
+            'training_stats': final_stats
+        }
+
+    def _validate_metrics_integrity(self, episode_info: Dict[str, Any], episode: int):
+        """
+        验证指标完整性，确保修复生效
+
+        Args:
+            episode_info: episode信息字典
+            episode: episode编号
+        """
+        try:
+            # 检查关键指标是否不再是固定值
+            metrics = episode_info.get('metrics', {})
+
+            # 检查CV指标
+            cv_value = metrics.get('cv', metrics.get('load_cv', 1.0))
+            if cv_value == 1.0 and episode > 1:
+                from rich_output import rich_warning
+                rich_warning(f"Episode {episode}: CV指标仍为固定值1.0，可能存在问题")
+
+            # 输出指标摘要（仅前3个episode，更简洁）
+            if episode <= 2:
+                coupling_ratio = metrics.get('coupling_ratio', 1.0)
+                connectivity = metrics.get('connectivity', 0.0)
+                from rich_output import rich_debug
+                rich_debug(f"Episode {episode} 指标: CV={cv_value:.3f}, Coupling={coupling_ratio:.3f}, Conn={connectivity:.3f}")
+
+        except Exception as e:
+            from rich_output import rich_warning
+            rich_warning(f"Episode {episode} 指标验证失败: {e}")
+
+    def _save_intermediate_results(self, episode: int):
+        """保存中间训练结果"""
+        try:
+            stats = self.logger.get_statistics()
+            checkpoint_dir = Path(self.config['logging']['checkpoint_dir'])
+            checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+            # 保存统计信息
+            stats_file = checkpoint_dir / f"training_stats_episode_{episode}.json"
+            with open(stats_file, 'w') as f:
+                json.dump(stats, f, indent=2)
+
+            print(f"💾 中间结果已保存: episode {episode}")
+        except Exception as e:
+            print(f"⚠️ 保存中间结果失败: {e}")
+
+    def _save_final_model(self, final_stats: dict, best_reward: float):
+        """保存最终训练模型到data目录，按时间戳命名"""
+        try:
+            # 创建data/models目录
+            models_dir = Path("data/models")
+            models_dir.mkdir(parents=True, exist_ok=True)
+
+            # 生成时间戳
+            timestamp = time.strftime('%Y%m%d_%H%M%S')
+
+            # 获取网络信息（从配置中）
+            network_name = self.config.get('environment', {}).get('network_name', 'unknown')
+            if network_name == 'unknown':
+                # 尝试从其他地方获取网络信息
+                network_name = getattr(self.env, 'network_name', 'unknown')
+
+            # 生成模型文件名
+            model_filename = f"agent_{network_name}_{timestamp}.pth"
+            model_path = models_dir / model_filename
+
+            # 保存模型（包含完整信息）
+            checkpoint = {
+                'actor_state_dict': self.agent.actor.state_dict(),
+                'critic_state_dict': self.agent.critic.state_dict(),
+                'actor_optimizer_state_dict': self.agent.actor_optimizer.state_dict(),
+                'critic_optimizer_state_dict': self.agent.critic_optimizer.state_dict(),
+                'training_stats': final_stats,
+                'best_reward': best_reward,
+                'timestamp': timestamp,
+                'network_name': network_name,
+                'config': self.config,
+                'model_info': {
+                    'node_embedding_dim': self.agent.node_embedding_dim,
+                    'region_embedding_dim': self.agent.region_embedding_dim,
+                    'num_partitions': self.agent.num_partitions,
+                    'device': str(self.agent.device)
+                }
+            }
+
+            torch.save(checkpoint, model_path)
+
+            # 打印保存信息
+            print(f"\n💾 最终模型已保存:")
+            print(f"   文件路径: {model_path}")
+            print(f"   网络类型: {network_name}")
+            print(f"   最佳奖励: {best_reward:.4f}")
+            print(f"   训练时间: {timestamp}")
+
+            # 如果奖励足够好，创建一个"best"链接
+            if best_reward > 0:  # 可以根据需要调整阈值
+                best_model_path = models_dir / f"agent_{network_name}_best.pth"
+                try:
+                    # 如果已存在best模型，先备份
+                    if best_model_path.exists():
+                        backup_path = models_dir / f"agent_{network_name}_best_backup_{timestamp}.pth"
+                        shutil.copy2(best_model_path, backup_path)
+                        print(f"   旧的best模型已备份: {backup_path.name}")
+
+                    # 复制当前模型为best模型
+                    shutil.copy2(model_path, best_model_path)
+                    print(f"   🏆 已更新最佳模型: {best_model_path.name}")
+
+                except Exception as e:
+                    print(f"   ⚠️ 创建best模型链接失败: {e}")
+
+            return str(model_path)
+
+        except Exception as e:
+            print(f"❌ 保存最终模型失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def evaluate(self, num_episodes: int = 10):
+        """评估智能体 - 使用合理的成功标准"""
+        print(f"🔍 评估智能体 {num_episodes} 轮...")
+
+        eval_rewards = []
+        success_count = 0
+
+        for episode in range(num_episodes):
+            state, _ = self.env.reset()  # 解包元组
+            episode_reward = 0
+            episode_info = {}
+
+            for step in range(200):  # 最大步数
+                action, _, _ = self.agent.select_action(state, training=False)
+
+                if action is None:  # 没有有效动作
+                    break
+
+                state, reward, terminated, truncated, info = self.env.step(action)
+                done = terminated or truncated
+                episode_reward += reward
+                
+                # 收集最后的环境信息
+                if info:
+                    episode_info.update(info)
+
+                if done:
+                    break
+
+            eval_rewards.append(episode_reward)
+            
+            # 【改进】使用合理的成功标准评估，而不是依赖环境success标志
+            is_success = self._evaluate_episode_success(episode_reward, episode_info)
+            if is_success:
+                success_count += 1
+
+        return {
+            'avg_reward': np.mean(eval_rewards),
+            'success_rate': success_count / num_episodes,
+            'rewards': eval_rewards
+        }
+
+
+
+    def _evaluate_episode_success(self, episode_reward: float, episode_info: Dict[str, Any]) -> bool:
+        """
+        评估单个episode是否成功
+        
+        Args:
+            episode_reward: episode总奖励
+            episode_info: episode信息（可能包含指标）
+            
+        Returns:
+            是否成功
+        """
+        try:
+            # 成功标准1: 奖励超过合理阈值
+            if episode_reward > -1.0:  # 对于复杂任务，-1.0是一个合理的成功阈值
+                return True
+            
+            # 成功标准2: 基于质量指标（如果可用）
+            if episode_info and 'metrics' in episode_info:
+                metrics = episode_info['metrics']
+                
+                # 检查负载平衡（CV < 0.5）
+                cv = metrics.get('cv', metrics.get('load_cv', 1.0))
+                if cv < 0.5:
+                    return True
+                
+                # 检查连通性（connectivity > 0.9）
+                connectivity = metrics.get('connectivity', 0.0)
+                if connectivity > 0.9:
+                    return True
+                
+                # 检查耦合比率（coupling_ratio < 0.3）
+                coupling_ratio = metrics.get('coupling_ratio', 1.0)
+                if coupling_ratio < 0.3:
+                    return True
+            
+            # 成功标准3: 基于质量分数（如果可用）
+            if episode_info and 'reward_components' in episode_info:
+                components = episode_info['reward_components']
+                quality_score = components.get('quality_score', 0.0)
+                if quality_score > 0.4:  # 质量分数超过0.4认为成功
+                    return True
+            
+            # 如果都不满足，但奖励有显著改进（相比-5.0基线）
+            if episode_reward > -2.5:  # 相比很差的基线有显著改进
+                return True
+                
+            return False
+            
+        except Exception as e:
+            # 如果评估出错，保守地根据奖励判断
+            return episode_reward > -1.5
+
+
+
+    def close(self):
+        """清理资源"""
+        if self.logger:
+            self.logger.close()
+
+
+def create_environment_from_config(config: Dict, hetero_data: HeteroData, node_embeddings: Dict, attention_weights: Dict, mpc_data: Dict, device: torch.device, is_normalized: bool = True) -> Tuple[PowerGridPartitioningEnv, Optional[gym.Env]]:
+    """根据配置创建环境实例，如果需要则使用Gym包装器。"""
+    should_use_gym_wrapper = config.get('scenario_generation', {}).get('enabled', True) or \
+                             config.get('parallel_training', {}).get('enabled', False)
+
+    if should_use_gym_wrapper:
+        from rl.gym_wrapper import PowerGridPartitionGymEnv
+        config_copy = config.copy()
+        config_copy['system']['device'] = str(device)
+        
+        # 创建Gym环境包装器
+        gym_env = PowerGridPartitionGymEnv(
+            base_case_data=mpc_data,
+            config=config_copy,
+            use_scenario_generator=config.get('scenario_generation', {}).get('enabled', True),
+            scenario_seed=config['system']['seed']
+        )
+        _, _ = gym_env.reset()
+        env = gym_env.internal_env
+        return env, gym_env
+    
+    # 创建增强环境（双塔架构）
+    env_config = config['environment']
+    
+    env = create_enhanced_environment(
+        hetero_data=hetero_data,
+        node_embeddings=node_embeddings,
+        num_partitions=env_config['num_partitions'],
+        config=config,
+        use_enhanced=True
+    )
+    return env, None
+
+
+class UnifiedTrainingSystem:
+    """统一训练系统"""
+    
+    def __init__(self, config_path: str = None, **overrides):
+        """初始化训练系统"""
+        self.config = self._load_config(config_path, overrides)
+        self.device = self._setup_device()
+        self.setup_directories()
+
+    def _load_config(self, config_path: str = None, overrides: Dict[str, Any] = None) -> Dict[str, Any]:
+        """加载和合并配置"""
+        # 1. 创建默认配置
+        final_config = self._create_default_config()
+        
+        # 2. 如果没有指定配置文件，使用默认的config.yaml
+        if config_path is None:
+            config_path = 'config.yaml'
+        
+        # 3. 如果配置文件存在，则加载并合并
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    file_config = yaml.safe_load(f)
+                
+                if file_config: # 确保文件不是空的
+                    final_config = self._deep_merge_config(final_config, file_config)
+                    from rich_output import rich_success
+                    rich_success(f"✅ 配置文件加载成功: {config_path}")
+            except Exception as e:
+                from rich_output import rich_warning
+                rich_warning(f"⚠️ 加载配置文件 {config_path} 失败: {e}，将使用默认配置。")
+        else:
+            # 只在用户明确指定了--config但文件不存在时发出警告
+            if config_path != 'config.yaml':
+                 from rich_output import rich_warning
+                 rich_warning(f"⚠️ 指定的配置文件不存在: '{config_path}'，将使用默认配置。")
+
+        # 4. 应用来自构造函数的命令行覆盖项
+        if overrides:
+            final_config = self._deep_merge_config(final_config, overrides)
+            from rich_output import rich_info
+            rich_info("✅ 已应用命令行参数覆盖配置。")
+
+        return final_config
+
+    def _deep_merge_config(self, base_config: Dict[str, Any], preset_config: Dict[str, Any]) -> Dict[str, Any]:
+        """深度合并配置字典"""
+        result = base_config.copy()
+
+        for key, value in preset_config.items():
+            if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+                result[key] = self._deep_merge_config(result[key], value)
+            else:
+                result[key] = value
+
+        return result
+
+    def _create_default_config(self) -> Dict[str, Any]:
+        """创建默认配置"""
+        return {
+            'system': {
+                'name': 'unified_power_grid_partitioning',
+                'version': '2.0',
+                'device': 'auto',
+                'seed': 42,
+                'num_threads': 1
+            },
+            'data': {
+                'reference_case': 'ieee14',  # 仅用于推断维度，无训练含义
+                'normalize': True,
+                'cache_dir': 'data/latest/cache'
+            },
+            'training': {
+                'mode': 'standard',  # standard, parallel, curriculum, large_scale
+                'num_episodes': 1000,
+                'max_steps_per_episode': 200,
+                'update_interval': 10,
+                'save_interval': 100,
+                'eval_interval': 50
+            },
+            'environment': {
+                'num_partitions': 3,
+                'max_steps': 200,
+                'reward_weights': {
+                    'load_b': 0.4,
+                    'decoupling': 0.4,
+                    'power_b': 0.2
+                }
+            },
+            'gat': {
+                'hidden_channels': 64,
+                'gnn_layers': 3,
+                'heads': 4,
+                'output_dim': 128,
+                'dropout': 0.1
+            },
+            'agent': {
+                'type': 'ppo',  # ppo, sb3_ppo
+                'lr_actor': 3e-5,  # 降低10倍用于数值稳定
+                'lr_critic': 1e-4,  # 降低10倍用于数值稳定
+                'gamma': 0.99,
+                'eps_clip': 0.2,
+                'k_epochs': 4,
+                'entropy_coef': 0.01,
+                'value_coef': 0.5,
+                'hidden_dim': 256
+            },
+            'parallel_training': {
+                'enabled': False,
+                'num_cpus': 12,
+                'total_timesteps': 5_000_000,
+                'scenario_generation': True
+            },
+            'scenario_generation': {
+                'enabled': True,  # 默认启用场景生成
+                'perturb_prob': 0.8,
+                'perturb_types': ['n-1', 'load_gen_fluctuation', 'both', 'none'],
+                'scale_range': [0.8, 1.2]
+            },
+            'curriculum': {
+                'enabled': False,
+                'start_partitions': 2,
+                'end_partitions': 5,
+                'episodes_per_stage': 200
+            },
+            'evaluation': {
+                'num_episodes': 20,
+                'include_baselines': True,
+                'baseline_methods': ['spectral', 'kmeans', 'random']
+            },
+            'visualization': {
+                'enabled': True,
+                'save_figures': True,
+                'figures_dir': 'data/latest/figures',
+                'interactive': True
+            },
+            'logging': {
+                'use_tensorboard': True,
+                'log_dir': 'data/latest/logs',
+                'checkpoint_dir': 'data/latest/checkpoints',
+                'console_log_interval': 10,
+                'metrics_save_interval': 50
+            },
+            # 【新增】简洁输出配置
+            'debug': {
+                'training_output': {
+                    'only_show_errors': True,  # 默认只显示关键信息
+                    'show_cache_loading': False,
+                    'show_attention_collection': False,
+                    'show_state_manager_details': False,
+                    'show_metis_details': False,
+                    'show_scenario_generation': False,
+                    'use_rich_status_panel': True  # 使用Rich状态面板
+                },
+                'verbose_logging': False
+            }
+        }
+
+    def _setup_device(self) -> torch.device:
+        """设置计算设备"""
+        device_config = self.config['system'].get('device', 'auto')
+        if device_config == 'auto':
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        else:
+            device = torch.device(device_config)
+
+        safe_print(f"🔧 使用设备: {device}")
+        return device
+
+    def setup_directories(self):
+        """创建必要的目录"""
+        from path_helper import resolve_latest_path, ensure_directory_exists, create_timestamp_directory
+
+        # 解析latest路径为实际路径
+        resolved_paths = {}
+        path_configs = [
+            ('data', 'cache_dir'),
+            ('logging', 'log_dir'),
+            ('logging', 'checkpoint_dir'),
+            ('visualization', 'figures_dir')
+        ]
+
+        for section, key in path_configs:
+            original_path = self.config[section][key]
+            resolved_path = resolve_latest_path(original_path)
+            resolved_paths[f"{section}.{key}"] = resolved_path
+            self.config[section][key] = resolved_path
+
+        # 如果没有找到现有的时间戳目录，创建新的
+        if 'latest' in self.config['data']['cache_dir']:
+            # 创建新的时间戳目录
+            timestamp_dir = create_timestamp_directory(
+                'data',
+                ['cache', 'logs', 'checkpoints', 'figures', 'models']
+            )
+            timestamp_name = Path(timestamp_dir).name
+
+            # 更新所有配置路径
+            self.config['data']['cache_dir'] = f"data/{timestamp_name}/cache"
+            self.config['logging']['log_dir'] = f"data/{timestamp_name}/logs"
+            self.config['logging']['checkpoint_dir'] = f"data/{timestamp_name}/checkpoints"
+            self.config['visualization']['figures_dir'] = f"data/{timestamp_name}/figures"
+
+        # 创建所有必要的目录
+        dirs = [
+            self.config['data']['cache_dir'],
+            self.config['logging']['log_dir'],
+            self.config['logging']['checkpoint_dir'],
+            self.config['visualization']['figures_dir']
+        ]
+
+        for dir_path in dirs:
+            ensure_directory_exists(dir_path)
+
+    def get_training_configs(self) -> Dict[str, Dict[str, Any]]:
+        """获取不同训练模式的配置"""
+        base_config = self.config.copy()
+        
+        # 智能自适应默认启用
+        base_config['adaptive_curriculum'] = {'enabled': True}
+
+        configs = {
+            'fast': {
+                **base_config,
+                **base_config.get('fast', {}),
+                'training': {
+                    **base_config['training'],
+                    **base_config.get('fast', {}).get('training', {}),
+                    'mode': 'fast'
+                }
+            },
+            'full': {
+                **base_config,
+                **base_config.get('full', {}),
+                'training': {
+                    **base_config['training'],
+                    **base_config.get('full', {}).get('training', {}),
+                    'mode': 'full'
+                }
+            },
+            'ieee57': {
+                **base_config,
+                **base_config.get('ieee57', {}),
+                'training': {
+                    **base_config['training'],
+                    **base_config.get('ieee57', {}).get('training', {}),
+                    'mode': 'ieee57'
+                }
+            },
+            'ieee118': {
+                **base_config,
+                **base_config.get('ieee118', {}),
+                'training': {
+                    **base_config['training'],
+                    **base_config.get('ieee118', {}).get('training', {}),
+                    'mode': 'ieee118'
+                }
+            }
+        }
+
+        return configs
+
+    def run_training(self, mode: str = 'fast', **kwargs) -> Dict[str, Any]:
+        """运行训练"""
+        print(f"\n开始{mode.upper()}模式训练")
+
+        # 获取模式配置
+        configs = self.get_training_configs()
+        if mode not in configs:
+            print(f"⚠️ 未知训练模式: {mode}，使用快速模式")
+            mode = 'fast'
+
+        config = configs[mode]
+
+        # 应用命令行参数覆盖
+        for key, value in kwargs.items():
+            if '.' in key:
+                keys = key.split('.')
+                current = config
+                for k in keys[:-1]:
+                    if k not in current:
+                        current[k] = {}
+                    current = current[k]
+                current[keys[-1]] = value
+            else:
+                config[key] = value
+
+
+
+        # 设置随机种子
+        torch.manual_seed(config['system']['seed'])
+        np.random.seed(config['system']['seed'])
+
+        try:
+            # 根据配置选择训练流程
+            if config.get('adaptive_curriculum', {}).get('enabled', False):
+                return self._run_curriculum_training(config)
+            else:
+                return self._run_standard_training(config)
+
+        except Exception as e:
+            print(f"训练失败: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return {'success': False, 'error': str(e)}
+
+    def _run_standard_training(self, config: Dict[str, Any]) -> Dict[str, Any]:
+        """运行标准训练"""
+        # 只在简洁模式下显示关键信息
+        from rich_output import rich_info
+        only_show_errors = config.get('debug', {}).get('training_output', {}).get('only_show_errors', True)
+        
+        if not only_show_errors:
+            print("📊 标准训练模式")
+            print("🔧 系统状态: 现代化重构完成 - 统一奖励系统")
+        else:
+            rich_info("启动标准训练模式", show_always=True)
+
+        # 导入必要模块
+        from data_processing import PowerGridDataProcessor
+        from gat import create_hetero_graph_encoder
+        from rl.environment import PowerGridPartitioningEnv
+        from rl.agent import PPOAgent
+
+        # 1. 数据处理
+        if not only_show_errors:
+            print("\n1️⃣ 数据处理...")
+        
+        processor = PowerGridDataProcessor(
+            normalize=config['data']['normalize'],
+            cache_dir=config['data']['cache_dir']
+        )
+
+        # 加载数据
+        ref_case = config['data'].get('reference_case', config['data'].get('case_name'))
+        mpc = load_power_grid_data(ref_case)
+        hetero_data = processor.graph_from_mpc(mpc, config).to(self.device)
+        
+        if not only_show_errors:
+            print(f"✅ 数据加载完成: {hetero_data}")
+
+        # === 多尺度拓扑生成器 (ScaleAwareSyntheticGenerator) ===
+        multi_scale_cfg = config.get('multi_scale_generation', {})
+        multi_scale_enabled = multi_scale_cfg.get('enabled', False)
+        scale_generator = None
+
+        if multi_scale_enabled:
+            try:
+                from rl.scale_aware_generator import ScaleAwareSyntheticGenerator, GridGenerationConfig
+
+                topo_cfg = multi_scale_cfg.get('topology_variation', {})
+                loadgen_cfg = multi_scale_cfg.get('load_gen_variation', {})
+
+                gen_cfg_kwargs = {
+                    'topology_variation_prob': topo_cfg.get('variation_prob', 0.2),
+                    'node_addition_prob': topo_cfg.get('node_addition_prob', 0.1),
+                    'node_removal_prob': topo_cfg.get('node_removal_prob', 0.05),
+                    'edge_addition_prob': topo_cfg.get('edge_addition_prob', 0.1),
+                    'edge_removal_prob': topo_cfg.get('edge_removal_prob', 0.05),
+                    'load_variation_range': tuple(loadgen_cfg.get('load_range', [0.7, 1.3])),
+                    'gen_variation_range': tuple(loadgen_cfg.get('gen_range', [0.8, 1.2])),
+                    'ensure_connectivity': topo_cfg.get('ensure_connectivity', True),
+                    'min_degree': topo_cfg.get('min_degree', 2),
+                    'max_degree': topo_cfg.get('max_degree', 6)
+                }
+
+                grid_gen_config = GridGenerationConfig(**gen_cfg_kwargs)
+
+                scale_generator = ScaleAwareSyntheticGenerator(
+                    base_case_loader=load_power_grid_data,
+                    config=grid_gen_config,
+                    seed=config['system']['seed']
+                )
+
+                from rich_output import rich_info
+                rich_info("✅ 多尺度生成器已启用", show_always=True)
+            except Exception as e:
+                print(f"⚠️ 多尺度生成器初始化失败: {e}，将继续使用默认场景生成")
+
+        # 2. GAT编码器
+        if not only_show_errors:
+            print("\n2️⃣ GAT编码器...")
+            
+        gat_config = config['gat']
+        encoder = create_hetero_graph_encoder(
+            hetero_data,
+            hidden_channels=gat_config['hidden_channels'],
+            gnn_layers=gat_config['gnn_layers'],
+            heads=gat_config['heads'],
+            output_dim=gat_config['output_dim']
+        ).to(self.device)
+
+        with torch.no_grad():
+            node_embeddings, attention_weights = encoder.encode_nodes_with_attention(hetero_data, config)
+
+        if not only_show_errors:
+            print(f"✅ 编码器初始化完成")
+
+        # 3. 环境（支持场景生成）
+        if not only_show_errors:
+            print("\n3️⃣ 强化学习环境...")
+        env_config = config['environment']
+        scenario_config = config.get('scenario_generation', {})
+        use_scenario_generation = scenario_config.get('enabled', True)  # 默认启用场景生成
+
+        if use_scenario_generation:
+            if not only_show_errors:
+                print("🎭 启用场景生成功能...")
+                
+            # 使用支持场景生成的Gym环境包装器
+            try:
+                from rl.gym_wrapper import PowerGridPartitionGymEnv
+
+                # 确保设备配置正确传递
+                config_copy = config.copy()
+                config_copy['system']['device'] = str(self.device)  # 转换为字符串
+
+                gym_env = PowerGridPartitionGymEnv(
+                    base_case_data=mpc,
+                    config=config_copy,
+                    use_scenario_generator=not multi_scale_enabled,
+                    scenario_seed=config['system']['seed'],
+                    scale_generator=scale_generator
+                )
+
+                # 重置环境以获取初始状态
+                obs_array, info = gym_env.reset()
+                env = gym_env.internal_env  # 获取内部的PowerGridPartitioningEnv
+
+                rich_info(f"场景生成环境: {env.total_nodes}节点, {env.num_partitions}分区", show_always=True)
+
+            except ImportError as e:
+                from rich_output import rich_warning
+                rich_warning(f"场景生成模块导入失败: {e}")
+                use_scenario_generation = False
+
+        if not use_scenario_generation:
+            if not only_show_errors:
+                print("📊 使用标准环境（无场景生成）...")
+                
+            env = create_enhanced_environment(
+                hetero_data=hetero_data,
+                node_embeddings=node_embeddings,
+                num_partitions=env_config['num_partitions'],
+                config=config,
+                use_enhanced=True
+            )
+
+            rich_info(f"标准环境: {env.total_nodes}节点, {env.num_partitions}分区", show_always=True)
+
+        # 4. 智能体
+        if not only_show_errors:
+            print("\n4️⃣ PPO智能体...")
+        
+        # 创建增强智能体（双塔架构）
+        agent_config = config['agent']
+        node_embedding_dim = env.state_manager.embedding_dim
+        region_embedding_dim = node_embedding_dim * 2
+        
+        agent = create_enhanced_agent(
+            state_dim=env.state_manager.embedding_dim,
+            num_partitions=env.num_partitions,
+            config=agent_config,
+            device=self.device
+        )
+
+        if not only_show_errors:
+            print(f"✅ 智能体创建完成")
+        
+        # 5. GNN预训练（双塔架构必需）
+        if config.get('gnn_pretrain', {}).get('enabled', True):
+            if not only_show_errors:
+                print("\n5️⃣ GNN预训练...")
+            
+            pretrain_config = PretrainConfig(
+                epochs=config['gnn_pretrain'].get('epochs', 50),
+                batch_size=config['gnn_pretrain'].get('batch_size', 32),
+                learning_rate=config['gnn_pretrain'].get('learning_rate', 1e-3),
+                loss_weights=config['gnn_pretrain'].get('loss_weights', {
+                    'smoothness': 0.4,
+                    'contrastive': 0.3,
+                    'physics': 0.3
+                }),
+                augmentation=config['gnn_pretrain'].get('augmentation', {}),
+                early_stopping=config['gnn_pretrain'].get('early_stopping', {}),
+                checkpoint_dir=config['gnn_pretrain'].get('checkpoint_dir', 'data/latest/pretrain_checkpoints'),
+                save_best_only=config['gnn_pretrain'].get('save_best_only', True)
+            )
+            
+            # 获取GAT编码器
+            gat_encoder = next(m for m in agent.actor.modules() 
+                             if hasattr(m, 'convs') and hasattr(m, 'heads'))
+            
+            # 创建预训练器
+            pretrainer = GNNPretrainer(gat_encoder, pretrain_config)
+            
+            # 执行预训练
+            try:
+                training_source = scale_generator if scale_generator is not None else (
+                    [env.hetero_data] if hasattr(env, 'hetero_data') else [hetero_data]
+                )
+
+                pretrainer.train(training_source)
+                
+                if not only_show_errors:
+                    print("✅ GNN预训练完成")
+            except Exception as e:
+                print(f"⚠️ GNN预训练失败: {e}")
+                print("继续使用未预训练的模型...")
+
+        # 5. 训练
+        rich_info("开始训练...", show_always=True)
+        # 如果使用了场景生成，传递gym_env给训练器
+        gym_env_ref = gym_env if use_scenario_generation and 'gym_env' in locals() else None
+        trainer = UnifiedTrainer(agent=agent, env=env, config=config, gym_env=gym_env_ref)
+
+        training_config = config['training']
+        history = trainer.train(
+            num_episodes=training_config['num_episodes'],
+            max_steps_per_episode=training_config['max_steps_per_episode'],
+            update_interval=training_config['update_interval']
+        )
+
+        # 6. 保存训练好的模型
+        model_dir = Path(config['logging']['checkpoint_dir']) / 'models'
+        model_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = time.strftime('%Y%m%d_%H%M%S')
+        model_suffix = 'multi' if multi_scale_enabled else ref_case
+        model_path = model_dir / f"agent_{model_suffix}_{timestamp}_best.pth"
+
+        agent.save(str(model_path))
+        rich_info(f"模型已保存: {model_path}", show_always=True)
+
+        # 7. 基础评估
+        rich_info("开始评估...", show_always=True)
+        eval_stats = trainer.evaluate()
+
+        trainer.close()
+
+        return {
+            'success': True,
+            'mode': 'standard',
+            'config': config,
+            'history': history,
+            'eval_stats': eval_stats,
+            'best_reward': trainer.logger.best_reward,
+            'model_path': str(model_path)
+        }
+
+
+
+    def _run_curriculum_training(self, config: Dict[str, Any]) -> Dict[str, Any]:
+        """运行课程学习训练"""
+        # 检查是否启用智能自适应课程学习
+        if config.get('adaptive_curriculum', {}).get('enabled', False):
+            return self._run_adaptive_curriculum_training(config)
+        else:
+            return self._run_traditional_curriculum_training(config)
+
+    def _run_traditional_curriculum_training(self, config: Dict[str, Any]) -> Dict[str, Any]:
+        """运行传统课程学习训练"""
+        print("📚 传统课程学习训练模式")
+
+        curriculum_config = config['curriculum']
+        start_partitions = curriculum_config['start_partitions']
+        end_partitions = curriculum_config['end_partitions']
+        episodes_per_stage = curriculum_config['episodes_per_stage']
+
+        results = []
+
+        for num_partitions in range(start_partitions, end_partitions + 1):
+            print(f"\n📖 课程阶段: {num_partitions}个分区")
+
+            # 更新配置
+            stage_config = config.copy()
+            stage_config['environment']['num_partitions'] = num_partitions
+            stage_config['training']['num_episodes'] = episodes_per_stage
+
+            # 运行该阶段的训练
+            stage_result = self._run_standard_training(stage_config)
+            results.append(stage_result)
+
+            if not stage_result['success']:
+                break
+
+        return {
+            'success': all(r['success'] for r in results),
+            'mode': 'traditional_curriculum',
+            'config': config,
+            'stage_results': results
+        }
+
+    def _run_adaptive_curriculum_training(self, config: Dict[str, Any]) -> Dict[str, Any]:
+        """运行智能自适应课程学习训练"""
+        print("智能自适应课程学习训练模式")
+        print("=" * 60)
+
+        try:
+            # 检查是否启用统一导演系统
+            unified_enabled = config.get('unified_director', {}).get('enabled', False)
+            
+            if unified_enabled:
+                print("🎭 启用统一导演系统 (UnifiedDirector)")
+                from rl.unified_director import UnifiedDirector
+                from rl.adaptive import AdaptiveDirector
+                
+                # 初始化传统自适应导演作为组件
+                base_mode = self._detect_base_mode(config)
+                adaptive_director = AdaptiveDirector(config, base_mode)
+                
+                # 初始化统一导演系统
+                unified_director = UnifiedDirector(config)
+                unified_director.set_total_episodes(config['training']['num_episodes'])
+                
+                # 集成组件
+                unified_director.integrate_components(adaptive_director=adaptive_director)
+                
+                print(f"统一导演系统已初始化 (基础模式: {base_mode})")
+                
+                # 运行统一导演训练
+                result = self._run_unified_director_training(config, unified_director)
+                
+                return {
+                    'success': result.get('success', False),
+                    'mode': 'unified_director',
+                    'config': config,
+                    'director_status': unified_director.get_status_summary(),
+                    **result
+                }
+            else:
+                print("🎯 使用传统自适应导演系统 (AdaptiveDirector)")
+                # 传统自适应导演模式
+                from rl.adaptive import AdaptiveDirector
+
+                # 获取基础训练模式
+                base_mode = self._detect_base_mode(config)
+
+                # 初始化智能导演
+                director = AdaptiveDirector(config, base_mode)
+                print(f"智能导演系统已初始化 (基础模式: {base_mode})")
+
+                # 运行自适应训练
+                result = self._run_adaptive_training_with_director(config, director)
+
+                return {
+                    'success': result.get('success', False),
+                    'mode': 'adaptive_curriculum',
+                    'config': config,
+                    'director_status': director.get_status_summary(),
+                    **result
+                }
+
+        except ImportError as e:
+            print(f"❌ 无法导入智能导演系统: {e}")
+            print("🔄 回退到传统课程学习模式")
+            return self._run_traditional_curriculum_training(config)
+        except Exception as e:
+            print(f"智能自适应课程学习失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return {'success': False, 'error': str(e), 'mode': 'adaptive_curriculum'}
+
+    def _run_unified_director_training(self, config: Dict[str, Any], unified_director) -> Dict[str, Any]:
+        """运行统一导演训练"""
+        print("\\n启动统一导演训练流程...")
+
+        try:
+            # 1. 环境和智能体初始化
+            print("\\n1. 初始化环境和智能体...")
+            ref_case = config['data'].get('reference_case', config['data'].get('case_name'))
+            mpc = load_power_grid_data(ref_case)
+
+            # === 多尺度拓扑生成器 (ScaleAwareSyntheticGenerator) ===
+            multi_scale_cfg = config.get('multi_scale_generation', {})
+            multi_scale_enabled = multi_scale_cfg.get('enabled', False)
+            scale_generator = None
+
+            if multi_scale_enabled:
+                try:
+                    from rl.scale_aware_generator import ScaleAwareSyntheticGenerator, GridGenerationConfig
+
+                    topo_cfg = multi_scale_cfg.get('topology_variation', {})
+                    loadgen_cfg = multi_scale_cfg.get('load_gen_variation', {})
+
+                    gen_cfg_kwargs = {
+                        'topology_variation_prob': topo_cfg.get('variation_prob', 0.2),
+                        'node_addition_prob': topo_cfg.get('node_addition_prob', 0.1),
+                        'node_removal_prob': topo_cfg.get('node_removal_prob', 0.05),
+                        'edge_addition_prob': topo_cfg.get('edge_addition_prob', 0.1),
+                        'edge_removal_prob': topo_cfg.get('edge_removal_prob', 0.05),
+                        'load_variation_range': tuple(loadgen_cfg.get('load_range', [0.7, 1.3])),
+                        'gen_variation_range': tuple(loadgen_cfg.get('gen_range', [0.8, 1.2])),
+                        'ensure_connectivity': topo_cfg.get('ensure_connectivity', True),
+                        'min_degree': topo_cfg.get('min_degree', 2),
+                        'max_degree': topo_cfg.get('max_degree', 6)
+                    }
+
+                    grid_gen_config = GridGenerationConfig(**gen_cfg_kwargs)
+
+                    scale_generator = ScaleAwareSyntheticGenerator(
+                        base_case_loader=load_power_grid_data,
+                        config=grid_gen_config,
+                        seed=config['system']['seed']
+                    )
+
+                    # 将多尺度生成器集成到统一导演
+                    unified_director.integrate_components(scale_generator=scale_generator)
+
+                    from rich_output import rich_info
+                    rich_info("✅ 统一导演-多尺度生成器已集成", show_always=True)
+                except Exception as e:
+                    print(f"⚠️ 统一导演-多尺度生成器初始化失败: {e}，将继续使用默认场景生成")
+
+            # 创建环境（使用场景生成）
+            if config['scenario_generation']['enabled']:
+                from rl.gym_wrapper import PowerGridPartitionGymEnv
+
+                # 确保设备配置正确传递
+                config_copy = config.copy()
+                config_copy['system']['device'] = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+                gym_env = PowerGridPartitionGymEnv(
+                    base_case_data=mpc,
+                    config=config_copy,
+                    use_scenario_generator=True,
+                    scenario_seed=config['system']['seed'],
+                    scale_generator=scale_generator
+                )
+                # 重置环境以获取初始状态
+                obs_array, info = gym_env.reset()
+                env = gym_env.internal_env
+            else:
+                from rl.environment import PowerGridPartitioningEnv
+                env = PowerGridPartitioningEnv(mpc, config)
+                gym_env = None
+
+            # 创建增强智能体（双塔架构）
+            from rl.agent import PPOAgent
+            from rl.enhanced_agent import create_enhanced_agent
+
+            # 获取正确的嵌入维度
+            node_embedding_dim = env.state_manager.embedding_dim
+            region_embedding_dim = node_embedding_dim * 2
+            
+            agent = create_enhanced_agent(
+                state_dim=node_embedding_dim,
+                num_partitions=env.num_partitions,
+                config=config['agent'],
+                device=env.device
+            )
+
+            # 2. 统一导演训练循环
+            print("\\n2. 开始统一导演训练...")
+            num_episodes = config['training']['num_episodes']
+            max_steps_per_episode = config['training']['max_steps_per_episode']
+            update_interval = config['training']['update_interval']
+
+            # 初始化训练日志
+            logger = TrainingLogger(config, num_episodes)
+
+            # 统一导演决策历史
+            unified_decisions = []
+            stage_transitions = []
+
+            # 创建简单的进度条
+            try:
+                from tqdm import tqdm
+                progress_bar = tqdm(total=num_episodes, desc="🎭 统一导演训练",
+                                  bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]')
+            except ImportError:
+                progress_bar = None
+
+            try:
+                for episode in range(num_episodes):
+                    # 重置环境
+                    if gym_env is not None:
+                        obs_array, info = gym_env.reset()
+                        env = gym_env.internal_env
+                        state, _ = env.reset()
+                    else:
+                        state, _ = env.reset()
+
+                    episode_reward = 0
+                    episode_length = 0
+
+                    # Episode执行
+                    for step in range(max_steps_per_episode):
+                        action, log_prob, value = agent.select_action(state, training=True)
+
+                        if action is None:
+                            break
+
+                        state, reward, terminated, truncated, info = env.step(action)
+                        done = terminated or truncated
+
+                        agent.store_experience(state, action, reward, log_prob, value, done)
+                        episode_reward += reward
+                        episode_length += 1
+
+                        if done:
+                            break
+
+                    # 收集episode信息
+                    episode_info = {
+                        'episode': episode,
+                        'reward': episode_reward,
+                        'episode_length': episode_length,
+                        'success': info.get('success', False),
+                        'cv': info.get('cv', info.get('load_cv', 1.0)),
+                        'coupling_ratio': info.get('coupling_ratio', 1.0),
+                        'connectivity': info.get('connectivity', 0.0),
+                        **info
+                    }
+
+                    # 🎭 统一导演决策 - 核心协调逻辑
+                    unified_decision = unified_director.step(episode, episode_info)
+                    unified_decisions.append(unified_decision)
+
+                    # 应用统一导演的决策
+                    self._apply_unified_director_decision(env, agent, unified_decision)
+
+                    # 记录阶段转换
+                    if 'topology_decision' in unified_decision:
+                        topology_decision = unified_decision['topology_decision']
+                        if topology_decision.get('should_transition', False):
+                            transition_info = topology_decision.get('transition_info', {})
+                            stage_transitions.append({
+                                'episode': episode,
+                                'transition_info': transition_info
+                            })
+
+                    # 更新进度条
+                    if progress_bar:
+                        current_stage = unified_decision.get('current_stage', 'unknown')
+                        current_best = max([r for r in logger.episode_rewards if r is not None] + [-float('inf')])
+                        desc = f"🎭 统一导演训练 | 阶段: {current_stage} | 当前: {episode_reward:.3f} | 最佳: {current_best:.3f}"
+                        progress_bar.set_description(desc)
+                        progress_bar.update(1)
+
+                    # 记录训练日志
+                    logger.log_episode(episode, episode_reward, episode_length, episode_info)
+
+                    # 智能体更新
+                    if episode % update_interval == 0 and episode > 0:
+                        try:
+                            training_stats = agent.update()
+                            if training_stats:
+                                logger.log_training_step(
+                                    episode,
+                                    training_stats.get('actor_loss'),
+                                    training_stats.get('critic_loss'),
+                                    training_stats.get('entropy')
+                                )
+                        except Exception as e:
+                            print(f"⚠️ Episode {episode} 智能体更新失败: {e}")
+
+                    # 定期保存中间结果
+                    if episode % config['training']['save_interval'] == 0 and episode > 0:
+                        self._save_unified_director_intermediate_results(episode, unified_director, logger)
+
+                # 保存训练好的模型
+                model_dir = Path(config['logging']['checkpoint_dir']) / 'models'
+                model_dir.mkdir(parents=True, exist_ok=True)
+                timestamp = time.strftime('%Y%m%d_%H%M%S')
+                model_suffix = 'unified' if multi_scale_enabled else ref_case
+                model_path = model_dir / f"agent_{model_suffix}_unified_{timestamp}_best.pth"
+
+                agent.save(str(model_path))
+                print(f"💾 统一导演训练模型已保存: {model_path}")
+
+                # 训练完成统计
+                final_stats = logger.get_statistics()
+                director_summary = unified_director.get_status_summary()
+
+                # 关闭进度条
+                if progress_bar:
+                    progress_bar.close()
+
+                # 统计阶段转换信息
+                total_transitions = len(stage_transitions)
+
+                # 简单的文本输出训练结果
+                print("\\n🎭 统一导演训练完成")
+                print("=" * 50)
+                print(f"总回合数: {final_stats.get('total_episodes', 0)}")
+                print(f"最佳奖励: {final_stats.get('best_reward', 0):.4f}")
+                print(f"平均奖励: {final_stats.get('mean_reward', 0):.4f}")
+                print(f"最终阶段: {director_summary['coordinator_status']['topology_stage']}")
+                print(f"拓扑切换: {total_transitions}次")
+
+                return {
+                    'success': True,
+                    'episode_rewards': logger.episode_rewards,
+                    'episode_lengths': logger.episode_lengths,
+                    'training_stats': final_stats,
+                    'unified_decisions': unified_decisions,
+                    'stage_transitions': stage_transitions,
+                    'director_summary': director_summary,
+                    'model_path': str(model_path)
+                }
+
+            except Exception as e:
+                # 确保关闭进度条
+                if progress_bar:
+                    progress_bar.close()
+                print(f"❌ 统一导演训练过程中出错: {e}")
+                import traceback
+                traceback.print_exc()
+                return {'success': False, 'error': str(e)}
+
+            finally:
+                # 清理资源
+                if progress_bar:
+                    try:
+                        progress_bar.close()
+                    except:
+                        pass
+
+        except Exception as e:
+            print(f"❌ 统一导演训练初始化失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return {'success': False, 'error': str(e)}
+
+    def _apply_unified_director_decision(self, env, agent, unified_decision: Dict[str, Any]):
+        """应用统一导演的决策到环境和智能体"""
+        try:
+            # 获取参数调整
+            parameter_adjustments = unified_decision.get('parameter_adjustments', {})
+            warmup_params = parameter_adjustments.get('warmup_params', {})
+            
+            # 应用预热参数（如果有）
+            if warmup_params:
+                # 更新环境参数
+                if hasattr(env, 'reward_function') and 'reward_weights' in warmup_params:
+                    reward_weights = warmup_params['reward_weights']
+                    if hasattr(env.reward_function, 'update_weights'):
+                        env.reward_function.update_weights(reward_weights)
+
+                if 'connectivity_penalty' in warmup_params:
+                    if hasattr(env, 'connectivity_penalty'):
+                        env.connectivity_penalty = warmup_params['connectivity_penalty']
+
+                # 更新智能体参数
+                if 'learning_rate_factor' in warmup_params:
+                    if hasattr(agent, 'update_learning_rate'):
+                        agent.update_learning_rate(warmup_params['learning_rate_factor'])
+
+            # 应用自适应导演的决策（如果有且不冲突）
+            adaptive_decision = unified_decision.get('adaptive_decision', {})
+            if adaptive_decision and not adaptive_decision.get('unified_override', False):
+                # 使用原有的应用逻辑
+                self._apply_director_decision(env, agent, adaptive_decision)
+
+        except Exception as e:
+            print(f"⚠️ 应用统一导演决策时出错: {e}")
+
+    def _save_unified_director_intermediate_results(self, episode: int, unified_director, logger):
+        """保存统一导演训练的中间结果"""
+        try:
+            from pathlib import Path
+            import json
+
+            checkpoint_dir = Path(self.config['logging']['checkpoint_dir'])
+            checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+            # 保存训练统计
+            stats = logger.get_statistics()
+            stats_file = checkpoint_dir / f"unified_director_training_stats_episode_{episode}.json"
+            with open(stats_file, 'w') as f:
+                json.dump(stats, f, indent=2)
+
+            # 保存统一导演状态
+            director_status = unified_director.get_status_summary()
+            director_file = checkpoint_dir / f"unified_director_status_episode_{episode}.json"
+            with open(director_file, 'w') as f:
+                json.dump(director_status, f, indent=2)
+
+            print(f"💾 统一导演中间结果已保存: episode {episode}")
+
+        except Exception as e:
+            print(f"⚠️ 保存统一导演中间结果失败: {e}")
+
+    def _detect_base_mode(self, config: Dict[str, Any]) -> str:
+        """检测基础训练模式"""
+        # 根据配置特征检测基础模式
+        num_episodes = config.get('training', {}).get('num_episodes', 1500)
+        parallel_enabled = config.get('parallel_training', {}).get('enabled', False)
+
+        if num_episodes >= 4000 or parallel_enabled:
+            if num_episodes >= 4000:
+                return 'ieee118'
+            else:
+                return 'full'
+        else:
+            return 'fast'
+
+    def _run_adaptive_training_with_director(self, config: Dict[str, Any], director) -> Dict[str, Any]:
+        """使用智能导演运行自适应训练"""
+        print("\n启动智能导演训练流程...")
+
+        # 1. 环境和智能体初始化
+        print("\n1. 初始化环境和智能体...")
+        ref_case = config['data'].get('reference_case', config['data'].get('case_name'))
+        mpc = load_power_grid_data(ref_case)
+
+        # === 多尺度拓扑生成器 (ScaleAwareSyntheticGenerator) ===
+        multi_scale_cfg = config.get('multi_scale_generation', {})
+        multi_scale_enabled = multi_scale_cfg.get('enabled', False)
+        scale_generator = None
+
+        if multi_scale_enabled:
+            try:
+                from rl.scale_aware_generator import ScaleAwareSyntheticGenerator, GridGenerationConfig
+
+                topo_cfg = multi_scale_cfg.get('topology_variation', {})
+                loadgen_cfg = multi_scale_cfg.get('load_gen_variation', {})
+
+                gen_cfg_kwargs = {
+                    'topology_variation_prob': topo_cfg.get('variation_prob', 0.2),
+                    'node_addition_prob': topo_cfg.get('node_addition_prob', 0.1),
+                    'node_removal_prob': topo_cfg.get('node_removal_prob', 0.05),
+                    'edge_addition_prob': topo_cfg.get('edge_addition_prob', 0.1),
+                    'edge_removal_prob': topo_cfg.get('edge_removal_prob', 0.05),
+                    'load_variation_range': tuple(loadgen_cfg.get('load_range', [0.7, 1.3])),
+                    'gen_variation_range': tuple(loadgen_cfg.get('gen_range', [0.8, 1.2])),
+                    'ensure_connectivity': topo_cfg.get('ensure_connectivity', True),
+                    'min_degree': topo_cfg.get('min_degree', 2),
+                    'max_degree': topo_cfg.get('max_degree', 6)
+                }
+
+                grid_gen_config = GridGenerationConfig(**gen_cfg_kwargs)
+
+                scale_generator = ScaleAwareSyntheticGenerator(
+                    base_case_loader=load_power_grid_data,
+                    config=grid_gen_config,
+                    seed=config['system']['seed']
+                )
+
+                from rich_output import rich_info
+                rich_info("✅ 自适应训练-多尺度生成器已启用", show_always=True)
+            except Exception as e:
+                print(f"⚠️ 自适应训练-多尺度生成器初始化失败: {e}，将继续使用默认场景生成")
+
+        # 创建环境（使用场景生成）
+        if config['scenario_generation']['enabled']:
+            from rl.gym_wrapper import PowerGridPartitionGymEnv
+
+            # 确保设备配置正确传递
+            config_copy = config.copy()
+            config_copy['system']['device'] = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+            gym_env = PowerGridPartitionGymEnv(
+                base_case_data=mpc,
+                config=config_copy,
+                use_scenario_generator=True,
+                scenario_seed=config['system']['seed'],
+                scale_generator=scale_generator
+            )
+            # 重置环境以获取初始状态
+            obs_array, info = gym_env.reset()
+            env = gym_env.internal_env
+        else:
+            from rl.environment import PowerGridPartitioningEnv
+            env = PowerGridPartitioningEnv(mpc, config)
+            gym_env = None
+
+        # 创建增强智能体（双塔架构）
+        from rl.agent import PPOAgent
+        from rl.enhanced_agent import create_enhanced_agent
+
+        # 获取正确的嵌入维度
+        node_embedding_dim = env.state_manager.embedding_dim
+        region_embedding_dim = node_embedding_dim * 2
+        
+        agent = create_enhanced_agent(
+            state_dim=node_embedding_dim,
+            num_partitions=env.num_partitions,
+            config=config['agent'],
+            device=env.device
+        )
+
+        # 2. 智能自适应训练循环
+        print("\n2. 开始智能自适应训练...")
+        num_episodes = config['training']['num_episodes']
+        max_steps_per_episode = config['training']['max_steps_per_episode']
+        update_interval = config['training']['update_interval']
+
+        # 初始化训练日志
+        logger = TrainingLogger(config, num_episodes)
+
+        # 智能导演状态跟踪
+        director_decisions = []
+        stage_transitions = []
+
+        # 移除复杂的Rich表格，使用简单进度条
+        use_rich_table = False
+
+        # 创建简单的进度条
+        try:
+            from tqdm import tqdm
+            progress_bar = tqdm(total=num_episodes, desc="🧠 智能自适应训练",
+                              bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]')
+        except ImportError:
+            progress_bar = None
+
+        try:
+            for episode in range(num_episodes):
+                # 重置环境
+                if gym_env is not None:
+                    obs_array, info = gym_env.reset()
+                    env = gym_env.internal_env
+                    state, _ = env.reset()
+                else:
+                    state, _ = env.reset()
+
+                episode_reward = 0
+                episode_length = 0
+
+                # Episode执行
+                for step in range(max_steps_per_episode):
+                    action, log_prob, value = agent.select_action(state, training=True)
+
+                    if action is None:
+                        break
+
+                    state, reward, terminated, truncated, info = env.step(action)
+                    done = terminated or truncated
+
+                    agent.store_experience(state, action, reward, log_prob, value, done)
+                    episode_reward += reward
+                    episode_length += 1
+
+                    if done:
+                        break
+
+                # 收集episode信息 - 【修复】适配新奖励系统的指标名称
+                episode_info = {
+                    'episode': episode,
+                    'reward': episode_reward,
+                    'episode_length': episode_length,
+                    'success': info.get('success', False),
+                    # 新系统使用'cv'而不是'load_cv'，提供向后兼容
+                    'load_cv': info.get('cv', info.get('load_cv', 1.0)),
+                    'cv': info.get('cv', info.get('load_cv', 1.0)),  # 同时提供新名称
+                    'coupling_ratio': info.get('coupling_ratio', 1.0),
+                    'connectivity': info.get('connectivity', 0.0),
+                    **info
+                }
+
+                # 智能导演决策
+                director_decision = director.step(episode, episode_info)
+                director_decisions.append(director_decision)
+
+                # 应用智能导演的参数调整
+                self._apply_director_decision(env, agent, director_decision)
+
+                # 记录阶段转换
+                if 'stage_info' in director_decision:
+                    stage_info = director_decision['stage_info']
+                    if len(stage_transitions) == 0 or stage_transitions[-1]['stage'] != stage_info['current_stage']:
+                        stage_transitions.append({
+                            'episode': episode,
+                            'stage': stage_info['current_stage'],
+                            'stage_name': stage_info['stage_name']
+                        })
+
+                # 更新进度条
+                if progress_bar:
+                    # 获取当前阶段信息
+                    stage_name = "unknown"
+                    if director_decision and 'stage_info' in director_decision:
+                        stage_name = director_decision['stage_info'].get('stage_name', 'unknown')
+
+                    # 更新进度条描述
+                    current_best = max([r for r in logger.episode_rewards if r is not None] + [-float('inf')])
+                    desc = f"🧠 智能自适应训练 | 阶段: {stage_name} | 当前: {episode_reward:.3f} | 最佳: {current_best:.3f}"
+                    progress_bar.set_description(desc)
+                    progress_bar.update(1)
+
+                # 记录训练日志
+                logger.log_episode(episode, episode_reward, episode_length, episode_info)
+
+                # 智能体更新
+                if episode % update_interval == 0 and episode > 0:
+                    try:
+                        training_stats = agent.update()
+                        if training_stats:
+                            logger.log_training_step(
+                                episode,
+                                training_stats.get('actor_loss'),
+                                training_stats.get('critic_loss'),
+                                training_stats.get('entropy')
+                            )
+                    except Exception as e:
+                        print(f"⚠️ Episode {episode} 智能体更新失败: {e}")
+
+                # 定期保存中间结果
+                if episode % config['training']['save_interval'] == 0 and episode > 0:
+                    self._save_adaptive_intermediate_results(episode, director, logger)
+
+            # 保存训练好的模型
+            model_dir = Path(config['logging']['checkpoint_dir']) / 'models'
+            model_dir.mkdir(parents=True, exist_ok=True)
+            timestamp = time.strftime('%Y%m%d_%H%M%S')
+            model_suffix = 'multi' if config.get('multi_scale_generation',{}).get('enabled',False) else ref_case
+            model_path = model_dir / f"agent_{model_suffix}_adaptive_{timestamp}_best.pth"
+
+            agent.save(str(model_path))
+            print(f"💾 自适应训练模型已保存: {model_path}")
+
+            # 训练完成统计
+            final_stats = logger.get_statistics()
+            director_summary = director.get_status_summary()
+
+            # 关闭进度条
+            if progress_bar:
+                progress_bar.close()
+
+            # 统计阶段转换信息
+            emergency_transitions = sum(1 for t in stage_transitions if t['stage_name'] == 'emergency_recovery')
+            normal_transitions = len(stage_transitions) - emergency_transitions
+
+            # 简单的文本输出训练结果
+            print("\n🎯 智能自适应训练完成")
+            print("=" * 50)
+            print(f"总回合数: {final_stats.get('total_episodes', 0)}")
+            print(f"最佳奖励: {final_stats.get('best_reward', 0):.4f}")
+            print(f"平均奖励: {final_stats.get('mean_reward', 0):.4f}")
+            print(f"最终阶段: {director_summary['current_stage']}")
+            print(f"智能转换: {normal_transitions}次正常 + {emergency_transitions}次紧急恢复")
+
+            return {
+                'success': True,
+                'episode_rewards': logger.episode_rewards,
+                'episode_lengths': logger.episode_lengths,
+                'training_stats': final_stats,
+                'director_decisions': director_decisions,
+                'stage_transitions': stage_transitions,
+                'director_summary': director_summary,
+                'model_path': str(model_path)
+            }
+
+        except Exception as e:
+            # 确保关闭进度条
+            if progress_bar:
+                progress_bar.close()
+            print(f"❌ 智能自适应训练过程中出错: {e}")
+            import traceback
+            traceback.print_exc()
+            return {'success': False, 'error': str(e)}
+
+        finally:
+            # 清理资源
+            if progress_bar:
+                try:
+                    progress_bar.close()
+                except:
+                    pass
+
+    def _apply_director_decision(self, env, agent, decision: Dict[str, Any]):
+        """应用智能导演的决策到环境和智能体 - 增强版支持动态约束"""
+        import builtins
+
+        try:
+            # 静默模式：减少日志输出
+            verbose = self.config.get('debug', {}).get('adaptive_curriculum_verbose', False)
+
+            # 【新增】更新动态约束参数
+            constraint_params = {}
+
+            # 约束模式设置
+            if 'connectivity_penalty' in decision:
+                constraint_params['connectivity_penalty'] = decision['connectivity_penalty']
+                # 根据惩罚强度自动设置约束模式
+                if decision['connectivity_penalty'] > 0:
+                    constraint_params['constraint_mode'] = 'soft'
+                else:
+                    constraint_params['constraint_mode'] = 'hard'
+
+            if 'action_mask_relaxation' in decision:
+                constraint_params['action_mask_relaxation'] = decision['action_mask_relaxation']
+
+            # 应用动态约束参数到环境
+            if constraint_params and hasattr(env, 'update_dynamic_constraints'):
+                env.update_dynamic_constraints(constraint_params)
+                if verbose:
+                    print(f"🔧 更新动态约束参数: {constraint_params}")
+
+            # 更新环境奖励参数
+            if hasattr(env, 'reward_function') and 'reward_weights' in decision:
+                reward_weights = decision['reward_weights']
+                if hasattr(env.reward_function, 'update_weights'):
+                    if verbose:
+                        env.reward_function.update_weights(reward_weights)
+                    else:
+                        # 临时禁用打印
+                        original_print = builtins.print
+                        builtins.print = lambda *args, **kwargs: None
+                        env.reward_function.update_weights(reward_weights)
+                        builtins.print = original_print
+
+            # 【保留】向后兼容的连通性惩罚设置
+            if 'connectivity_penalty' in decision:
+                if hasattr(env, 'connectivity_penalty'):
+                    env.connectivity_penalty = decision['connectivity_penalty']
+
+            # 更新智能体学习率
+            if 'learning_rate_factor' in decision and decision['learning_rate_factor'] != 1.0:
+                if hasattr(agent, 'update_learning_rate'):
+                    if verbose:
+                        agent.update_learning_rate(decision['learning_rate_factor'])
+                    else:
+                        # 临时禁用打印
+                        original_print = builtins.print
+                        builtins.print = lambda *args, **kwargs: None
+                        agent.update_learning_rate(decision['learning_rate_factor'])
+                        builtins.print = original_print
+
+        except Exception as e:
+            # 确保使用原始的print函数，避免被临时替换影响
+            print(f"⚠️ 应用导演决策时出错: {e}")
+            import traceback
+            if verbose:
+                traceback.print_exc()
+
+    def _save_adaptive_intermediate_results(self, episode: int, director, logger):
+        """保存智能自适应训练的中间结果"""
+        try:
+            from pathlib import Path
+            import json
+
+            checkpoint_dir = Path(self.config['logging']['checkpoint_dir'])
+            checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+            # 保存训练统计
+            stats = logger.get_statistics()
+            stats_file = checkpoint_dir / f"adaptive_training_stats_episode_{episode}.json"
+            with open(stats_file, 'w') as f:
+                json.dump(stats, f, indent=2)
+
+            # 保存智能导演状态
+            director_status = director.get_status_summary()
+            director_file = checkpoint_dir / f"director_status_episode_{episode}.json"
+            with open(director_file, 'w') as f:
+                json.dump(director_status, f, indent=2)
+
+            print(f"💾 智能自适应中间结果已保存: episode {episode}")
+
+        except Exception as e:
+            print(f"⚠️ 保存智能自适应中间结果失败: {e}")
+
+    def save_results(self, results: Dict[str, Any], output_dir: str = 'data/latest'):
+        """保存训练结果"""
+        from path_helper import resolve_latest_path
+
+        # 解析latest路径
+        resolved_output_dir = resolve_latest_path(output_dir)
+
+        timestamp = time.strftime('%Y%m%d_%H%M%S')
+        exp_dir = Path(resolved_output_dir) / f"training_{timestamp}"
+        exp_dir.mkdir(parents=True, exist_ok=True)
+
+        # 保存结果
+        results_file = exp_dir / "results.json"
+        with open(results_file, 'w') as f:
+            # 过滤不能序列化的对象
+            serializable_results = {}
+            for key, value in results.items():
+                if key not in ['env', 'agent', 'trainer']:
+                    try:
+                        json.dumps(value)
+                        serializable_results[key] = value
+                    except (TypeError, ValueError):
+                        serializable_results[key] = str(value)
+
+            json.dump(serializable_results, f, indent=2)
+
+        print(f"💾 训练结果已保存到: {exp_dir}")
+        return exp_dir
+
+
+def main():
+    """主函数"""
+    parser = argparse.ArgumentParser(description='电力网络分区强化学习统一训练系统')
+    parser.add_argument('--config', type=str, default=None, help='自定义配置文件路径')
+    parser.add_argument('--mode', type=str, default='standard', help='训练模式')
+    parser.add_argument('--case', type=str, default=None, help='覆盖电网案例')
+    parser.add_argument('--episodes', type=int, default=None, help='覆盖训练回合数')
+    parser.add_argument('--tui', action='store_true', help='启用Textual TUI监控器')
+    parser.add_argument('--device', type=str, default=None, help='覆盖计算设备 (cpu/cuda)')
+
+    args = parser.parse_args()
+
+    # 将所有命令行参数统一处理为配置覆盖项
+    config_overrides = {
+        'training': {'mode': args.mode},
+        'tui': {'enabled': args.tui}
+    }
+    if args.case:
+        config_overrides['data'] = {'reference_case': args.case}
+    if args.episodes:
+        config_overrides.setdefault('training', {})['num_episodes'] = args.episodes
+    if args.device:
+        config_overrides['system'] = {'device': args.device}
+
+    try:
+        # 将配置覆盖项统一传递给系统
+        system = UnifiedTrainingSystem(
+            config_path=args.config,
+            **config_overrides
+        )
+        
+        # 直接使用系统内的最终配置来运行训练
+        results = system.run_training(mode=system.config['training']['mode'])
+
+        # 保存结果
+        if results.get('success', False):
+            system.save_results(results)
+
+        # 输出结果摘要
+        if results.get('success', False):
+            print(f"\n🎉 训练成功完成!")
+            if 'best_reward' in results:
+                print(f"🏆 最佳奖励: {results['best_reward']:.4f}")
+            if 'eval_stats' in results:
+                eval_stats = results['eval_stats']
+                print(f"📊 评估结果: 平均奖励 {eval_stats.get('avg_reward', 0):.4f}, "
+                      f"成功率 {eval_stats.get('success_rate', 0):.3f}")
+        else:
+            print(f"\n训练失败: {results.get('error', '未知错误')}")
+            return 1
+
+    except Exception as e:
+        try:
+            print(f"❌ 系统错误: {str(e)}")
+        except UnicodeEncodeError:
+            print(f"[ERROR] 系统错误: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return 1
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+    

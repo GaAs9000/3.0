@@ -1,0 +1,591 @@
+# 电力网络分区强化学习配置文件
+
+# 系统配置
+system:
+  device: auto
+  seed: 42
+
+# 数据配置
+data:
+  reference_case: ieee57   # 仅用于推断特征维度，无训练含义
+  normalize: true
+  cache_dir: data/latest/cache
+
+# 训练配置
+training:
+  mode: fast
+  num_episodes: 1000
+  max_steps_per_episode: 200
+  update_interval: 10
+  save_interval: 100
+  eval_interval: 50
+  success_criteria:
+    cv_threshold: 0.3
+    connectivity_threshold: 0.9
+    min_length_threshold: 10
+  convergence:
+    window_size: 10
+    threshold: 0.01
+  gradient_clipping:
+    max_norm: 0.5
+
+# 环境配置
+environment:
+  num_partitions: 3                  # 默认分区数（双塔架构下可动态调整）
+  max_steps: 200
+  enable_features_cache: true        # 启用分区特征缓存
+  reward_weights:
+    load_b: 0.4
+    decoupling: 0.4
+    power_b: 0.2
+
+# GAT编码器配置
+gat:
+  hidden_channels: 64
+  gnn_layers: 3
+  heads: 4
+  output_dim: 128
+  dropout: 0.1
+  edge_dim: 9
+  physics_enhanced: true
+  temperature: 1.0
+  physics_weight: 1.0
+
+# GNN预训练配置（双塔架构必需）
+gnn_pretrain:
+  enabled: true                      # 双塔架构必须启用
+  epochs: 50                         # 预训练轮数
+  batch_size: 32                     # 批量大小
+  learning_rate: 1.0e-3              # 学习率
+  # 损失权重
+  loss_weights:
+    smoothness: 0.4                  # 平滑性损失权重
+    contrastive: 0.3                 # 对比学习损失权重
+    physics: 0.3                     # 物理一致性损失权重
+  # 数据增强
+  augmentation:
+    node_feature_noise: 0.1          # 节点特征噪声
+    edge_dropout: 0.1                # 边dropout率
+    subgraph_size: 0.8               # 子图采样比例
+  # 早停策略
+  early_stopping:
+    enabled: true
+    patience: 10
+    min_delta: 1.0e-4
+  # 检查点
+  checkpoint_dir: data/latest/pretrain_checkpoints
+  save_best_only: true
+
+# PPO智能体配置（双塔架构）
+agent:
+  type: ppo
+  strategy_vector_dim: 128           # 策略向量维度
+  partition_encoder:                 # 动作塔（分区编码器）配置
+    embedding_dim: 128               # 嵌入维度（与策略向量维度一致）
+    hidden_dim: 64                   # 隐藏层维度
+    num_layers: 3                    # 网络层数
+    dropout_rate: 0.1                # Dropout率
+    use_layer_norm: true             # 使用层归一化
+    use_cache: true                  # 启用缓存
+    cache_size: 1000                 # 缓存大小
+  # 训练参数
+  lr_actor: 3.0e-4
+  lr_critic: 1.0e-3
+  gamma: 0.99
+  eps_clip: 0.2
+  k_epochs: 4
+  entropy_coef: 0.01
+  value_coef: 0.5
+  hidden_dim: 256
+  dropout: 0.1
+  max_grad_norm: 0.5
+  memory_capacity: 10000  # 增加内存容量以支持长episode训练
+  actor_scheduler:
+    enabled: true
+    warmup_updates: 200
+    total_training_updates: 1000
+  critic_scheduler:
+    enabled: true
+    warmup_updates: 50
+    total_training_updates: 1000
+
+# 场景生成配置
+scenario_generation:
+  enabled: true
+  perturb_prob: 0.7
+  perturb_types:
+    - n-1
+    - load_gen_fluctuation
+    - both
+    - none
+  scale_range: [0.8, 1.2]
+
+# 多尺度数据生成配置（双塔架构）
+multi_scale_generation:
+  enabled: true                      # 启用多尺度数据生成
+  generator_type: scale_aware        # 使用ScaleAwareSyntheticGenerator
+  # 拓扑变形配置
+  topology_variation:
+    enabled: true
+    variation_prob: 0.2              # 拓扑变形概率
+    node_addition_prob: 0.1          # 节点添加概率
+    node_removal_prob: 0.05          # 节点删除概率
+    edge_addition_prob: 0.1          # 边添加概率
+    edge_removal_prob: 0.05          # 边删除概率
+    ensure_connectivity: true        # 确保连通性
+    min_degree: 2                    # 最小节点度数
+    max_degree: 6                    # 最大节点度数
+  # 负荷/发电扰动
+  load_gen_variation:
+    load_range: [0.7, 1.3]           # 负荷变化范围
+    gen_range: [0.8, 1.2]            # 发电变化范围
+  # 规模类别
+  scale_categories:
+    small:
+      node_range: [10, 40]
+      base_cases: [ieee14, ieee30, ieee39]
+      k_range: [3, 4]
+    medium:
+      node_range: [40, 100]
+      base_cases: [ieee57, ieee118]
+      k_range: [4, 6, 8]
+    large:
+      node_range: [100, 300]
+      base_cases: [ieee118]           # 会合成更大规模
+      k_range: [8, 12, 16]
+  # 渐进式训练计划
+  progressive_schedule:
+    early_phase: 0.2                 # 前20%专注小规模
+    mid_phase: 0.5                   # 20%-50%引入中等规模
+    balance_phase: 0.8               # 50%-80%平衡发展
+    # 各阶段的规模分布会自动调整
+
+# 智能自适应配置
+adaptive_curriculum:
+  enabled: true
+  stage_transition:
+    episode_length_target: 10
+    episode_length_window: 30
+    episode_length_stability: 0.6
+    coupling_improvement_threshold: 0.05
+    coupling_trend_window: 100
+    composite_score_target: 0.5
+    composite_score_window: 80
+    connectivity_rate_threshold: 0.9
+    plateau_detection_enabled: true
+  parameter_evolution:
+    connectivity_penalty_range: [0.1, 1.5]
+    action_mask_relaxation_range: [0.0, 0.7]
+    load_b_range: [0.6, 0.8]
+    decoupling_range: [0.2, 0.6]
+    power_b_range: [0.0, 0.3]
+    learning_rate_decay_factor: 0.1
+  safety_monitoring:
+    min_episode_length: 1
+    max_reward_threshold: -1000
+    max_loss_threshold: 100
+    performance_deterioration_patience: 500
+    performance_deterioration_threshold: 0.1
+  plateau_detection:
+    enabled: true
+    confidence_threshold: 0.75
+    stability_window: 40
+    stability_cv_threshold: 0.2
+    trend_window_short: 15
+    trend_window_medium: 40
+    trend_window_long: 80
+    trend_consistency_threshold: 0.6
+    stability_weight: 0.4
+    trend_weight: 0.3
+    performance_weight: 0.3
+    fallback_enabled: true
+    fallback_performance_threshold: 0.75
+    fallback_observation_window: 25
+    min_improvement_rate: 0.03
+
+# 日志配置
+logging:
+  use_tensorboard: true
+  generate_html_dashboard: true
+  log_dir: data/latest/logs
+  checkpoint_dir: data/latest/checkpoints
+  console_log_interval: 10
+  metrics_save_interval: 50
+  plot_save_interval: 100
+  tensorboard_log_interval: 1
+  training_metrics:
+    - episode_rewards
+    - episode_lengths
+    - success_rates
+    - cv
+    - coupling_ratio
+    - actor_losses
+    - critic_losses
+    - entropies
+    - explained_variance
+    - approx_kl
+    - reward_components
+
+# 可视化配置
+visualization:
+  enabled: true
+  save_figures: true
+  figures_dir: data/latest/figures
+  interactive: true
+  figure_settings:
+    dpi: 300
+    format: png
+  training_curves:
+    figsize: [12, 10]
+    moving_average_window: 20
+  partition_plot:
+    figsize: [16, 10]
+    node_size_scale: 500
+    font_size: 8
+  interactive_viz:
+    enabled: true
+    save_html: true
+    template: plotly_white
+    height: 800
+
+# HTML仪表板配置
+html_dashboard:
+  output_dir: evaluation/latest/dashboards
+  max_data_points: 2000
+  enable_compression: true
+  chart_factory:
+    color_scheme: professional
+    moving_average_windows: [5, 20, 50]
+    anomaly_detection: true
+  analyzer:
+    default_window_size: 50
+    convergence_threshold: 0.1
+    stability_threshold: 0.05
+
+# 评估配置
+evaluation:
+  num_episodes: 20
+  include_baselines: true
+  baseline_methods:
+    - spectral
+    - kmeans
+  metrics_to_track:
+    - episode_reward
+    - episode_length
+    - cv
+    - coupling_ratio
+    - connectivity
+    - success_rate
+    - robustness_score
+
+# TUI前端配置
+tui:
+  enabled: false  # 通过--tui参数启用
+
+# 调试配置
+debug:
+  enabled: false
+  verbose_logging: false
+  save_intermediate_results: false
+  training_output:
+    show_cache_loading: false
+    show_attention_collection: false
+    show_state_manager_details: false
+    show_metis_details: false
+    show_scenario_generation: false
+    only_show_errors: true
+    use_rich_output: true
+    show_training_summary: true
+
+# 场景感知奖励配置 (推荐启用)
+scenario_aware_reward:
+  enabled: true
+  
+  # 场景分类配置
+  scenario_classification:
+    load_scale_bins: [0.8, 1.0, 1.2]  # 负荷缩放分段
+    max_scenarios: 50                  # 最大场景数限制
+    
+  # 历史追踪器配置
+  history_tracking:
+    window_size: 20                    # 最近窗口大小
+    min_samples_for_percentile: 5      # 百分位计算最小样本数
+    max_history_per_scenario: 500      # 每个场景最大历史记录数
+    min_samples_threshold: 3           # 最小样本阈值
+    ema_alpha: 0.1                     # EMA更新系数
+    
+  # 两级查询基线系统配置
+  baseline_query:
+    enable_category_fallback: true     # 启用类别回退
+    enable_global_fallback: true       # 启用全局回退
+    category_confidence_threshold: 0.8 # 类别基线置信度阈值
+    global_confidence_threshold: 0.6   # 全局基线置信度阈值
+    
+  # 平台期检测配置
+  detection_config:
+    window_size: 15                    # 检测窗口大小
+    min_improvement_rate: 0.005        # 最小改进率阈值
+    stability_threshold: 0.8           # 稳定性阈值
+    min_percentile: 0.7               # 最小百分位阈值
+    confidence_threshold: 0.8          # 置信度阈值
+    
+  # 相对奖励配置
+  relative_reward:
+    enabled: true
+    base_reward_weight: 0.5            # 基础奖励权重
+    improvement_bonus: 0.1             # 改进奖励加成
+    
+    # 动态权重调整
+    dynamic_weighting:
+      enabled: true                    # 启用动态权重调整
+      min_data_threshold: 5            # 最小数据阈值
+      adjustment_factor: 0.3           # 权重调整因子
+      
+    # 探索奖励机制
+    exploration_reward:
+      enabled: true                    # 启用探索奖励
+      base_bonus: 0.05                 # 基础探索奖励
+      priority_multiplier: 2.0         # 优先级倍数
+      decay_episodes: 1000             # 衰减episode数
+      quality_boost: true              # 质量调整开关
+      
+      # 新场景类型奖励权重
+      scenario_type_weights:
+        new_exact_scenario: 0.8        # 全新精确场景
+        insufficient_data_scenario: 0.6 # 数据不足场景
+        new_category: 1.0              # 全新类别
+        
+    # 奖励计算方法
+    method: 'relative_improvement'     # 或 'range_normalized', 'popart'
+    use_difficulty_scaling: true       # 启用难度缩放
+    clip_range: [-1.0, 1.0]           # 奖励裁剪范围
+    epsilon: 1e-8                      # 数值稳定性参数
+
+# 训练模式预设
+fast:
+  training:
+    num_episodes: 1000
+    max_steps_per_episode: 200
+    success_criteria:
+      cv_threshold: 0.3
+      connectivity_threshold: 0.9
+  scenario_generation:
+    enabled: true
+
+full:
+  training:
+    num_episodes: 5000
+    max_steps_per_episode: 500
+    update_interval: 20
+    save_interval: 100
+    eval_interval: 50
+    success_criteria:
+      cv_threshold: 0.25
+      connectivity_threshold: 0.9
+  scenario_generation:
+    enabled: true
+  evaluation:
+    num_episodes: 50
+
+ieee57:
+  data:
+    case_name: ieee57
+    normalize: true
+  environment:
+    num_partitions: 4
+    max_steps: 300
+  gat:
+    hidden_channels: 128
+    gnn_layers: 4
+    heads: 8
+    output_dim: 256
+  agent:
+    strategy_vector_dim: 256         # 更大的策略向量
+    lr_actor: 1.0e-4
+    lr_critic: 5.0e-4
+    hidden_dim: 256
+  training:
+    num_episodes: 3000
+    max_steps_per_episode: 300
+    success_criteria:
+      cv_threshold: 0.3
+      connectivity_threshold: 0.9
+  scenario_generation:
+    enabled: true
+  multi_scale_generation:
+    enabled: true                    # 启用多尺度生成
+  visualization:
+    partition_plot:
+      figsize: [16, 10]
+      node_size_scale: 400
+      font_size: 8
+
+ieee118:
+  data:
+    case_name: ieee118
+    normalize: true
+  environment:
+    num_partitions: 8
+    max_steps: 500
+  gat:
+    hidden_channels: 128
+    gnn_layers: 4
+    heads: 8
+    output_dim: 256
+  agent:
+    strategy_vector_dim: 256         # 更大的策略向量
+    lr_actor: 1.0e-4
+    lr_critic: 5.0e-4
+    hidden_dim: 512
+  training:
+    num_episodes: 3000
+    max_steps_per_episode: 500
+    success_criteria:
+      cv_threshold: 0.35
+      connectivity_threshold: 0.95
+  scenario_generation:
+    enabled: true
+  multi_scale_generation:
+    enabled: true                    # 启用多尺度生成
+  visualization:
+    partition_plot:
+      figsize: [20, 12]
+      node_size_scale: 300
+      font_size: 6
+
+
+# 统一导演系统配置（解决双重课程学习冲突）
+unified_director:
+  enabled: true                          # 启用统一导演系统
+  
+  # 数据混合配置
+  data_mix:
+    # 三阶段拓扑规模定义
+    small_scale:
+      node_range: [10, 40]
+      base_cases: ['ieee14', 'ieee30', 'ieee39']
+      k_range: [3, 4]
+      weight: 1.0
+    
+    medium_scale:
+      node_range: [40, 100]
+      base_cases: ['ieee57', 'ieee118']
+      k_range: [4, 6, 8]
+      weight: 0.8
+    
+    large_scale:
+      node_range: [100, 300]
+      base_cases: ['ieee118']              # 会合成更大规模
+      k_range: [8, 12, 16]
+      weight: 0.6
+    
+    # 渐进式训练计划 (进度百分比)
+    early_phase_end: 0.2                  # 前20%专注小规模
+    mid_phase_end: 0.5                    # 20%-50%引入中等规模
+    balance_phase_end: 0.8                # 50%-80%平衡发展
+    # 80%-100%全规模训练
+    
+    # 数据混合策略
+    smooth_transition: true               # 平滑过渡而非硬切换
+    overlap_ratio: 0.3                    # 阶段重叠比例
+  
+  # 自适应阈值配置
+  adaptive_threshold:
+    # 性能稳定性判断
+    stability_window: 40                  # 稳定性检测窗口大小
+    stability_threshold: 0.8              # 稳定性阈值
+    min_improvement_rate: 0.005           # 最小改进率阈值
+    
+    # 进度控制
+    min_episodes_per_stage: 200           # 每阶段最少episode数
+    max_episodes_per_stage: 1000          # 每阶段最多episode数
+    
+    # 质量门槛
+    quality_threshold: 0.4                # 质量分数门槛
+    connectivity_threshold: 0.9           # 连通性阈值
+    
+    # 切换条件权重
+    performance_weight: 0.4               # 性能指标权重
+    stability_weight: 0.3                 # 稳定性权重
+    progress_weight: 0.3                  # 进度权重
+    
+    # 安全保护
+    emergency_fallback_enabled: true      # 启用紧急回退
+    performance_deterioration_threshold: 0.2  # 性能恶化阈值
+    max_failed_transitions: 3             # 最大失败切换次数
+  
+  # 性能监控配置
+  performance_window: 50                  # 性能监控窗口大小
+  
+  # 安全监控配置
+  safety:
+    max_failed_transitions: 3             # 最大失败切换次数
+    emergency_fallback_enabled: true      # 启用紧急回退
+    performance_deterioration_threshold: 0.2  # 性能恶化阈值
+  
+  # 检查点管理
+  checkpoint_dir: data/latest/unified_checkpoints
+  checkpoint_interval: 200               # 检查点保存间隔
+  
+  # 拓扑切换配置
+  topology_transition:
+    min_stage_episodes: 150               # 最小阶段episode数
+    stability_requirement: 0.6           # 切换所需稳定性
+    force_transition_episodes: 800       # 强制切换episode数
+  
+  # 参数协调配置
+  parameter_coordination:
+    # 小规模阶段参数
+    small_stage_params:
+      warmup_episodes: 20
+      connectivity_penalty: 0.5
+      learning_rate_factor: 1.2
+      entropy_coef: 0.02
+      reward_weights:
+        load_b: 0.5
+        decoupling: 0.3
+        power_b: 0.2
+    
+    # 中等规模阶段参数
+    medium_stage_params:
+      warmup_episodes: 40
+      connectivity_penalty: 0.8
+      learning_rate_factor: 1.0
+      entropy_coef: 0.015
+      reward_weights:
+        load_b: 0.4
+        decoupling: 0.4
+        power_b: 0.2
+    
+    # 大规模阶段参数
+    large_stage_params:
+      warmup_episodes: 60
+      connectivity_penalty: 1.2
+      learning_rate_factor: 0.8
+      entropy_coef: 0.01
+      reward_weights:
+        load_b: 0.3
+        decoupling: 0.5
+        power_b: 0.2
+  
+  # 多尺度生成器协调配置
+  scale_generator_coordination:
+    coordination_interval: 50             # 协调间隔episode数
+    transition_damping: 0.5               # 切换期间的变化强度衰减
+    
+    # 阶段特定的生成配置
+    stage_configs:
+      small:
+        topology_variation_prob: 0.1      # 小规模时减少拓扑变化
+        load_variation_intensity: 0.8
+        preferred_cases: ['ieee14', 'ieee30']
+      
+      medium:
+        topology_variation_prob: 0.2      # 中等规模适中变化
+        load_variation_intensity: 1.0
+        preferred_cases: ['ieee57']
+      
+      large:
+        topology_variation_prob: 0.3      # 大规模时更多拓扑变化
+        load_variation_intensity: 1.2
+        preferred_cases: ['ieee118']

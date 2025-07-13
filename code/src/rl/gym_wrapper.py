@@ -2,6 +2,12 @@ import gymnasium as gym
 import torch
 import numpy as np
 from typing import Dict, Tuple, Any, Optional
+
+# === 可选：多尺度拓扑生成 ===
+try:
+    from rl.scale_aware_generator import ScaleAwareSyntheticGenerator
+except ImportError:
+    ScaleAwareSyntheticGenerator = None  # 运行时按需检查
 from torch_geometric.data import HeteroData
 
 try:
@@ -25,14 +31,18 @@ except ImportError:
 class PowerGridPartitionGymEnv(gym.Env):
     """
     兼容Gymnasium的电力网络分区环境
-    支持场景生成和并行训练
+    扩展特性：
+    1. 场景生成 (负荷/故障扰动)
+    2. 多尺度拓扑生成 (ScaleAwareSyntheticGenerator)
+    3. 并行训练友好
     """
     
     def __init__(self, 
                  base_case_data: Dict,
                  config: Dict[str, Any],
                  use_scenario_generator: bool = True,
-                 scenario_seed: Optional[int] = None):
+                 scenario_seed: Optional[int] = None,
+                 scale_generator: Optional["ScaleAwareSyntheticGenerator"] = None):
         """
         初始化Gymnasium环境
         
@@ -48,21 +58,27 @@ class PowerGridPartitionGymEnv(gym.Env):
         self.config = config
         self.device = torch.device(config['system']['device'])
         
+        # 环境基础参数（在调用 _setup_spaces 之前定义）
+        self.num_partitions = config['environment']['num_partitions']
+        self.max_steps = config['environment']['max_steps']
+        self.reward_weights = config['environment']['reward_weights']
+        
         # 初始化数据处理器
         self.processor = PowerGridDataProcessor(
             normalize=config['data']['normalize'],
             cache_dir=config['data']['cache_dir']
         )
         
-        # 初始化场景生成器（如果启用）
+        # === 1) 场景/拓扑生成器选项 ===
         self.use_scenario_generator = use_scenario_generator
-        if use_scenario_generator:
+        self.scale_generator = scale_generator
+        self.use_multi_scale_generator = self.scale_generator is not None
+
+        # 如果启用了传统场景扰动且未启用多尺度生成器，则实例化ScenarioGenerator
+        if self.use_scenario_generator and not self.use_multi_scale_generator:
             self.scenario_generator = ScenarioGenerator(base_case_data, scenario_seed, config)
-        
-        # 环境参数
-        self.num_partitions = config['environment']['num_partitions']
-        self.max_steps = config['environment']['max_steps']
-        self.reward_weights = config['environment']['reward_weights']
+        else:
+            self.scenario_generator = None
         
         # 预处理基础案例以获取维度信息
         self._setup_spaces()
@@ -82,7 +98,8 @@ class PowerGridPartitionGymEnv(gym.Env):
         total_nodes = sum(x.shape[0] for x in base_hetero.x_dict.values())
         
         # 动作空间：(node_idx, target_partition)
-        # 简化为离散动作空间，动作ID = node_idx * num_partitions + target_partition
+        # 注意：对于多尺度生成器，节点数可能变化；
+        # 这里只用于与Gym兼容，在本项目训练流程中不会直接使用。
         self.action_space = gym.spaces.Discrete(total_nodes * self.num_partitions)
         
         # 观察空间：使用GAT输出维度
@@ -120,8 +137,20 @@ class PowerGridPartitionGymEnv(gym.Env):
             np.random.seed(seed)
             torch.manual_seed(seed)
         
-        # 生成新场景（如果启用）
-        if self.use_scenario_generator:
+        # === 生成新的电网案例 ===
+        if self.use_multi_scale_generator:
+            # 使用多尺度生成器生成完全新的拓扑
+            # 使用一个简单均匀权重或根据配置自定义
+            try:
+                stage_cfg = {"small": 0.5, "medium": 0.3, "large": 0.2}
+                sample = self.scale_generator.generate_batch(stage_cfg, batch_size=1)[0]
+                current_case, _k = sample  # 忽略推荐的K，保持配置一致
+                scenario_context = ScenarioContext()
+            except Exception as e:
+                print(f"⚠️ ScaleAwareSyntheticGenerator 生成失败: {e}, 回退到基础案例")
+                current_case = self.base_case
+                scenario_context = ScenarioContext()
+        elif self.use_scenario_generator:
             current_case, scenario_context = self.scenario_generator.generate_random_scene()
         else:
             current_case = self.base_case
@@ -145,7 +174,7 @@ class PowerGridPartitionGymEnv(gym.Env):
             self.current_node_embeddings, self.current_attention_weights = \
                 encoder.encode_nodes_with_attention(self.current_hetero_data, self.config)
         
-        # 创建内部环境
+        # 创建内部环境（分区数可能在多尺度阶段保持不变，以简化智能体设计）
         self.internal_env = PowerGridPartitioningEnv(
             hetero_data=self.current_hetero_data,
             node_embeddings=self.current_node_embeddings,
