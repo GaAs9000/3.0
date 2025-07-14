@@ -51,9 +51,10 @@ class EnhancedPPOAgent(PPOAgent):
                 - use_two_tower: 是否使用双塔架构
             device: 计算设备
         """
-        # 从传入的state_dim参数中提取维度信息
-        node_embedding_dim = state_dim  # 使用传入的state_dim
-        region_embedding_dim = state_dim * 2  # 区域嵌入通常是节点嵌入的2倍
+        # 【修复】从配置中获取正确的维度信息，而不是从state_dim推断
+        # state_dim是状态向量的维度，不等于嵌入维度
+        node_embedding_dim = config.get('node_embedding_dim', 128)  # 节点嵌入维度
+        region_embedding_dim = config.get('region_embedding_dim', 256)  # 区域嵌入维度
         
         # 处理设备参数
         if isinstance(device, str):
@@ -75,6 +76,13 @@ class EnhancedPPOAgent(PPOAgent):
         
         # 检查是否启用双塔架构
         self.use_two_tower = config.get('use_two_tower', True)
+
+        # 【调试】打印维度信息
+        print(f"🔧 EnhancedPPOAgent维度配置:")
+        print(f"   node_embedding_dim: {self.node_embedding_dim}")
+        print(f"   region_embedding_dim: {self.region_embedding_dim}")
+        print(f"   state_dim: {state_dim}")
+        print(f"   num_partitions: {self.num_partitions}")
         
         if self.use_two_tower:
             # 策略向量维度
@@ -112,8 +120,8 @@ class EnhancedPPOAgent(PPOAgent):
         else:
             logger.info("EnhancedPPOAgent using standard architecture")
     
-    def select_action(self, 
-                     state: Dict[str, torch.Tensor], 
+    def select_action(self,
+                     state: Dict[str, torch.Tensor],
                      training: bool = True,
                      return_embeddings: bool = False) -> Tuple[Optional[Tuple[int, int]], float, float, Optional[Dict]]:
         """
@@ -171,9 +179,16 @@ class EnhancedPPOAgent(PPOAgent):
             )
             
             if not available_partitions:
-                # 如果没有可用分区，记录警告并返回None
+                # 如果没有连通性安全的分区，使用软约束回退
                 logger.warning(f"No available partitions for node {selected_node}")
-                return None, 0.0, value, None
+                # 回退到所有相邻分区（软约束模式）
+                available_partitions = self._get_fallback_partitions(
+                    state, selected_node, batched_state
+                )
+
+                if not available_partitions:
+                    # 如果仍然没有分区，返回None
+                    return None, 0.0, value, None
             
             # 8. 编码可用分区
             partition_embeddings = self._encode_partitions(
@@ -203,7 +218,11 @@ class EnhancedPPOAgent(PPOAgent):
             
             # 11. 转换为实际的分区ID
             selected_partition = available_partitions[partition_idx.item()]
-            
+
+            # 确保分区ID是整数而不是张量
+            if isinstance(selected_partition, torch.Tensor):
+                selected_partition = selected_partition.item()
+
             action = (selected_node, selected_partition)
             
             # 准备返回的嵌入信息
@@ -244,9 +263,15 @@ class EnhancedPPOAgent(PPOAgent):
             node_positions = (batched_state.boundary_nodes == node_id).nonzero(as_tuple=True)[0]
             if len(node_positions) > 0:
                 node_pos = node_positions[0]
-                mask = batched_state.action_mask[batched_state.boundary_nodes[node_pos]]
-                available = torch.where(mask)[0].cpu().tolist()
-                return [p + 1 for p in available]  # 转换为1-indexed
+                # 修复：直接使用node_id作为action_mask的索引，而不是boundary_nodes[node_pos]
+                # 因为action_mask的第一维是按节点ID排列的，不是按boundary_nodes位置排列的
+                if node_id < batched_state.action_mask.size(0):
+                    mask = batched_state.action_mask[node_id]
+                    available = torch.where(mask)[0].cpu().tolist()
+                    return [p + 1 for p in available]  # 转换为1-indexed
+                else:
+                    logger.warning(f"节点ID {node_id} 超出action_mask范围 {batched_state.action_mask.size(0)}")
+                    return []
         
         # 默认返回所有分区
         return list(range(1, self.num_partitions + 1))

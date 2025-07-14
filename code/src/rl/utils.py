@@ -261,8 +261,17 @@ class MetisInitializer:
         
     def _setup_graph_representation(self):
         """设置与METIS兼容的图表示"""
+        # 验证 hetero_data 是否有效
+        if not hasattr(self.hetero_data, 'x_dict') or not self.hetero_data.x_dict:
+            raise ValueError("MetisInitializer: hetero_data.x_dict 为空或不存在，无法计算 total_nodes")
+
         # 获取节点总数
-        self.total_nodes = sum(x.shape[0] for x in self.hetero_data.x_dict.values())
+        try:
+            self.total_nodes = sum(x.shape[0] for x in self.hetero_data.x_dict.values())
+            if self.total_nodes <= 0:
+                raise ValueError(f"MetisInitializer: 计算得到的 total_nodes 无效: {self.total_nodes}")
+        except Exception as e:
+            raise ValueError(f"MetisInitializer: 计算 total_nodes 时出错: {e}")
         
         # 设置节点映射
         self._setup_node_mappings()
@@ -331,9 +340,9 @@ class MetisInitializer:
             dst_global = self._local_to_global(edge_index[1], dst_node_type)
 
             # 添加边到邻接列表
-            for src, dst in zip(src_global, dst_global):
-                src_idx = src.item()
-                dst_idx = dst.item()
+            for i in range(len(src_global)):
+                src_idx = int(src_global[i].item())
+                dst_idx = int(dst_global[i].item())
 
                 # 检查全局索引有效性
                 if 0 <= src_idx < self.total_nodes and 0 <= dst_idx < self.total_nodes:
@@ -394,6 +403,9 @@ class MetisInitializer:
         # 检查并修复连通性
         repaired_labels = self._check_and_repair_connectivity(partition_labels, num_partitions)
 
+        # 【修复】不再调用_create_action_space_on_boundaries，因为它会破坏分区标签
+        # 边界节点将由StateManager自动计算
+
         return repaired_labels
             
     def _metis_partition(self, num_partitions: int) -> torch.Tensor:
@@ -411,7 +423,8 @@ class MetisInitializer:
             n_cuts, labels = pymetis.part_graph(num_partitions, adjacency=adjacency_list)
             
             # PyMetis 返回 0-based 标签，转换为 1-based
-            return torch.tensor(labels + 1, dtype=torch.long, device=self.device)
+            labels_array = np.array(labels) + 1
+            return torch.tensor(labels_array, dtype=torch.long, device=self.device)
             
         except Exception as e:
             warnings.warn(f"PyMetis失败：{e}。使用谱聚类回退。")
@@ -556,13 +569,13 @@ class MetisInitializer:
         else:
             nodes_to_unassign = list(boundary_nodes)
 
-        # 将这些边界节点的分区标签设置为0
-        final_labels_np = labels_np.copy()
-        final_labels_np[nodes_to_unassign] = 0
+        # 【修复】不再将边界节点设置为0，保持原有分区标签
+        # 边界节点信息将存储在单独的属性中，避免action_mask索引错误
+        self.boundary_nodes = nodes_to_unassign
 
-        # print(f"✅ 成功将 {len(nodes_to_unassign)} 个边界节点置为'未分区'状态。")
-
-        return torch.from_numpy(final_labels_np).to(self.device)
+        # print(f"✅ 边界节点识别完成，边界节点数: {len(nodes_to_unassign)}")
+        # 返回原始分区标签，不做修改
+        return partition_labels
 
 
 class PartitionEvaluator:
@@ -744,14 +757,57 @@ class PartitionEvaluator:
         
     def _check_connectivity(self, partition: torch.Tensor) -> float:
         """
-        检查分区连通性（简化版本）
-        
+        检查分区连通性 - 真正的图连通性验证
+
         Args:
             partition: 分区分配
-            
+
         Returns:
             连通性得分（如果所有分区连通为1.0，否则更低）
         """
-        # 目前返回1.0（假设连通）
-        # 完整实现将检查每个分区内的图连通性
-        return 1.0
+        try:
+            import networkx as nx
+
+            num_partitions = partition.max().item()
+            if num_partitions <= 0:
+                return 0.0
+
+            # 构建NetworkX图
+            G = nx.Graph()
+            G.add_nodes_from(range(self.total_nodes))
+
+            # 添加边
+            for i in range(self.total_nodes):
+                for neighbor in self.adjacency_list[i]:
+                    G.add_edge(i, neighbor)
+
+            # 检查每个分区的连通性
+            connected_partitions = 0
+            total_partitions_with_nodes = 0
+
+            for i in range(1, num_partitions + 1):
+                partition_nodes = (partition == i).nonzero(as_tuple=True)[0].cpu().numpy()
+
+                if len(partition_nodes) == 0:
+                    continue  # 空分区跳过
+
+                total_partitions_with_nodes += 1
+
+                if len(partition_nodes) == 1:
+                    # 单节点分区自动连通
+                    connected_partitions += 1
+                else:
+                    # 多节点分区需要检查连通性
+                    subgraph = G.subgraph(partition_nodes)
+                    if nx.is_connected(subgraph):
+                        connected_partitions += 1
+
+            # 连通性分数 = 连通分区数 / 有节点的分区数
+            if total_partitions_with_nodes == 0:
+                return 0.0
+
+            return connected_partitions / total_partitions_with_nodes
+
+        except Exception as e:
+            logger.warning(f"连通性检查失败: {e}")
+            return 0.0  # 失败时返回0，表示连通性问题

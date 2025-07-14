@@ -47,8 +47,17 @@ class ActionSpace:
         
     def _setup_adjacency_info(self):
         """设置用于动作验证的邻接信息 - 使用稀疏张量优化"""
+        # 验证 hetero_data 是否有效
+        if not hasattr(self.hetero_data, 'x_dict') or not self.hetero_data.x_dict:
+            raise ValueError("ActionSpace: hetero_data.x_dict 为空或不存在，无法计算 total_nodes")
+
         # 获取节点总数
-        self.total_nodes = sum(x.shape[0] for x in self.hetero_data.x_dict.values())
+        try:
+            self.total_nodes = sum(x.shape[0] for x in self.hetero_data.x_dict.values())
+            if self.total_nodes <= 0:
+                raise ValueError(f"ActionSpace: 计算得到的 total_nodes 无效: {self.total_nodes}")
+        except Exception as e:
+            raise ValueError(f"ActionSpace: 计算 total_nodes 时出错: {e}")
         
         # 设置节点类型映射
         self._setup_node_mappings()
@@ -264,8 +273,11 @@ class ActionSpace:
         # 重塑为 [N, K]
         action_mask = action_mask.view(self.total_nodes, self.num_partitions)
 
-        # 移除移动到自身分区的动作
-        action_mask[torch.arange(self.total_nodes, device=self.device), current_partition - 1] = False
+        # 移除移动到自身分区的动作（确保索引有效）
+        valid_partition_mask = (current_partition > 0) & (current_partition <= self.num_partitions)
+        valid_nodes = torch.arange(self.total_nodes, device=self.device)[valid_partition_mask]
+        valid_partitions = current_partition[valid_partition_mask] - 1
+        action_mask[valid_nodes, valid_partitions] = False
 
         # 仅保留边界节点，其余节点置 False
         if boundary_nodes.numel() < self.total_nodes:
@@ -392,8 +404,17 @@ class ActionMask:
         
     def _setup_graph_structure(self):
         """设置图结构信息用于拓扑约束 - 使用稀疏张量优化"""
+        # 验证 hetero_data 是否有效
+        if not hasattr(self.hetero_data, 'x_dict') or not self.hetero_data.x_dict:
+            raise ValueError("ActionMask: hetero_data.x_dict 为空或不存在，无法计算 total_nodes")
+
         # 构建全局邻接关系（用于连通性检查）
-        self.total_nodes = sum(x.shape[0] for x in self.hetero_data.x_dict.values())
+        try:
+            self.total_nodes = sum(x.shape[0] for x in self.hetero_data.x_dict.values())
+            if self.total_nodes <= 0:
+                raise ValueError(f"ActionMask: 计算得到的 total_nodes 无效: {self.total_nodes}")
+        except Exception as e:
+            raise ValueError(f"ActionMask: 计算 total_nodes 时出错: {e}")
         
         # 设置节点映射
         self._setup_node_mappings()

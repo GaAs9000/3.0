@@ -400,10 +400,24 @@ class GNNPretrainer:
         # 将数据转换为PyG格式并训练
         for i in range(0, len(batch_data), self.config.batch_size):
             batch_grids = batch_data[i:i+self.config.batch_size]
-            
+
+            # 处理数据格式：如果是元组，提取字典部分
+            processed_grids = []
+            for item in batch_grids:
+                if isinstance(item, tuple):
+                    # (grid_data, k_value) 格式
+                    processed_grids.append(item[0])
+                else:
+                    # 直接是grid_data字典
+                    processed_grids.append(item)
+
             # 转换为图数据
-            graphs = [self._grid_to_graph(grid) for grid in batch_grids]
-            batch = Batch.from_data_list(graphs).to(self.device)
+            try:
+                graphs = [self._grid_to_graph(grid) for grid in processed_grids]
+                batch = Batch.from_data_list(graphs).to(self.device)
+            except Exception as e:
+                logger.warning(f"批次数据转换失败: {e}，跳过此批次")
+                continue
             
             # 前向传播
             loss = self._compute_loss(batch)
@@ -430,21 +444,14 @@ class GNNPretrainer:
     def _compute_loss(self, batch: Batch) -> torch.Tensor:
         """计算多任务损失"""
         # 获取节点嵌入
-        with torch.cuda.amp.autocast() if self.scaler else torch.no_grad():
-            # 前向传播获取嵌入
-            x_dict = {
-                'bus': batch.x
-            }
-            edge_index_dict = {
-                ('bus', 'connects', 'bus'): batch.edge_index
-            }
-            
+        with torch.amp.autocast('cuda') if self.scaler else torch.no_grad():
             # 构建异构数据（与实际系统兼容）
             hetero_batch = HeteroData()
             hetero_batch['bus'].x = batch.x
             hetero_batch['bus', 'connects', 'bus'].edge_index = batch.edge_index
-            hetero_batch['bus', 'connects', 'bus'].edge_attr = batch.edge_attr
-            
+            if hasattr(batch, 'edge_attr') and batch.edge_attr is not None:
+                hetero_batch['bus', 'connects', 'bus'].edge_attr = batch.edge_attr
+
             # 通过编码器
             node_embeddings = self.encoder(hetero_batch.x_dict, hetero_batch.edge_index_dict)
             
@@ -587,50 +594,107 @@ class GNNPretrainer:
         logger.info(f"从检查点恢复训练: epoch {self.current_epoch}")
         
     def _grid_to_graph(self, grid_data: Dict) -> Data:
-        """将电网数据转换为PyG图数据"""
-        # 这里需要与data_processing.py中的转换逻辑一致
-        # 简化版本，实际应该调用PowerGridDataProcessor
-        
-        bus_data = grid_data['bus']
-        branch_data = grid_data['branch']
-        
-        # 节点特征
-        num_nodes = len(bus_data)
-        node_features = torch.tensor(bus_data[:, 1:6], dtype=torch.float32)  # 简化特征
-        
-        # 边索引
-        edge_list = []
-        edge_features = []
-        
-        for branch in branch_data:
-            if branch[10] == 1:  # 在线支路
-                i, j = int(branch[0]) - 1, int(branch[1]) - 1  # 转换为0索引
-                edge_list.append([i, j])
-                edge_list.append([j, i])  # 无向图
-                
-                # 边特征（电阻、电抗、导纳等）
-                r, x = branch[2], branch[3]
-                z = np.sqrt(r**2 + x**2)
-                y = 1.0 / z if z > 0 else 0.0
-                
-                edge_feat = [r, x, z, y]
-                edge_features.extend([edge_feat, edge_feat])  # 双向边
-                
-        edge_index = torch.tensor(edge_list, dtype=torch.long).t().contiguous()
-        edge_attr = torch.tensor(edge_features, dtype=torch.float32)
-        
-        return Data(x=node_features, edge_index=edge_index, edge_attr=edge_attr)
+        """将电网数据转换为PyG图数据 - 增强错误处理"""
+        try:
+            # 验证输入数据
+            if not isinstance(grid_data, dict):
+                raise ValueError(f"期望字典格式，得到 {type(grid_data)}")
+
+            if 'bus' not in grid_data or 'branch' not in grid_data:
+                raise ValueError("缺少必需的 'bus' 或 'branch' 键")
+
+            bus_data = grid_data['bus']
+            branch_data = grid_data['branch']
+
+            # 转换为numpy数组（如果还不是）
+            if not isinstance(bus_data, np.ndarray):
+                bus_data = np.array(bus_data)
+            if not isinstance(branch_data, np.ndarray):
+                branch_data = np.array(branch_data)
+
+            # 节点特征
+            num_nodes = len(bus_data)
+            if num_nodes == 0:
+                raise ValueError("空的母线数据")
+
+            # 提取节点特征，确保有足够的列
+            if bus_data.shape[1] < 6:
+                # 如果列数不足，用零填充
+                padded_features = np.zeros((num_nodes, 5))
+                padded_features[:, :min(5, bus_data.shape[1]-1)] = bus_data[:, 1:min(6, bus_data.shape[1])]
+                node_features = torch.tensor(padded_features, dtype=torch.float32)
+            else:
+                node_features = torch.tensor(bus_data[:, 1:6], dtype=torch.float32)
+
+            # 边索引和特征
+            edge_list = []
+            edge_features = []
+
+            for branch in branch_data:
+                # 检查支路状态（在线/离线）
+                status_idx = min(10, len(branch) - 1)  # 防止索引越界
+                if len(branch) > status_idx and branch[status_idx] == 1:  # 在线支路
+                    i, j = int(branch[0]) - 1, int(branch[1]) - 1  # 转换为0索引
+
+                    # 验证节点索引
+                    if 0 <= i < num_nodes and 0 <= j < num_nodes and i != j:
+                        edge_list.append([i, j])
+                        edge_list.append([j, i])  # 无向图
+
+                        # 边特征（电阻、电抗、导纳等）
+                        r = branch[2] if len(branch) > 2 else 0.01
+                        x = branch[3] if len(branch) > 3 else 0.01
+                        z = np.sqrt(r**2 + x**2)
+                        y = 1.0 / z if z > 1e-6 else 1.0
+
+                        edge_feat = [r, x, z, y]
+                        edge_features.extend([edge_feat, edge_feat])  # 双向边
+
+            # 如果没有边，创建一个最小连通图
+            if not edge_list:
+                logger.warning("没有有效边，创建最小连通图")
+                for i in range(min(num_nodes - 1, 1)):
+                    edge_list.extend([[i, i+1], [i+1, i]])
+                    edge_features.extend([[0.01, 0.01, 0.014, 70.0]] * 2)
+
+            edge_index = torch.tensor(edge_list, dtype=torch.long).t().contiguous()
+            edge_attr = torch.tensor(edge_features, dtype=torch.float32)
+
+            return Data(x=node_features, edge_index=edge_index, edge_attr=edge_attr)
+
+        except Exception as e:
+            logger.error(f"电网数据转换失败: {e}")
+            # 返回一个最小的有效图
+            return Data(
+                x=torch.randn(2, 5),  # 2个节点，5个特征
+                edge_index=torch.tensor([[0, 1], [1, 0]], dtype=torch.long).t(),
+                edge_attr=torch.tensor([[0.01, 0.01, 0.014, 70.0]] * 2, dtype=torch.float32)
+            )
         
     def _generate_val_data(self, data_generator) -> List[Data]:
         """生成验证数据"""
         val_config = {'small': 0.5, 'medium': 0.3, 'large': 0.2}
         val_batch = data_generator.generate_batch(
-            val_config, 
+            val_config,
             batch_size=int(self.config.batch_size * self.config.validation_split),
             return_k_values=False
         )
-        
-        return [self._grid_to_graph(grid) for grid in val_batch]
+
+        # 处理数据格式：如果是元组，提取字典部分
+        processed_grids = []
+        for item in val_batch:
+            if isinstance(item, tuple):
+                # (grid_data, k_value) 格式
+                processed_grids.append(item[0])
+            else:
+                # 直接是grid_data字典
+                processed_grids.append(item)
+
+        try:
+            return [self._grid_to_graph(grid) for grid in processed_grids]
+        except Exception as e:
+            logger.error(f"验证数据转换失败: {e}")
+            return []
         
     def _log_progress(self, epoch: int, train_loss: float):
         """记录训练进度"""

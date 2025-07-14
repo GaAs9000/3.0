@@ -60,13 +60,19 @@ class PowerGridPartitioningEnv:
             node_embeddings, attention_weights
         ) if attention_weights else node_embeddings
 
-        # 初始化核心组件
-        self.state_manager = StateManager(hetero_data, enhanced_embeddings, device, config)
-        self.action_space = ActionSpace(hetero_data, num_partitions, device)
+        # 验证输入数据的完整性
+        self._validate_input_data(hetero_data, node_embeddings)
 
-        # 【新增】确保ActionMask处理器被初始化
-        from rl.action_space import ActionMask
-        self.action_space.mask_handler = ActionMask(hetero_data, device)
+        # 初始化核心组件
+        try:
+            self.state_manager = StateManager(hetero_data, enhanced_embeddings, device, config)
+            self.action_space = ActionSpace(hetero_data, num_partitions, device)
+
+            # 【新增】确保ActionMask处理器被初始化
+            from rl.action_space import ActionMask
+            self.action_space.mask_handler = ActionMask(hetero_data, device)
+        except Exception as e:
+            raise RuntimeError(f"环境核心组件初始化失败: {e}")
 
         # 奖励函数支持 - 统一使用自适应质量导向奖励系统
         reward_config = {
@@ -113,6 +119,35 @@ class PowerGridPartitioningEnv:
         # 缓存频繁使用的数据
         self._setup_cached_data()
 
+    def _validate_input_data(self, hetero_data: HeteroData, node_embeddings: Dict[str, torch.Tensor]):
+        """验证输入数据的完整性"""
+        # 验证 hetero_data
+        if hetero_data is None:
+            raise ValueError("hetero_data 不能为 None")
+
+        if not hasattr(hetero_data, 'x_dict') or not hetero_data.x_dict:
+            raise ValueError("hetero_data.x_dict 为空或不存在")
+
+        if not hasattr(hetero_data, 'edge_index_dict') or not hetero_data.edge_index_dict:
+            raise ValueError("hetero_data.edge_index_dict 为空或不存在")
+
+        # 验证 node_embeddings
+        if node_embeddings is None or not node_embeddings:
+            raise ValueError("node_embeddings 不能为空")
+
+        # 验证节点类型一致性
+        hetero_node_types = set(hetero_data.x_dict.keys())
+        embedding_node_types = set(node_embeddings.keys())
+        if hetero_node_types != embedding_node_types:
+            raise ValueError(f"节点类型不匹配: hetero_data={hetero_node_types}, embeddings={embedding_node_types}")
+
+        # 验证节点数量一致性
+        for node_type in hetero_node_types:
+            hetero_count = hetero_data.x_dict[node_type].shape[0]
+            embedding_count = node_embeddings[node_type].shape[0]
+            if hetero_count != embedding_count:
+                raise ValueError(f"节点类型 {node_type} 的数量不匹配: hetero_data={hetero_count}, embeddings={embedding_count}")
+
     def update_dynamic_constraints(self, params: Dict[str, Any]):
         """
         更新动态约束参数（由AdaptiveDirector调用）
@@ -131,12 +166,21 @@ class PowerGridPartitioningEnv:
 
     def _setup_cached_data(self):
         """设置频繁访问的缓存数据"""
+        # 验证 hetero_data 是否有效
+        if not hasattr(self.hetero_data, 'x_dict') or not self.hetero_data.x_dict:
+            raise ValueError("hetero_data.x_dict 为空或不存在，无法计算 total_nodes")
+
         # 所有类型节点的总数
-        self.total_nodes = sum(x.shape[0] for x in self.hetero_data.x_dict.values())
-        
+        try:
+            self.total_nodes = sum(x.shape[0] for x in self.hetero_data.x_dict.values())
+            if self.total_nodes <= 0:
+                raise ValueError(f"计算得到的 total_nodes 无效: {self.total_nodes}")
+        except Exception as e:
+            raise ValueError(f"计算 total_nodes 时出错: {e}")
+
         # 全局节点映射（本地索引到全局索引）
         self.global_node_mapping = self.state_manager.get_global_node_mapping()
-        
+
         # 用于奖励计算的边信息
         self.edge_info = self._extract_edge_info()
         
@@ -598,12 +642,24 @@ class PowerGridPartitioningEnv:
         # 添加动作掩码到观察中
         observation['action_mask'] = self.get_action_mask(use_advanced_constraints=True)
         
+        # 【修复】重新计算有效动作列表
+        current_boundary_nodes = self.state_manager.get_boundary_nodes()
+        constraint_mode = self.dynamic_constraint_params.get('constraint_mode', 'hard')
+        current_valid_actions = self.action_space.get_valid_actions(
+            self.state_manager.current_partition,
+            current_boundary_nodes,
+            constraint_mode=constraint_mode
+        )
+
         info = {
             'step': self.current_step,
             'metrics': current_metrics,
             'reward': reward,
             'reward_mode': 'adaptive_quality',
             'success': success,  # 新增success字段
+            'partition': self.state_manager.current_partition.clone(),
+            'boundary_nodes': current_boundary_nodes,
+            'valid_actions': current_valid_actions,  # 【新增】更新有效动作
             **info_bonus
         }
 
@@ -789,39 +845,69 @@ class PowerGridPartitioningEnv:
 
     def _compute_connectivity_score(self, partition: torch.Tensor) -> float:
         """
-        计算分区连通性分数
+        计算分区连通性分数 - 真正的图连通性验证
 
         Args:
             partition: 当前分区方案
 
         Returns:
-            连通性分数 [0, 1]，1表示完全连通
+            连通性分数 [0, 1]，1表示所有分区都连通
         """
         try:
+            import networkx as nx
+
             # 获取分区数量
             num_partitions = partition.max().item()
             if num_partitions <= 0:
                 return 0.0
 
-            # 简化的连通性检查：检查每个分区是否至少有一个节点
+            # 构建NetworkX图
+            G = nx.Graph()
+            G.add_nodes_from(range(len(partition)))
+
+            # 添加边（从异构数据中获取）
+            if hasattr(self, 'hetero_data') and self.hetero_data is not None:
+                edge_index = self.hetero_data['bus', 'connects', 'bus'].edge_index
+                for i in range(edge_index.size(1)):
+                    src, dst = edge_index[0, i].item(), edge_index[1, i].item()
+                    G.add_edge(src, dst)
+            else:
+                # 如果没有异构数据，尝试从其他源获取边信息
+                logger.warning("无法获取图结构信息，连通性检查可能不准确")
+                return 0.5
+
+            # 检查每个分区的连通性
             connected_partitions = 0
+            total_partitions_with_nodes = 0
+
             for i in range(1, num_partitions + 1):
-                if (partition == i).any():
+                partition_nodes = (partition == i).nonzero(as_tuple=True)[0].cpu().numpy()
+
+                if len(partition_nodes) == 0:
+                    continue  # 空分区跳过
+
+                total_partitions_with_nodes += 1
+
+                if len(partition_nodes) == 1:
+                    # 单节点分区自动连通
                     connected_partitions += 1
+                else:
+                    # 多节点分区需要检查连通性
+                    subgraph = G.subgraph(partition_nodes)
+                    if nx.is_connected(subgraph):
+                        connected_partitions += 1
 
-            # 连通性分数 = 有节点的分区数 / 总分区数
-            connectivity_score = connected_partitions / num_partitions
+            # 连通性分数 = 连通分区数 / 有节点的分区数
+            if total_partitions_with_nodes == 0:
+                return 0.0
 
-            # 额外检查：如果所有节点都被分配，给予额外奖励
-            unassigned_nodes = (partition == 0).sum().item()
-            if unassigned_nodes == 0:
-                connectivity_score = min(1.0, connectivity_score + 0.1)
+            connectivity_score = connected_partitions / total_partitions_with_nodes
 
             return float(connectivity_score)
 
         except Exception as e:
-            # 如果计算失败，返回保守估计
-            return 0.5
+            logger.error(f"连通性计算失败: {e}")
+            return 0.0  # 失败时返回0，表示连通性问题
 
     def clear_cache(self):
         """清理缓存数据"""

@@ -309,19 +309,29 @@ class EnhancedPowerGridPartitioningEnv(PowerGridPartitioningEnv):
         """获取电网全局信息"""
         if not hasattr(self, '_grid_info_cache'):
             # 计算全局统计
-            total_nodes = self.hetero_data['bus'].x.size(0)
-            total_load = self.hetero_data['bus'].x[:, 2].sum().item()
-            
+            # 使用 total_nodes 属性（已在父类中计算）
+            total_nodes = self.total_nodes
+
+            # 计算总负载
+            total_load = 0.0
+            if 'bus' in self.hetero_data.x_dict:
+                bus_features = self.hetero_data.x_dict['bus']
+                if bus_features.size(1) > 2:  # 确保有足够的特征维度
+                    total_load = bus_features[:, 2].sum().item()
+
+            # 计算总发电量
             total_generation = 0.0
-            if 'gen' in self.hetero_data:
-                total_generation = self.hetero_data['gen'].x[:, 0].sum().item()
-            
+            if 'gen' in self.hetero_data.x_dict:
+                gen_features = self.hetero_data.x_dict['gen']
+                if gen_features.size(1) > 0:  # 确保有特征
+                    total_generation = gen_features[:, 0].sum().item()
+
             self._grid_info_cache = {
                 'total_nodes': total_nodes,
                 'total_load': total_load,
                 'total_generation': total_generation
             }
-        
+
         return self._grid_info_cache
     
     def _update_partition_info(self):

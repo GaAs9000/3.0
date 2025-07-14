@@ -171,8 +171,9 @@ class PowerGridPartitionGymEnv(gym.Env):
             self.current_node_embeddings, self.current_attention_weights = \
                 encoder.encode_nodes_with_attention(self.current_hetero_data, self.config)
         
-        # 创建内部环境（分区数可能在多尺度阶段保持不变，以简化智能体设计）
-        self.internal_env = PowerGridPartitioningEnv(
+        # 创建内部环境（使用增强环境以支持分区特征）
+        from .enhanced_environment import EnhancedPowerGridPartitioningEnv
+        self.internal_env = EnhancedPowerGridPartitioningEnv(
             hetero_data=self.current_hetero_data,
             node_embeddings=self.current_node_embeddings,
             num_partitions=self.num_partitions,
@@ -180,7 +181,8 @@ class PowerGridPartitionGymEnv(gym.Env):
             max_steps=self.max_steps,
             device=self.device,
             attention_weights=self.current_attention_weights,
-            config=self.config
+            config=self.config,
+            enable_features_cache=True
         )
         
         # 重置内部环境

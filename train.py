@@ -300,8 +300,19 @@ class AgentFactory:
             return gat_encoder
 
         except Exception as e:
-            logger.warning(f"GNN预训练失败: {e}，使用未预训练的模型")
-            # 返回新创建的编码器
+            logger.error(f"GNN预训练失败: {e}")
+            logger.error(f"错误详情: {type(e).__name__}: {str(e)}")
+
+            # 检查是否是数据格式问题
+            if "数据转换失败" in str(e) or "格式" in str(e).lower():
+                logger.error("数据格式不兼容，需要修复数据生成器或预训练器")
+
+            # 检查是否是模型架构问题
+            if "编码器" in str(e) or "模型" in str(e):
+                logger.error("模型架构问题，需要检查GAT编码器配置")
+
+            # 返回新创建的编码器，但记录这是一个严重问题
+            logger.warning("⚠️  使用未预训练的模型继续训练，这可能影响性能")
             from gat import create_production_encoder
             gat_config = config.get('gat', {})
             return create_production_encoder(hetero_data, gat_config)
@@ -893,7 +904,7 @@ class TopologyTrainer(BaseTrainer):
                 
                 # Episode执行
                 for step in range(max_steps_per_episode):
-                    action, log_prob, value = agent.select_action(state, training=True)
+                    action, log_prob, value, _ = agent.select_action(state, training=True)
                     
                     if action is None:
                         break
@@ -1028,7 +1039,7 @@ class AdaptiveTrainer(BaseTrainer):
                 
                 # Episode执行
                 for step in range(max_steps_per_episode):
-                    action, log_prob, value = agent.select_action(state, training=True)
+                    action, log_prob, value, _ = agent.select_action(state, training=True)
                     
                     if action is None:
                         break
@@ -1209,7 +1220,8 @@ class UnifiedTrainer(BaseTrainer):
             agent = AgentFactory.create_agent(env, self.config, self.device)
             
             # 8. GNN预训练
-            training_source = scale_generator if scale_generator else [env.hetero_data] if hasattr(env, 'hetero_data') else [mpc]
+            # 只有当有多尺度生成器时才进行预训练，否则跳过
+            training_source = scale_generator if scale_generator else None
             AgentFactory.setup_gnn_pretraining(env.hetero_data, self.config, training_source)
             
             # 9. 训练配置
@@ -1240,7 +1252,7 @@ class UnifiedTrainer(BaseTrainer):
                 
                 # Episode执行
                 for step in range(max_steps_per_episode):
-                    action, log_prob, value = agent.select_action(state, training=True)
+                    action, log_prob, value, _ = agent.select_action(state, training=True)
                     
                     if action is None:
                         break
@@ -1326,7 +1338,9 @@ class UnifiedTrainer(BaseTrainer):
             }
             
         except Exception as e:
+            import traceback
             logger.error(f"统一导演训练失败: {e}")
+            logger.error(f"详细错误信息: {traceback.format_exc()}")
             if self.logger:
                 self.logger.close()
             return {'success': False, 'error': str(e), 'mode': 'unified'}

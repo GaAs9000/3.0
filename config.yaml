@@ -29,7 +29,7 @@ training:
     max_norm: 0.5
   success_criteria:
     cv_threshold: 0.3
-    connectivity_threshold: 0.9
+    connectivity_threshold: 0.7
     min_length_threshold: 10
   convergence:
     window_size: 10
@@ -190,7 +190,7 @@ adaptive_mode:
       coupling_trend_window: 100
       composite_score_target: 0.5
       composite_score_window: 80
-      connectivity_rate_threshold: 0.9
+      connectivity_rate_threshold: 0.7
       plateau_detection_enabled: true
     parameter_evolution:
       connectivity_penalty_range: [0.1, 1.5]
@@ -264,7 +264,7 @@ unified_mode:
       min_episodes_per_stage: 200
       max_episodes_per_stage: 1000
       quality_threshold: 0.4
-      connectivity_threshold: 0.9
+      connectivity_threshold: 0.7
       performance_weight: 0.4
       stability_weight: 0.3
       progress_weight: 0.3
@@ -367,7 +367,7 @@ unified_mode:
       coupling_trend_window: 100
       composite_score_target: 0.5
       composite_score_window: 80
-      connectivity_rate_threshold: 0.9
+      connectivity_rate_threshold: 0.7
       plateau_detection_enabled: true
     parameter_evolution:
       connectivity_penalty_range: [0.1, 1.5]

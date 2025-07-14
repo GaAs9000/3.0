@@ -623,9 +623,18 @@ class ScaleAwareSyntheticGenerator:
             if total_gen_capacity < total_load:
                 return False
                 
-            # 检查参数范围
-            if np.any(grid_data['branch'][:, 2] <= 0) or np.any(grid_data['branch'][:, 3] <= 0):
-                return False
+            # 检查参数范围（只检查在线支路）
+            online_branches = grid_data['branch'][grid_data['branch'][:, 10] == 1]
+            if len(online_branches) > 0:
+                # 检查电阻和电抗是否为正数
+                if np.any(online_branches[:, 2] <= 0) or np.any(online_branches[:, 3] <= 0):
+                    # 修复无效参数而不是直接返回False
+                    for i, branch in enumerate(grid_data['branch']):
+                        if branch[10] == 1:  # 在线支路
+                            if branch[2] <= 0:
+                                grid_data['branch'][i, 2] = 0.01  # 设置最小电阻
+                            if branch[3] <= 0:
+                                grid_data['branch'][i, 3] = 0.01  # 设置最小电抗
                 
             return True
             
