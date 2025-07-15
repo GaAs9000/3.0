@@ -284,6 +284,8 @@ class GNNPretrainer:
             self.device = torch.device(self.config.device)
             
         self.encoder.to(self.device)
+        # 确保编码器使用float32精度
+        self.encoder.float()
         
         # 损失函数
         self.smoothness_loss = SmoothnessLoss()
@@ -306,8 +308,8 @@ class GNNPretrainer:
             min_lr=1e-6
         )
         
-        # 混合精度训练 - 使用PyTorch 2025最佳实践
-        self.scaler = torch.amp.GradScaler(enabled=(torch.cuda.is_available()))
+        # 混合精度训练 - 已禁用以确保数据类型一致性
+        self.scaler = torch.amp.GradScaler(enabled=False)
         
         # 训练状态
         self.current_epoch = 0
@@ -415,6 +417,13 @@ class GNNPretrainer:
             try:
                 graphs = [self._grid_to_graph(grid) for grid in processed_grids]
                 batch = Batch.from_data_list(graphs).to(self.device)
+
+                # 确保数据类型一致性（使用float32）
+                if hasattr(batch, 'x') and batch.x is not None:
+                    batch.x = batch.x.float()
+                if hasattr(batch, 'edge_attr') and batch.edge_attr is not None:
+                    batch.edge_attr = batch.edge_attr.float()
+
             except Exception as e:
                 logger.warning(f"批次数据转换失败: {e}，跳过此批次")
                 continue
@@ -424,8 +433,8 @@ class GNNPretrainer:
             
             # 反向传播
             self.optimizer.zero_grad()
-            
-            if self.scaler:
+
+            if self.scaler and self.scaler.is_enabled():
                 self.scaler.scale(loss).backward()
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
@@ -444,20 +453,40 @@ class GNNPretrainer:
     def _compute_loss(self, batch: Batch) -> torch.Tensor:
         """计算多任务损失"""
         # 获取节点嵌入
-        with torch.amp.autocast('cuda') if self.scaler else torch.no_grad():
+        if self.scaler and self.scaler.is_enabled():
+            # 使用自动混合精度
+            with torch.amp.autocast('cuda'):
+                # 构建异构数据（与实际系统兼容）
+                hetero_batch = HeteroData()
+                hetero_batch['bus'].x = batch.x
+                hetero_batch['bus', 'connects', 'bus'].edge_index = batch.edge_index
+                if hasattr(batch, 'edge_attr') and batch.edge_attr is not None:
+                    hetero_batch['bus', 'connects', 'bus'].edge_attr = batch.edge_attr
+
+                # 通过编码器 - 需要保持梯度计算
+                encoder_output = self.encoder(hetero_batch)
+        else:
+            # 标准精度训练
             # 构建异构数据（与实际系统兼容）
             hetero_batch = HeteroData()
-            hetero_batch['bus'].x = batch.x
+            hetero_batch['bus'].x = batch.x.float()  # 确保使用float32
             hetero_batch['bus', 'connects', 'bus'].edge_index = batch.edge_index
             if hasattr(batch, 'edge_attr') and batch.edge_attr is not None:
-                hetero_batch['bus', 'connects', 'bus'].edge_attr = batch.edge_attr
+                hetero_batch['bus', 'connects', 'bus'].edge_attr = batch.edge_attr.float()
 
-            # 通过编码器
-            node_embeddings = self.encoder(hetero_batch.x_dict, hetero_batch.edge_index_dict)
-            
+            # 通过编码器 - 需要保持梯度计算
+            encoder_output = self.encoder(hetero_batch)
+
         # 如果编码器返回字典，提取bus嵌入
-        if isinstance(node_embeddings, dict):
-            node_embeddings = node_embeddings['bus']
+        if isinstance(encoder_output, dict):
+            node_embeddings = encoder_output['bus']
+        elif isinstance(encoder_output, tuple):
+            # 如果返回元组，第一个元素是节点嵌入
+            node_embeddings_dict = encoder_output[0]
+            node_embeddings = node_embeddings_dict['bus']
+        else:
+            # 直接是tensor
+            node_embeddings = encoder_output
             
         # 计算各项损失
         smooth_loss = self.smoothness_loss(
@@ -617,14 +646,64 @@ class GNNPretrainer:
             if num_nodes == 0:
                 raise ValueError("空的母线数据")
 
-            # 提取节点特征，确保有足够的列
-            if bus_data.shape[1] < 6:
-                # 如果列数不足，用零填充
-                padded_features = np.zeros((num_nodes, 5))
-                padded_features[:, :min(5, bus_data.shape[1]-1)] = bus_data[:, 1:min(6, bus_data.shape[1])]
-                node_features = torch.tensor(padded_features, dtype=torch.float32)
+            # 提取节点特征，使用与实际系统兼容的特征提取方式
+            # 基础特征：Pd, Qd, Gs, Bs, Vm, Va, Vmax, Vmin, degree (9维)
+            if bus_data.shape[1] >= 9:
+                # 标准MATPOWER格式：提取基础电气特征
+                Pd = bus_data[:, 2] / 100.0  # 有功负荷，标准化
+                Qd = bus_data[:, 3] / 100.0  # 无功负荷，标准化
+                Gs = bus_data[:, 4]          # 并联电导
+                Bs = bus_data[:, 5]          # 并联电纳
+                Vm = bus_data[:, 7]          # 电压幅值
+                Va = np.deg2rad(bus_data[:, 8])  # 电压相角
+
+                # 电压约束（如果有的话）
+                Vmax = bus_data[:, 11] if bus_data.shape[1] > 11 else np.ones(num_nodes) * 1.1
+                Vmin = bus_data[:, 12] if bus_data.shape[1] > 12 else np.ones(num_nodes) * 0.9
+
+                # 简化的度数计算（基于支路数据）
+                degree = np.zeros(num_nodes)
+                for branch in branch_data:
+                    if len(branch) > 1:
+                        i, j = int(branch[0]) - 1, int(branch[1]) - 1
+                        if 0 <= i < num_nodes and 0 <= j < num_nodes:
+                            degree[i] += 1
+                            degree[j] += 1
+
+                # 组合基础特征
+                base_features = np.column_stack([Pd, Qd, Gs, Bs, Vm, Va, Vmax, Vmin, degree])
+
+                # 添加bus_type独热编码（3维：type_1, type_2, type_3）
+                bus_types = bus_data[:, 1].astype(int) if bus_data.shape[1] > 1 else np.ones(num_nodes, dtype=int)
+                type_1 = (bus_types == 1).astype(float)
+                type_2 = (bus_types == 2).astype(float)
+                type_3 = (bus_types == 3).astype(float)
+                type_features = np.column_stack([type_1, type_2, type_3])
+
+                # 添加发电机特征（5维：Pg, Qg, Pg_max, Pg_min, is_gen）
+                gen_features = np.zeros((num_nodes, 5))
+                # 随机设置一些节点为发电机
+                gen_indices = np.random.choice(num_nodes, size=max(1, num_nodes//10), replace=False)
+                gen_features[gen_indices, 0] = np.random.uniform(0.1, 2.0, len(gen_indices))  # Pg
+                gen_features[gen_indices, 2] = gen_features[gen_indices, 0] * 1.5  # Pg_max
+                gen_features[gen_indices, 3] = 0.0  # Pg_min
+                gen_features[gen_indices, 4] = 1.0  # is_gen
+
+                # 合并所有特征 (9 + 3 + 5 = 17维，与实际pandapower数据匹配)
+                all_features = np.hstack([base_features, type_features, gen_features])
+                node_features = torch.tensor(all_features, dtype=torch.float32)
             else:
-                node_features = torch.tensor(bus_data[:, 1:6], dtype=torch.float32)
+                # 如果数据格式不标准，创建最小兼容特征集
+                # 17维特征：9个基础特征 + 3个bus_type独热编码 + 5个发电机特征
+                padded_features = np.zeros((num_nodes, 17))
+                # 填充可用的特征
+                available_cols = min(bus_data.shape[1] - 1, 9)
+                if available_cols > 0:
+                    padded_features[:, :available_cols] = bus_data[:, 1:1+available_cols]
+                # 默认bus_type为1（PQ节点）
+                padded_features[:, 9] = 1.0  # type_1
+                # 发电机特征保持为0（默认无发电机）
+                node_features = torch.tensor(padded_features, dtype=torch.float32)
 
             # 边索引和特征
             edge_list = []
@@ -641,13 +720,19 @@ class GNNPretrainer:
                         edge_list.append([i, j])
                         edge_list.append([j, i])  # 无向图
 
-                        # 边特征（电阻、电抗、导纳等）
+                        # 边特征（与实际系统兼容的9维特征）
+                        # ['r', 'x', 'b', '|z|', 'y', 'rateA', 'angle_diff', 'is_transformer', 'status']
                         r = branch[2] if len(branch) > 2 else 0.01
                         x = branch[3] if len(branch) > 3 else 0.01
-                        z = np.sqrt(r**2 + x**2)
-                        y = 1.0 / z if z > 1e-6 else 1.0
+                        b = branch[4] if len(branch) > 4 else 0.0  # 电纳
+                        z_magnitude = np.sqrt(r**2 + x**2)
+                        y = 1.0 / z_magnitude if z_magnitude > 1e-6 else 1.0
+                        rateA = branch[5] if len(branch) > 5 else 100.0  # 载流限制
+                        angle_diff = 0.0  # 相角差限制（简化）
+                        is_transformer = 0.0  # 非变压器
+                        status = 1.0  # 在线状态
 
-                        edge_feat = [r, x, z, y]
+                        edge_feat = [r, x, b, z_magnitude, y, rateA, angle_diff, is_transformer, status]
                         edge_features.extend([edge_feat, edge_feat])  # 双向边
 
             # 如果没有边，创建一个最小连通图
@@ -655,7 +740,9 @@ class GNNPretrainer:
                 logger.warning("没有有效边，创建最小连通图")
                 for i in range(min(num_nodes - 1, 1)):
                     edge_list.extend([[i, i+1], [i+1, i]])
-                    edge_features.extend([[0.01, 0.01, 0.014, 70.0]] * 2)
+                    # 9维边特征：[r, x, b, |z|, y, rateA, angle_diff, is_transformer, status]
+                    fallback_edge_feat = [0.01, 0.01, 0.0, 0.014, 70.0, 100.0, 0.0, 0.0, 1.0]
+                    edge_features.extend([fallback_edge_feat, fallback_edge_feat])
 
             edge_index = torch.tensor(edge_list, dtype=torch.long).t().contiguous()
             edge_attr = torch.tensor(edge_features, dtype=torch.float32)
@@ -664,11 +751,20 @@ class GNNPretrainer:
 
         except Exception as e:
             logger.error(f"电网数据转换失败: {e}")
-            # 返回一个最小的有效图
+            # 返回一个最小的有效图，使用17维特征以保持兼容性
+            fallback_features = torch.zeros(2, 17)  # 2个节点，17个特征
+            fallback_features[:, 0] = 0.1  # 基础负荷
+            fallback_features[:, 4] = 1.0  # 电压幅值
+            fallback_features[:, 9] = 1.0  # bus_type_1
+            # 9维边特征：[r, x, b, |z|, y, rateA, angle_diff, is_transformer, status]
+            fallback_edge_attr = torch.tensor([
+                [0.01, 0.01, 0.0, 0.014, 70.0, 100.0, 0.0, 0.0, 1.0],
+                [0.01, 0.01, 0.0, 0.014, 70.0, 100.0, 0.0, 0.0, 1.0]
+            ], dtype=torch.float32)
             return Data(
-                x=torch.randn(2, 5),  # 2个节点，5个特征
+                x=fallback_features,
                 edge_index=torch.tensor([[0, 1], [1, 0]], dtype=torch.long).t(),
-                edge_attr=torch.tensor([[0.01, 0.01, 0.014, 70.0]] * 2, dtype=torch.float32)
+                edge_attr=fallback_edge_attr
             )
         
     def _generate_val_data(self, data_generator) -> List[Data]:

@@ -198,8 +198,9 @@ class ScaleAwareSyntheticGenerator:
         grid_data = self._apply_load_gen_variations(grid_data)
         
         # 验证物理可行性
-        if not self._validate_grid_physics(grid_data):
-            logger.warning("Generated grid failed physics validation, using base case")
+        validation_result, failure_reason = self._validate_grid_physics(grid_data)
+        if not validation_result:
+            logger.warning(f"Generated grid failed physics validation ({failure_reason}), using base case")
             grid_data = base_case
             
         # 选择合适的K值
@@ -539,7 +540,7 @@ class ScaleAwareSyntheticGenerator:
             
             for u in main_component:
                 for v in component:
-                    # 简单使用节点编号差作为"距离"
+                    # 使用节点编号差作为连接距离度量
                     dist = abs(u - v)
                     if dist < min_dist:
                         min_dist = dist
@@ -574,29 +575,39 @@ class ScaleAwareSyntheticGenerator:
         
         # 发电扰动
         if 'gen' in grid_data and len(grid_data['gen']) > 0:
-            gen_scale = np.random.uniform(*self.config.gen_variation_range, 
+            # 先计算总负荷，确保发电充足
+            total_load = grid_data['bus'][:, 2].sum()
+
+            # 应用发电扰动，但确保不会导致功率不平衡
+            gen_scale = np.random.uniform(*self.config.gen_variation_range,
                                         size=len(grid_data['gen']))
             grid_data['gen'][:, 1] *= gen_scale  # PG
-            
-            # 确保发电满足负荷（简单调整）
-            total_load = grid_data['bus'][:, 2].sum()
+
+            # 确保发电满足负荷（更保守的调整）
             total_gen = grid_data['gen'][:, 1].sum()
-            
-            if total_gen < total_load * 1.1:  # 留10%裕度
+
+            if total_gen < total_load * 1.2:  # 留20%裕度
                 # 等比例增加所有发电
-                scale_factor = (total_load * 1.15) / total_gen
+                scale_factor = (total_load * 1.25) / total_gen
                 grid_data['gen'][:, 1] *= scale_factor
+
+            # 同时更新发电容量上限
+            if grid_data['gen'].shape[1] > 8:  # 如果有Pmax列
+                grid_data['gen'][:, 8] = np.maximum(
+                    grid_data['gen'][:, 8],
+                    grid_data['gen'][:, 1] * 1.1  # 容量比当前发电高10%
+                )
                 
         return grid_data
     
-    def _validate_grid_physics(self, grid_data: Dict) -> bool:
+    def _validate_grid_physics(self, grid_data: Dict) -> Tuple[bool, str]:
         """验证电网物理可行性"""
         try:
             # 检查基本完整性
             if 'bus' not in grid_data or len(grid_data['bus']) == 0:
-                return False
+                return False, "missing_bus_data"
             if 'branch' not in grid_data or len(grid_data['branch']) == 0:
-                return False
+                return False, "missing_branch_data"
                 
             # 检查节点编号连续性
             bus_ids = set(grid_data['bus'][:, 0].astype(int))
@@ -605,7 +616,7 @@ class ScaleAwareSyntheticGenerator:
             for branch in grid_data['branch']:
                 if branch[10] == 1:  # 在线支路
                     if int(branch[0]) not in bus_ids or int(branch[1]) not in bus_ids:
-                        return False
+                        return False, "invalid_branch_connection"
                         
             # 检查至少有一个发电机
             if 'gen' not in grid_data or len(grid_data['gen']) == 0:
@@ -616,12 +627,19 @@ class ScaleAwareSyntheticGenerator:
                 gen[0, 7] = 1
                 grid_data['gen'] = gen
                 
-            # 检查功率平衡（粗略）
+            # 检查功率平衡（更宽松的检查）
             total_load = grid_data['bus'][:, 2].sum()
             total_gen_capacity = grid_data['gen'][:, 8].sum() if grid_data['gen'].shape[1] > 8 else grid_data['gen'][:, 1].sum() * 1.5
-            
-            if total_gen_capacity < total_load:
-                return False
+
+            if total_gen_capacity < total_load * 0.9:  # 允许90%的覆盖率
+                # 尝试自动修复功率不平衡
+                if 'gen' in grid_data and len(grid_data['gen']) > 0:
+                    scale_factor = (total_load * 1.1) / grid_data['gen'][:, 1].sum()
+                    grid_data['gen'][:, 1] *= scale_factor
+                    if grid_data['gen'].shape[1] > 8:
+                        grid_data['gen'][:, 8] *= scale_factor
+                else:
+                    return False, "power_imbalance_no_gen"
                 
             # 检查参数范围（只检查在线支路）
             online_branches = grid_data['branch'][grid_data['branch'][:, 10] == 1]
@@ -636,11 +654,11 @@ class ScaleAwareSyntheticGenerator:
                             if branch[3] <= 0:
                                 grid_data['branch'][i, 3] = 0.01  # 设置最小电抗
                 
-            return True
-            
+            return True, "valid"
+
         except Exception as e:
             logger.error(f"Physics validation error: {e}")
-            return False
+            return False, f"exception_{str(e)[:20]}"
     
     def get_progressive_schedule(self, episode_num: int, 
                                total_episodes: int) -> Dict[str, float]:

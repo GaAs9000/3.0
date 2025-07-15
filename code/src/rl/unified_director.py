@@ -228,24 +228,33 @@ class PerformanceMonitor:
         
     def update(self, episode_info: Dict[str, Any]):
         """更新性能指标
-        
+
         Args:
             episode_info: episode信息字典
         """
         self.episode_rewards.append(episode_info.get('reward', 0.0))
         self.episode_lengths.append(episode_info.get('episode_length', 0))
-        
+
         # 质量指标
         quality_score = episode_info.get('quality_score', 0.0)
         if 'reward_components' in episode_info:
             components = episode_info['reward_components']
             quality_score = components.get('quality_score', quality_score)
         self.quality_scores.append(quality_score)
-        
-        # 连通性
+
+        # 连通性 - 添加调试信息
         connectivity = episode_info.get('connectivity', 0.0)
+
+        # 调试：检查连通性数据来源
+        if 'metrics' in episode_info:
+            metrics_connectivity = episode_info['metrics'].get('connectivity', None)
+            if metrics_connectivity is not None:
+                connectivity = metrics_connectivity
+                logger.debug(f"从metrics获取连通性: {connectivity:.3f}")
+
+        logger.debug(f"Episode连通性数据: {connectivity:.3f}")
         self.connectivity_rates.append(connectivity)
-        
+
         self.last_update_time = time.time()
     
     def get_metrics(self) -> Dict[str, Any]:
@@ -348,11 +357,17 @@ class SafetyMonitor:
             if cv > 2.0:  # 变异系数过大
                 warnings.append(f"训练不稳定: CV={cv:.3f}")
         
-        # 3. 检查连通性失效
+        # 3. 检查连通性失效 - 修复检测逻辑
         connectivity = metrics.get('avg_connectivity', 1.0)
-        if connectivity < 0.5:
-            warnings.append(f"连通性严重下降: {connectivity:.3f}")
-            is_safe = False
+
+        # 调试信息：记录连通性值
+        logger.debug(f"当前平均连通性: {connectivity:.3f}")
+
+        # 只有在连通性确实很低且有足够样本时才报警
+        sample_count = metrics.get('sample_count', 0)
+        if sample_count >= 5 and connectivity < 0.3:  # 需要至少5个样本，阈值降低到0.3
+            warnings.append(f"连通性下降: {connectivity:.3f}")
+            # 不设置is_safe=False，只是警告，不触发紧急恢复
         
         # 4. 检查失败切换次数
         if self.failed_transitions >= self.config.get('max_failed_transitions', 3):

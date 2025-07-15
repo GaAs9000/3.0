@@ -20,9 +20,9 @@ data:
 # 训练基础配置
 # =====================================================
 training:
-  num_episodes: 5              # 只训练5个episode用于测试
+  num_episodes: 500            # 增加到500个episodes进行充分训练
   max_steps_per_episode: 20    # 每个episode最多20步
-  update_interval: 2           # 每2个episode更新一次
+  update_interval: 10          # 每10个episode更新一次
   save_interval: 100
   eval_interval: 50
   gradient_clipping:
@@ -134,14 +134,14 @@ basic_mode:
 topology_mode:
   enabled: false                  # 手动控制，或通过--mode topology启用
   description: "拓扑变化训练 - 只多尺度生成器"
-  
+
   # 多尺度数据生成配置
   multi_scale_generation:
-    enabled: true
+    enabled: true                  # 重新启用多尺度生成（维度问题已修复）
     generator_type: scale_aware
     # 拓扑变形配置
     topology_variation:
-      enabled: true
+      enabled: true                # 重新启用拓扑变形
       variation_prob: 0.2
       node_addition_prob: 0.1
       node_removal_prob: 0.05

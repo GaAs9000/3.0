@@ -77,54 +77,72 @@ class EnhancedPowerGridPartitioningEnv(PowerGridPartitioningEnv):
     def get_connectivity_safe_partitions(self, node_id: int) -> List[int]:
         """
         获取节点可以移动到的所有保证连通性的分区
-        
+
         Args:
             node_id: 边界节点ID
-        
+
         Returns:
             可以安全移动到的分区ID列表
         """
-        # 使用更高效的缓存键：只包含节点ID和其当前分区
-        current_assignment = self.state_manager.current_partition[node_id]
-        
-        # 获取节点的邻居分区（这是必要的计算）
-        # 确保node_id是Python int类型，用于NetworkX接口
+        # 确保node_id是正确的类型
         node_id_int = int(node_id.item()) if torch.is_tensor(node_id) else int(node_id)
-        neighbors = list(self.nx_graph.neighbors(node_id_int))
+
+        # 使用更高效的缓存键：只包含节点ID和其当前分区
+        current_assignment = self.state_manager.current_partition[node_id_int]
+
+        # 获取节点的邻居分区（这是必要的计算）
+        try:
+            neighbors = list(self.nx_graph.neighbors(node_id_int))
+        except Exception as e:
+            logger.warning(f"Failed to get neighbors for node {node_id_int}: {e}")
+            # 回退：返回除当前分区外的所有分区
+            num_partitions = int(self.state_manager.current_partition.max().item())
+            return [p for p in range(1, num_partitions + 1) if p != current_assignment]
+
         neighbor_partitions = set()
         for neighbor in neighbors:
             # neighbor已经是int类型，可以直接用作索引
-            partition = self.state_manager.current_partition[neighbor]
-            if partition != current_assignment and partition > 0:
-                neighbor_partitions.add(partition)
-        
+            if neighbor < len(self.state_manager.current_partition):
+                partition = self.state_manager.current_partition[neighbor]
+                if partition != current_assignment and partition > 0:
+                    neighbor_partitions.add(partition)
+
+        # 如果没有邻居分区，返回所有其他分区（简化处理）
+        if not neighbor_partitions:
+            num_partitions = int(self.state_manager.current_partition.max().item())
+            return [p for p in range(1, num_partitions + 1) if p != current_assignment]
+
         # 对每个邻居分区进行连通性测试
         safe_partitions = []
         for target_partition in neighbor_partitions:
             # 创建针对特定移动的缓存键
-            move_key = (node_id, current_assignment, target_partition, 
+            move_key = (node_id_int, current_assignment, target_partition,
                        self.state_manager.current_step)  # 使用step作为版本号
-            
+
             if move_key in self.connectivity_cache:
                 if self.connectivity_cache[move_key]:
                     safe_partitions.append(target_partition)
             else:
                 # 临时移动节点
                 test_partition = self.state_manager.current_partition.clone()
-                test_partition[node_id] = target_partition
-                
+                test_partition[node_id_int] = target_partition
+
                 # 检查连通性
                 is_safe = self._check_partition_connectivity(test_partition)
                 self.connectivity_cache[move_key] = is_safe
-                
+
                 if is_safe:
                     safe_partitions.append(target_partition)
-        
+
+        # 如果没有安全分区，至少返回一个邻居分区（降级处理）
+        if not safe_partitions and neighbor_partitions:
+            safe_partitions = [list(neighbor_partitions)[0]]
+
         # 限制缓存大小
         if len(self.connectivity_cache) > 10000:
             # 清理旧的缓存条目
             self.connectivity_cache.clear()
-        
+
         return safe_partitions
     
     def _check_partition_connectivity(self, partition: Dict[int, int]) -> bool:

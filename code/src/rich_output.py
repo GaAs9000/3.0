@@ -112,9 +112,9 @@ class RichOutputManager:
     def warning(self, message: str):
         """显示警告消息（总是显示）"""
         if RICH_AVAILABLE:
-            self.console.print(f"⚠️  {message}", style="warning")
+            self.console.print(f"[WARNING] {message}", style="warning")
         else:
-            print(f"⚠️  {message}")
+            print(f"[WARNING] {message}")
     
     def error(self, message: str, exception: Exception = None):
         """显示错误消息（总是显示）"""

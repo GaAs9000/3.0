@@ -293,7 +293,8 @@ class CriticNetwork(nn.Module):
         """
         super().__init__()
         
-        # 状态编码器
+        # 状态编码器 - 动态适应输入维度
+        self.region_embedding_dim = region_embedding_dim
         self.state_encoder = nn.Sequential(
             nn.Linear(region_embedding_dim, hidden_dim),
             nn.ReLU(),

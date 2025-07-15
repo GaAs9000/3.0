@@ -382,7 +382,7 @@ class MetisInitializer:
             only_show_errors = self.training_output.get('only_show_errors', False)
 
             if show_metis_details and not only_show_errors:
-                print("🚀 使用 METIS 进行高质量的初始分区...")
+                print("使用 METIS 进行高质量的初始分区...")
             partition_labels = self._metis_partition(num_partitions)
             if show_metis_details and not only_show_errors:
                 from utils_common import safe_rich_debug

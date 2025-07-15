@@ -46,7 +46,7 @@ class LouvainPartitioner(BasePartitioner):
             
             # 如果网络太小，使用简单的分区方法
             if G.number_of_nodes() <= env.num_partitions:
-                return self._simple_partition(G, env.num_partitions)
+                return self._balanced_partition(G, env.num_partitions)
             
             # 运行Louvain算法
             # 为了保证实验可重复性，统一使用random_state=seed
@@ -64,7 +64,7 @@ class LouvainPartitioner(BasePartitioner):
         except Exception as e:
             print(f"❌ Louvain分区失败: {str(e)}")
             # 降级到简单的分区方法
-            return self._fallback_partition(env)
+            return self._emergency_partition(env)
     
     def _build_networkx_graph(self, env: 'PowerGridPartitioningEnv') -> nx.Graph:
         """构建NetworkX图，使用导纳作为边权重"""
@@ -216,26 +216,68 @@ class LouvainPartitioner(BasePartitioner):
         
         return final_labels
     
-    def _simple_partition(self, G: nx.Graph, num_partitions: int) -> np.ndarray:
-        """简单的分区方法，用于小网络"""
+    def _balanced_partition(self, G: nx.Graph, num_partitions: int) -> np.ndarray:
+        """平衡分区方法，确保分区大小相对均匀"""
         nodes = list(G.nodes())
         labels = np.zeros(len(nodes), dtype=int)
-        
-        # 简单的轮询分配
-        for i, node in enumerate(nodes):
-            labels[node] = (i % num_partitions) + 1
-        
+
+        # 使用度数排序进行更智能的分配
+        node_degrees = [(node, G.degree(node)) for node in nodes]
+        node_degrees.sort(key=lambda x: x[1], reverse=True)
+
+        # 轮询分配，但考虑度数平衡
+        partition_sizes = [0] * num_partitions
+        for node, degree in node_degrees:
+            # 选择当前最小的分区
+            min_partition = min(range(num_partitions), key=lambda i: partition_sizes[i])
+            labels[node] = min_partition + 1
+            partition_sizes[min_partition] += 1
+
         return labels
     
-    def _fallback_partition(self, env: 'PowerGridPartitioningEnv') -> np.ndarray:
-        """降级分区方法"""
-        print("⚠️ 使用降级分区方法...")
-        
-        # 简单的轮询分配
+    def _emergency_partition(self, env: 'PowerGridPartitioningEnv') -> np.ndarray:
+        """紧急分区方法，当所有其他方法失败时使用"""
+        print("⚠️ 使用紧急分区方法...")
+
+        # 基于节点ID的确定性分配，确保连通性
         labels = np.zeros(env.total_nodes, dtype=int)
-        for i in range(env.total_nodes):
-            labels[i] = (i % env.num_partitions) + 1
-        
+
+        # 尝试基于图结构的分配
+        if hasattr(env, 'hetero_data') and env.hetero_data is not None:
+            try:
+                import networkx as nx
+                G = nx.Graph()
+                edge_index = env.hetero_data['bus', 'connects', 'bus'].edge_index
+                edges = [(edge_index[0, i].item(), edge_index[1, i].item())
+                        for i in range(edge_index.size(1))]
+                G.add_edges_from(edges)
+
+                # 使用连通分量信息
+                components = list(nx.connected_components(G))
+                if len(components) == 1:
+                    # 图是连通的，使用BFS分层
+                    bfs_layers = list(nx.bfs_layers(G, source=0))
+                    for layer_idx, layer in enumerate(bfs_layers):
+                        partition_id = (layer_idx % env.num_partitions) + 1
+                        for node in layer:
+                            if node < env.total_nodes:
+                                labels[node] = partition_id
+                else:
+                    # 图不连通，每个分量分配到不同分区
+                    for comp_idx, component in enumerate(components):
+                        partition_id = (comp_idx % env.num_partitions) + 1
+                        for node in component:
+                            if node < env.total_nodes:
+                                labels[node] = partition_id
+            except Exception:
+                # 如果图结构方法失败，使用轮询
+                for i in range(env.total_nodes):
+                    labels[i] = (i % env.num_partitions) + 1
+        else:
+            # 没有图数据，使用轮询
+            for i in range(env.total_nodes):
+                labels[i] = (i % env.num_partitions) + 1
+
         return labels
     
     def get_modularity(self, env: 'PowerGridPartitioningEnv', labels: np.ndarray) -> float:

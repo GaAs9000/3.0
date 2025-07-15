@@ -291,7 +291,7 @@ class StateManager:
         only_show_errors = self.training_output.get('only_show_errors', False)
 
         if show_state_manager_details and not only_show_errors:
-            print(f"🔧 StateManager: 设置节点嵌入矩阵，形状 {self.node_embeddings.shape}")
+            print(f"StateManager: 设置节点嵌入矩阵，形状 {self.node_embeddings.shape}")
             print(f"   - 总节点数: {self.total_nodes}")
             print(f"   - 嵌入维度: {self.embedding_dim}")
             print(f"   - 注意：此嵌入可能包含GAT原始嵌入 + 注意力增强信息")

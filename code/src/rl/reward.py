@@ -726,7 +726,7 @@ class RewardFunction:
         if bus_features.shape[1] > 2:
             self.node_generation = bus_features[:, 2]
         else:
-            # 智能估算发电数据而不是简单使用零值
+            # 智能估算发电数据
             self.node_generation = self._estimate_missing_generation_data()
             warnings.warn(
                 "缺少发电数据，使用智能估算值。建议提供完整的发电数据以提高准确性。"
@@ -1251,21 +1251,8 @@ class RewardFunction:
                     scenario_context
                 )
             else:
-                # 回退到简单实现（兼容性保证）
-                main_reward = current_quality_score - (self.previous_quality_score or 0.5)
-                reward_details = {
-                    'main_reward': float(main_reward),
-                    'base_reward': float(main_reward),
-                    'relative_reward': 0.0,
-                    'improvement_bonus': 0.0,
-                    'exploration_reward': 0.0,
-                    'total_reward': float(main_reward),
-                    'baseline_info': {
-                        'baseline_quality': 0.5,
-                        'baseline_source': 'fallback',
-                        'query_level': 0
-                    }
-                }
+                # 如果相对奖励计算器未初始化，抛出错误
+                raise RuntimeError("相对奖励计算器未正确初始化，无法计算奖励")
             
             # 4. 平台期检测
             plateau_result = None

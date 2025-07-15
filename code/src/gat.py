@@ -230,22 +230,19 @@ class HeteroGraphEncoder(nn.Module):
         self.output_dim = output_dim or hidden_channels
         
         # --- 1. 特征预处理层 ---
-        # 统一所有节点类型的特征维度
-        max_node_dim = max(node_feature_dims.values())
+        # 为所有节点类型创建投影层，统一投影到hidden_channels维度
         max_edge_dim = max(edge_feature_dims.values()) if edge_feature_dims else None
-        
-        # 为不同类型的节点创建特征投影层
+
+        # 为所有节点类型创建特征投影层（投影到hidden_channels）
         self.node_projectors = nn.ModuleDict()
         for node_type, feature_dim in node_feature_dims.items():
-            if feature_dim != max_node_dim:
-                self.node_projectors[node_type] = nn.Linear(feature_dim, max_node_dim)
-            else:
-                self.node_projectors[node_type] = nn.Identity()
-        
+            # 所有节点类型都需要投影层，统一投影到hidden_channels维度
+            self.node_projectors[node_type] = nn.Linear(feature_dim, hidden_channels)
+
         # --- 2. 主干网络 (Backbone) ---
-        # 创建同构GNN编码器
+        # 创建同构GNN编码器，输入维度为hidden_channels
         gnn_encoder = GNNEncoder(
-            in_channels=max_node_dim,
+            in_channels=hidden_channels,
             hidden_channels=hidden_channels,
             num_layers=gnn_layers,
             heads=heads,
@@ -280,10 +277,48 @@ class HeteroGraphEncoder(nn.Module):
     def preprocess_node_features(self, x_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         """
         预处理节点特征，确保所有类型具有相同维度
+
+        将所有节点类型的特征统一投影到hidden_channels维度
+
+        Args:
+            x_dict: 节点特征字典 {node_type: features}
+
+        Returns:
+            processed_x_dict: 投影后的特征字典，所有特征维度为hidden_channels
+
+        Raises:
+            KeyError: 如果节点类型没有对应的投影层
+            RuntimeError: 如果特征维度不匹配
         """
         processed_x_dict = {}
+
         for node_type, x in x_dict.items():
-            processed_x_dict[node_type] = self.node_projectors[node_type](x)
+            # 验证节点类型是否有对应的投影层
+            if node_type not in self.node_projectors:
+                raise KeyError(f"节点类型 '{node_type}' 没有对应的投影层。"
+                             f"可用的节点类型: {list(self.node_projectors.keys())}")
+
+            # 验证输入特征维度
+            projector = self.node_projectors[node_type]
+            expected_input_dim = projector.in_features if hasattr(projector, 'in_features') else None
+
+            if expected_input_dim is not None and x.shape[-1] != expected_input_dim:
+                raise RuntimeError(f"节点类型 '{node_type}' 的特征维度不匹配。"
+                                 f"期望: {expected_input_dim}, 实际: {x.shape[-1]}")
+
+            # 应用投影层
+            try:
+                projected_x = projector(x)
+                processed_x_dict[node_type] = projected_x
+
+                # 验证输出维度
+                if projected_x.shape[-1] != self.hidden_channels:
+                    raise RuntimeError(f"投影后的特征维度不正确。"
+                                     f"期望: {self.hidden_channels}, 实际: {projected_x.shape[-1]}")
+
+            except Exception as e:
+                raise RuntimeError(f"节点类型 '{node_type}' 的特征投影失败: {str(e)}")
+
         return processed_x_dict
     
     def forward(self, data: HeteroData, 

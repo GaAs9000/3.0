@@ -23,6 +23,7 @@ import time
 import json
 import warnings
 import shutil
+import pandas as pd
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Any, Union
 from collections import deque
@@ -105,11 +106,15 @@ class DataManager:
             net = case_mapping[case_name]()
             logger.info(f"成功加载 {case_name.upper()}: {len(net.bus)} 节点, {len(net.line)} 线路")
             
+            # 修复数据类型问题
+            self._fix_pandapower_data_types(net)
+
             # 运行潮流分析
             try:
                 if getattr(net, "res_bus", None) is None or net.res_bus.empty:
                     pp.runpp(net, init="flat", calculate_voltage_angles=False, numba=False)
-            except Exception:
+            except Exception as e:
+                logger.warning(f"潮流分析失败，使用默认值: {e}")
                 pass
             
             # 转换为MATPOWER格式
@@ -123,6 +128,43 @@ class DataManager:
         except Exception as e:
             logger.error(f"加载案例 '{case_name}' 失败: {e}")
             raise
+
+    def _fix_pandapower_data_types(self, net):
+        """修复PandaPower数据类型问题"""
+        try:
+            # 修复变压器数据类型问题
+            if hasattr(net, 'trafo') and not net.trafo.empty:
+                # 确保变压器参数为数值类型
+                numeric_cols = ['tap_neutral', 'tap_min', 'tap_max', 'tap_pos']
+                for col in numeric_cols:
+                    if col in net.trafo.columns:
+                        net.trafo[col] = pd.to_numeric(net.trafo[col], errors='coerce')
+                        # 修复pandas FutureWarning - 使用正确的fillna方式
+                        if col == 'tap_neutral':
+                            net.trafo[col] = net.trafo[col].fillna(0.0)
+                        elif col in ['tap_min', 'tap_max']:
+                            net.trafo[col] = net.trafo[col].fillna(1.0)
+                        elif col == 'tap_pos':
+                            net.trafo[col] = net.trafo[col].fillna(0)
+
+            # 修复发电机电压限制问题
+            if hasattr(net, 'gen') and not net.gen.empty and hasattr(net, 'bus') and not net.bus.empty:
+                for idx, gen in net.gen.iterrows():
+                    bus_idx = gen['bus']
+                    if bus_idx in net.bus.index:
+                        # 确保发电机电压设定值在母线电压限制范围内
+                        vm_pu = gen.get('vm_pu', 1.0)
+                        max_vm_pu = net.bus.loc[bus_idx, 'max_vm_pu']
+                        min_vm_pu = net.bus.loc[bus_idx, 'min_vm_pu']
+
+                        if vm_pu > max_vm_pu:
+                            net.gen.loc[idx, 'vm_pu'] = max_vm_pu
+                        elif vm_pu < min_vm_pu:
+                            net.gen.loc[idx, 'vm_pu'] = min_vm_pu
+
+        except Exception as e:
+            logger.warning(f"修复PandaPower数据类型时出错: {e}")
+            pass
     
     def setup_processor(self, device: torch.device) -> PowerGridDataProcessor:
         """设置数据处理器"""
@@ -503,6 +545,27 @@ class TrainingLogger:
                 for metric in quality_metrics:
                     if metric in info and isinstance(info[metric], (int, float)):
                         self.tensorboard_writer.add_scalar(f'Quality/{metric.capitalize()}', info[metric], episode)
+
+                # 记录连通性和分区指标
+                if 'metrics' in info:
+                    metrics = info['metrics']
+                    connectivity_metrics = ['connectivity', 'avg_connectivity']
+                    for metric in connectivity_metrics:
+                        if metric in metrics and isinstance(metrics[metric], (int, float)):
+                            self.tensorboard_writer.add_scalar(f'Connectivity/{metric.capitalize()}', metrics[metric], episode)
+
+                    partition_metrics = ['load_balance', 'decoupling', 'power_balance']
+                    for metric in partition_metrics:
+                        if metric in metrics and isinstance(metrics[metric], (int, float)):
+                            self.tensorboard_writer.add_scalar(f'Partition/{metric.capitalize()}', metrics[metric], episode)
+
+                # 记录训练状态
+                if 'training_state' in info:
+                    state = info['training_state']
+                    if isinstance(state, dict):
+                        for key, value in state.items():
+                            if isinstance(value, (int, float)):
+                                self.tensorboard_writer.add_scalar(f'Training_State/{key.capitalize()}', value, episode)
             
             # 定期刷新
             if episode % 10 == 0:
@@ -864,20 +927,22 @@ class TopologyTrainer(BaseTrainer):
                 scale_generator = ScaleGeneratorManager.create_scale_generator(self.config)
             
             if scale_generator is None:
-                logger.warning("多尺度生成器未启用，回退到基础训练")
-                basic_trainer = BasicTrainer(self.config)
-                return basic_trainer.train()
+                logger.info("多尺度生成器未启用，使用基础环境进行拓扑训练")
+                # 使用基础环境但保持topology模式的训练逻辑
+                env, gym_env = EnvironmentFactory.create_environment(mpc, self.config)
+            else:
+                # 使用场景生成环境
+                env, gym_env = EnvironmentFactory.create_scenario_environment(
+                    mpc, self.config, scale_generator
+                )
             
-            # 3. 创建场景生成环境
-            env, gym_env = EnvironmentFactory.create_scenario_environment(
-                mpc, self.config, scale_generator
-            )
+            # 3. 创建环境（根据是否有多尺度生成器决定）
             
             # 4. 创建智能体
             agent = AgentFactory.create_agent(env, self.config, self.device)
             
-            # 5. GNN预训练（使用多尺度数据）
-            training_source = scale_generator
+            # 5. GNN预训练（根据是否有多尺度生成器决定训练源）
+            training_source = scale_generator if scale_generator else None
             AgentFactory.setup_gnn_pretraining(env.hetero_data, self.config, training_source)
             
             # 6. 训练配置
@@ -1222,7 +1287,11 @@ class UnifiedTrainer(BaseTrainer):
             # 8. GNN预训练
             # 只有当有多尺度生成器时才进行预训练，否则跳过
             training_source = scale_generator if scale_generator else None
-            AgentFactory.setup_gnn_pretraining(env.hetero_data, self.config, training_source)
+            gat_encoder = AgentFactory.setup_gnn_pretraining(env.hetero_data, self.config, training_source)
+
+            # 确保智能体使用预训练后的编码器
+            if hasattr(agent, 'gat_encoder'):
+                agent.gat_encoder = gat_encoder
             
             # 9. 训练配置
             training_config = self.config['training']
