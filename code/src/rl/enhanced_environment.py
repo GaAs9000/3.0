@@ -103,7 +103,7 @@ class EnhancedPowerGridPartitioningEnv(PowerGridPartitioningEnv):
         for neighbor in neighbors:
             # neighbor已经是int类型，可以直接用作索引
             if neighbor < len(self.state_manager.current_partition):
-                partition = self.state_manager.current_partition[neighbor]
+                partition = self.state_manager.current_partition[neighbor].item()
                 if partition != current_assignment and partition > 0:
                     neighbor_partitions.add(partition)
 
@@ -269,7 +269,7 @@ class EnhancedPowerGridPartitioningEnv(PowerGridPartitioningEnv):
             neighbors = list(self.nx_graph.neighbors(node_int))
             for neighbor in neighbors:
                 if neighbor < len(self.state_manager.current_partition):
-                    if self.state_manager.current_partition[neighbor] != partition_id:
+                    if self.state_manager.current_partition[neighbor].item() != partition_id:
                         boundary_nodes += 1
                         break
         

@@ -486,74 +486,70 @@ class ActionMask:
                                    current_partition: torch.Tensor,
                                    action: Tuple[int, int]) -> Dict[str, Any]:
         """
-        检查动作是否会违反连通性约束（仅检测，不阻止）
-
-        目的：为软约束系统提供违规信息，用于奖励惩罚计算
+        检查动作是否会违反连通性约束（矢量化版本）
 
         Args:
             current_partition: 当前分区分配
             action: 提议的动作
 
         Returns:
-            包含违规信息的字典：
-            - 'violates_connectivity': bool, 是否违反连通性
-            - 'violation_severity': float, 违规严重程度 (0.0-1.0)
-            - 'isolated_nodes_count': int, 会产生的孤立节点数量
-            - 'affected_partition_size': int, 受影响分区的大小
+            包含违规信息的字典
         """
-        node_idx, target_partition = action
+        node_idx, _ = action
+        # 确保node_idx是Python标量以便后续使用
+        if isinstance(node_idx, torch.Tensor):
+            node_idx = node_idx.item()
+            
         current_node_partition = current_partition[node_idx].item()
 
         # 检查移动节点后，原分区是否仍然连通
         current_partition_nodes = torch.where(current_partition == current_node_partition)[0]
+        affected_partition_size = len(current_partition_nodes)
 
         # 如果原分区只有这一个节点，移动后该分区消失，这是允许的
-        if len(current_partition_nodes) <= 1:
+        if affected_partition_size <= 1:
             return {
                 'violates_connectivity': False,
                 'violation_severity': 0.0,
                 'isolated_nodes_count': 0,
-                'affected_partition_size': 1
+                'affected_partition_size': affected_partition_size
             }
 
         # 如果有多个节点，需要检查移除该节点后剩余节点是否连通
         remaining_nodes = current_partition_nodes[current_partition_nodes != node_idx]
-        if len(remaining_nodes) <= 1:
+        
+        # 如果剩余节点不足2个，则不可能出现不连通
+        if len(remaining_nodes) < 2:
             return {
                 'violates_connectivity': False,
                 'violation_severity': 0.0,
                 'isolated_nodes_count': 0,
-                'affected_partition_size': len(current_partition_nodes)
+                'affected_partition_size': affected_partition_size
             }
-
-        # 检查剩余节点中的孤立节点
-        isolated_nodes = []
-        remaining_nodes_set = set(remaining_nodes.cpu().numpy().tolist())  # 转换为set提高查找效率
-
-        for remaining_node in remaining_nodes:
-            has_connection = False
-            node_id = remaining_node.item()
-            # 使用neighbors_cache替代adjacency_list
-            if node_id in self.neighbors_cache:
-                neighbors = self.neighbors_cache[node_id]
-                for neighbor in neighbors:
-                    if neighbor.item() in remaining_nodes_set:
-                        has_connection = True
-                        break
-            if not has_connection:
-                isolated_nodes.append(node_id)
-
+        
+        # --- 矢量化核心逻辑 ---
+        # 1. 从全局邻接矩阵中提取仅包含剩余节点的子图
+        #    `self.adjacency_sparse` 是 [N, N] 的稀疏张量
+        subgraph_adj = self.adjacency_sparse.index_select(0, remaining_nodes).index_select(1, remaining_nodes)
+        
+        # 2. 计算子图中每个节点的度数 (在子图内的连接数)
+        #    `subgraph_adj.sum(dim=1)` 返回一个稠密张量，表示每个节点的度
+        degrees = subgraph_adj.sum(dim=1).to_dense()
+        
+        # 3. 度为0的节点就是孤立节点
+        isolated_nodes_mask = (degrees == 0)
+        isolated_nodes_count = torch.sum(isolated_nodes_mask).item()
+        
         # 计算违规严重程度
         violation_severity = 0.0
-        if len(isolated_nodes) > 0:
-            # 基于孤立节点比例计算严重程度
-            violation_severity = len(isolated_nodes) / len(remaining_nodes)
+        if isolated_nodes_count > 0:
+            violation_severity = isolated_nodes_count / len(remaining_nodes)
 
         return {
-            'violates_connectivity': len(isolated_nodes) > 0,
+            'violates_connectivity': isolated_nodes_count > 0,
             'violation_severity': violation_severity,
-            'isolated_nodes_count': len(isolated_nodes),
-            'affected_partition_size': len(current_partition_nodes)
+            'isolated_nodes_count': isolated_nodes_count,
+            'affected_partition_size': affected_partition_size
         }
 
 

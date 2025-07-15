@@ -4,25 +4,19 @@ from typing import Dict, Tuple, List, Optional, Union, Any
 from torch_geometric.data import HeteroData
 import copy
 from .scenario_context import ScenarioContext
+import logging
 
 try:
-    from .state import StateManager
-    from .action_space import ActionSpace, ActionMask
-    from .reward import RewardFunction
-    from .utils import MetisInitializer, PartitionEvaluator
-    from .env_utils import calculate_single_partition_features, get_connectivity_safe_partitions_placeholder
-    from ..models.partition_encoder import PartitionFeatures
-except ImportError:
-    # 如果相对导入失败，尝试绝对导入
-    try:
-        from rl.state import StateManager
-        from rl.action_space import ActionSpace, ActionMask
-        from rl.reward import RewardFunction
-        from rl.utils import MetisInitializer, PartitionEvaluator
-        from rl.env_utils import calculate_single_partition_features, get_connectivity_safe_partitions_placeholder
-        from rl.models.partition_encoder import PartitionFeatures
-    except ImportError:
-        print("警告：无法导入RL模块的某些组件")
+    from rl.state import StateManager
+    from rl.action_space import ActionSpace, ActionMask
+    from rl.reward import RewardFunction
+    from rl.utils import MetisInitializer, PartitionEvaluator
+    from rl.env_utils import calculate_single_partition_features, get_connectivity_safe_partitions_placeholder
+    from models.partition_encoder import PartitionFeatures
+except ImportError as e:
+    # 静默警告，改为调试级日志
+    logging.getLogger(__name__).debug(f"RL 子模块导入失败: {e}")
+    # raise e  # 可在调试时启用
 
 
 class PowerGridPartitioningEnv:
@@ -946,7 +940,7 @@ class PowerGridPartitioningEnv:
                     G.add_edge(src, dst)
             else:
                 # 如果没有异构数据，尝试从其他源获取边信息
-                logger.warning("无法获取图结构信息，连通性检查可能不准确")
+                logging.warning("无法获取图结构信息，连通性检查可能不准确")
                 return 0.5
 
             # 检查每个分区的连通性
@@ -982,7 +976,7 @@ class PowerGridPartitioningEnv:
             return float(connectivity_score)
 
         except Exception as e:
-            logger.warning(f"连通性计算失败: {e}")
+            logging.warning(f"连通性计算失败: {e}")
             # 失败时返回0.5而不是0.0，避免触发安全监控
             return 0.5
 

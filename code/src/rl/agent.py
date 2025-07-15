@@ -819,58 +819,76 @@ class PPOAgent:
         node_logits, strategy_vectors = self.actor(batched_state)
         boundary_batch_idx = batched_state.node_batch_idx[batched_state.boundary_nodes]
         
-        mock_env = copy.copy(env) # 创建一个副本以安全地修改其状态
-        
-        log_probs_list = []
-        entropy_list = []
+        # ⚡ 移除深拷贝以避免不可哈希键错误并提升性能
+        orig_partition = env.state_manager.current_partition.clone()
+        try:
+            log_probs_list = []
+            entropy_list = []
 
-        # 这是一个性能瓶颈，理想情况下应批量化。但为了逻辑清晰，先使用循环实现。
-        for i in range(batch_size):
-            mock_env.state_manager.current_partition = states[i]['current_partition']
-            
-            sample_mask = (boundary_batch_idx == i)
-            sample_boundary_nodes = batched_state.boundary_nodes[sample_mask]
-            
-            if sample_boundary_nodes.numel() == 0: continue
+            # 这是一个性能瓶颈，理想情况下应批量化。但为了逻辑清晰，先使用循环实现。
+            for i in range(batch_size):
+                env.state_manager.current_partition = states[i]['current_partition']
+                
+                sample_mask = (boundary_batch_idx == i)
+                sample_boundary_nodes = batched_state.boundary_nodes[sample_mask]
+                
+                if sample_boundary_nodes.numel() == 0: continue
 
-            # a) 节点过滤与掩码
-            valid_node_mask = torch.tensor([
-                bool(mock_env.get_connectivity_safe_partitions(node_id.item()))
-                for node_id in sample_boundary_nodes
-            ], device=self.device, dtype=torch.bool)
-            
-            if not valid_node_mask.any(): continue
+                # a) 节点过滤与掩码
+                valid_node_mask = torch.tensor([
+                    bool(env.get_connectivity_safe_partitions(node_id.item()))
+                    for node_id in sample_boundary_nodes
+                ], device=self.device, dtype=torch.bool)
+                
+                if not valid_node_mask.any(): continue
 
-            masked_node_logits = node_logits[sample_mask].masked_fill(~valid_node_mask, -1e9)
-            node_probs = F.softmax(masked_node_logits, dim=0)
-            node_dist = torch.distributions.Categorical(probs=node_probs)
-            
-            # b) 获取动作
-            node_id, partition_id = actions[i]
-            
-            # c) 编码分区
-            available_partitions = mock_env.get_connectivity_safe_partitions(node_id)
-            if not available_partitions: continue
+                masked_node_logits = node_logits[sample_mask].masked_fill(~valid_node_mask, -1e9)
+                node_probs = F.softmax(masked_node_logits, dim=0)
+                node_dist = torch.distributions.Categorical(probs=node_probs)
+                
+                # b) 获取动作
+                node_id, partition_id = actions[i]
+                
+                # c) 编码分区
+                available_partitions = env.get_connectivity_safe_partitions(node_id)
+                if not available_partitions: continue
 
-            partition_features = mock_env.get_partition_features(available_partitions)
-            partition_embeddings = self.partition_encoder(partition_features)
-            
-            # d) 计算分区概率
-            node_action_idx_in_sample = (sample_boundary_nodes == node_id).nonzero(as_tuple=True)[0]
-            strategy_vector = strategy_vectors[sample_mask][node_action_idx_in_sample].squeeze(0)
-            similarities = self.partition_encoder.compute_similarity(strategy_vector, partition_embeddings)
-            partition_probs = F.softmax(similarities, dim=0)
-            partition_dist = torch.distributions.Categorical(probs=partition_probs)
-            
-            # e) 计算LogProb和熵
-            try:
-                part_action_idx_in_list = available_partitions.index(partition_id)
-                log_prob = node_dist.log_prob(node_action_idx_in_sample) + \
-                           partition_dist.log_prob(torch.tensor(part_action_idx_in_list, device=self.device))
-                log_probs_list.append(log_prob)
-                entropy_list.append(node_dist.entropy() + partition_dist.entropy())
-            except ValueError:
-                continue
+                partition_features = env.get_partition_features(available_partitions)
+                partition_embeddings = self.partition_encoder(partition_features)
+                
+                # d) 计算分区概率
+                node_action_idx_in_sample = (sample_boundary_nodes == node_id).nonzero(as_tuple=True)[0]
+                strategy_vector = strategy_vectors[sample_mask][node_action_idx_in_sample].squeeze(0)
+                similarities = self.partition_encoder.compute_similarity(strategy_vector, partition_embeddings)
+                partition_probs = F.softmax(similarities, dim=0)
+                partition_dist = torch.distributions.Categorical(probs=partition_probs)
+                
+                # e) 计算LogProb和熵
+                try:
+                    # 🔧 DEBUG: 打印关键数据类型
+                    print(f"\n=== DEBUG Episode {i} ===")
+                    print(f"actions[i] = {actions[i]}")
+                    print(f"type(actions[i]) = {type(actions[i])}")
+                    if isinstance(actions[i], (list, tuple)) and len(actions[i]) >= 2:
+                        print(f"partition_id = {actions[i][1]}")
+                        print(f"type(partition_id) = {type(actions[i][1])}")
+                    print(f"available_partitions = {available_partitions}")
+                    print(f"type(available_partitions) = {type(available_partitions)}")
+                    if available_partitions:
+                        print(f"available_partitions[0] type = {type(available_partitions[0])}")
+                    print("=== END DEBUG ===\n")
+                    
+                    part_action_idx_in_list = available_partitions.index(partition_id)
+                    log_prob = node_dist.log_prob(node_action_idx_in_sample) + \
+                               partition_dist.log_prob(torch.tensor(part_action_idx_in_list, device=self.device))
+                    log_probs_list.append(log_prob)
+                    entropy_list.append(node_dist.entropy() + partition_dist.entropy())
+                except ValueError:
+                    continue
+
+        # 恢复环境分区映射
+        finally:
+            env.state_manager.current_partition = orig_partition
 
         if not log_probs_list:
             return {'actor_loss': 0.0, 'critic_loss': 0.0, 'entropy': 0.0}, 0

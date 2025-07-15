@@ -75,16 +75,16 @@ def ensure_device_consistency(obj, target_device):
 try:
     import gymnasium as gym
     from torch_geometric.data import HeteroData
-    from code.src.data_processing import PowerGridDataProcessor
-    from code.src.gat import create_production_encoder
-    from code.src.rl.environment import PowerGridPartitioningEnv
-    from code.src.rl.enhanced_environment import EnhancedPowerGridPartitioningEnv, create_enhanced_environment
-    from code.src.rl.enhanced_agent import create_enhanced_agent
-    from code.src.pretrain.gnn_pretrainer import GNNPretrainer, PretrainConfig
-    from code.src.rl.scale_aware_generator import ScaleAwareSyntheticGenerator, GridGenerationConfig
-    from code.src.rl.adaptive import AdaptiveDirector
-    from code.src.rl.unified_director import UnifiedDirector
-    from code.src.rl.gym_wrapper import PowerGridPartitionGymEnv
+    from data_processing import PowerGridDataProcessor
+    from gat import create_production_encoder
+    from rl.environment import PowerGridPartitioningEnv
+    from rl.enhanced_environment import EnhancedPowerGridPartitioningEnv, create_enhanced_environment
+    from rl.enhanced_agent import create_enhanced_agent
+    from pretrain.gnn_pretrainer import GNNPretrainer, PretrainConfig
+    from rl.scale_aware_generator import ScaleAwareSyntheticGenerator, GridGenerationConfig
+    from rl.adaptive import AdaptiveDirector
+    from rl.unified_director import UnifiedDirector
+    from rl.gym_wrapper import PowerGridPartitionGymEnv
     DEPENDENCIES_OK = True
 except ImportError as e:
     DEPENDENCIES_OK = False
@@ -407,7 +407,7 @@ class AgentFactory:
         pretrain_config = config.get('gnn_pretrain', {})
         
         # 统一创建编码器
-        from code.src.gat import create_production_encoder
+        from gat import create_production_encoder
         gat_config = config.get('gat', {})
         
         try:
@@ -997,7 +997,7 @@ class BasicTrainer(BaseTrainer):
                 # 智能体更新
                 if episode % update_interval == 0 and episode > 0:
                     try:
-                        training_stats = agent.update()
+                        training_stats = agent.update(env=env)
                         if training_stats:
                             self.logger.log_training_step(
                                 episode,
@@ -1116,7 +1116,7 @@ class TopologyTrainer(BaseTrainer):
                 # 智能体更新
                 if episode % update_interval == 0 and episode > 0:
                     try:
-                        training_stats = agent.update()
+                        training_stats = agent.update(env=env)
                         if training_stats:
                             self.logger.log_training_step(
                                 episode,
@@ -1265,7 +1265,7 @@ class AdaptiveTrainer(BaseTrainer):
                 # 智能体更新
                 if episode % update_interval == 0 and episode > 0:
                     try:
-                        training_stats = agent.update()
+                        training_stats = agent.update(env=env)
                         if training_stats:
                             self.logger.log_training_step(
                                 episode,
@@ -1352,9 +1352,9 @@ class UnifiedTrainer(BaseTrainer):
         try:
             # 1. 训练配置
             training_config = self.config['training']
-            num_episodes = training_config['num_episodes']
-            max_steps_per_episode = training_config['max_steps_per_episode']
-            update_interval = training_config['update_interval']
+            num_episodes = training_config.get('num_episodes', 100) # 修正：添加默认值
+            max_steps_per_episode = training_config.get('max_steps_per_episode', 200) # 修正：添加默认值
+            update_interval = training_config.get('update_interval', 10) # 修正：添加默认值
 
             # 2. 初始化日志记录器 (提前)
             self.logger = LoggerFactory.create_training_logger(self.config, num_episodes)
@@ -1795,32 +1795,34 @@ class TrainingManager:
 def setup_argument_parser() -> argparse.ArgumentParser:
     """设置命令行参数解析器"""
     parser = argparse.ArgumentParser(
-        description='电力网络分区强化学习训练系统 v2.0 - 四模式解耦架构',
+        description='电力网络分区强化学习训练系统 v2.0',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     
-    # 核心参数
     parser.add_argument('--config', type=str, default='config.yaml',
-                       help='配置文件路径')
-    parser.add_argument('--mode', type=str, choices=['basic', 'topology', 'adaptive', 'unified', 'auto'],
-                       default='auto', help='训练模式选择')
-    parser.add_argument('--run', action='store_true',
-                       help='立即开始训练')
+                        help='配置文件路径')
     
-    # 调试参数
-    parser.add_argument('--debug', action='store_true',
-                       help='启用调试模式')
-    parser.add_argument('--verbose', action='store_true',
-                       help='详细日志输出')
-    parser.add_argument('--dry-run', action='store_true',
-                       help='模拟运行，验证配置')
+    parser.add_argument(
+        '--mode', type=str, default='auto',
+        choices=['basic', 'topology', 'adaptive', 'unified', 'auto'],
+        help='选择训练模式: basic, topology, adaptive, unified, 或 auto (基于配置自动选择)'
+    )
     
-    # 输出控制
-    parser.add_argument('--output-dir', type=str,
-                       help='输出目录路径')
-    parser.add_argument('--no-tensorboard', action='store_true',
-                       help='禁用TensorBoard日志')
+    parser.add_argument('--run', action='store_true', help='运行训练')
+    parser.add_argument('--debug', action='store_true', help='启用调试日志')
+    parser.add_argument('--verbose', action='store_true', help='启用详细信息日志')
+    parser.add_argument('--dry-run', action='store_true', help='加载配置并退出')
     
+    parser.add_argument(
+        '--output-dir', type=str, default=None,
+        help='覆盖配置中的输出目录'
+    )
+    
+    parser.add_argument(
+        '--no-tensorboard', action='store_true',
+        help='禁用TensorBoard日志'
+    )
+
     return parser
 
 
@@ -1880,10 +1882,12 @@ def load_and_merge_config(config_path: str, args: argparse.Namespace) -> Dict[st
         logger.info("已禁用TensorBoard")
     
     if args.output_dir:
-        config['logging']['log_dir'] = args.output_dir + '/logs'
-        config['logging']['checkpoint_dir'] = args.output_dir + '/checkpoints'
-        config['visualization']['figures_dir'] = args.output_dir + '/figures'
+        config['logging']['output_dir'] = args.output_dir
         logger.info(f"输出目录设置为: {args.output_dir}")
+    
+    # 3. 验证配置
+    if not isinstance(config, dict):
+        raise TypeError("配置文件未能正确加载为字典")
     
     return config
 

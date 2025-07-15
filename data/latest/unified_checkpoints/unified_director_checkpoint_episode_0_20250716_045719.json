@@ -1,0 +1,40 @@
+{
+  "timestamp": "20250716_045719",
+  "checkpoint_id": "episode_0",
+  "state": {
+    "episode": 0,
+    "topology_manager_state": {
+      "current_stage": "small",
+      "stage_episodes": 1,
+      "transition_history": []
+    },
+    "parameter_coordinator_state": {
+      "transition_active": false,
+      "transition_start_episode": 0,
+      "warmup_episodes": 0
+    },
+    "safety_monitor_state": {
+      "failed_transitions": 0,
+      "emergency_activations": 0,
+      "total_alerts": 0,
+      "recent_alerts": [],
+      "has_safe_state": false,
+      "uptime": 1.8362886905670166
+    },
+    "performance_metrics": {
+      "avg_reward": 0.3299504829247729,
+      "std_reward": 0.0,
+      "min_reward": 0.3299504829247729,
+      "max_reward": 0.3299504829247729,
+      "avg_length": 5.0,
+      "avg_quality": 0.6602661014956095,
+      "avg_connectivity": 0.0,
+      "sample_count": 1
+    },
+    "director_decisions_count": 1
+  },
+  "metadata": {
+    "save_time": 1752613039.731214,
+    "version": "2.0"
+  }
+}
