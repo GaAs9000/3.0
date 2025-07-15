@@ -443,50 +443,26 @@ class EnhancedPPOAgent(PPOAgent):
             window_size=self.adaptive_constraint_config['evaluation_window']
         )
         
-        # 检查是否启用双塔架构
+        # 检查是否启用双塔架构（父类已经创建了双塔架构）
         self.use_two_tower = config.get('use_two_tower', True)
+        self.num_partitions = num_partitions
 
-        # 【调试】打印维度信息
-        print(f"EnhancedPPOAgent维度配置:")
-        print(f"   node_embedding_dim: {self.node_embedding_dim}")
-        print(f"   region_embedding_dim: {self.region_embedding_dim}")
-        print(f"   state_dim: {state_dim}")
-        print(f"   num_partitions: {self.num_partitions}")
-        
-        if self.use_two_tower:
-            # 策略向量维度
-            self.strategy_vector_dim = config.get('strategy_vector_dim', 128)
-            
-            # 替换actor网络为增强版本
-            self.actor = create_actor_network({
-                'node_embedding_dim': self.node_embedding_dim,
-                'region_embedding_dim': self.region_embedding_dim,
-                'strategy_vector_dim': self.strategy_vector_dim,
-                'hidden_dim': config.get('actor_hidden_dim', 256),
-                'dropout': config.get('dropout', 0.1),
-
-            }, use_two_tower=True).to(self.device)
-            
-            # 创建分区编码器
-            partition_encoder_config = config.get('partition_encoder', {})
-            partition_encoder_config['embedding_dim'] = self.strategy_vector_dim
-            self.partition_encoder = create_partition_encoder(
-                partition_encoder_config
-            ).to(self.device)
-            
-            # 重新初始化优化器以包含新参数
-            # 保持与父类一致的优化器命名
-            lr = config.get('lr', 3e-4)
-            self.actor_optimizer = torch.optim.Adam([
-                {'params': self.actor.parameters()},
-                {'params': self.partition_encoder.parameters()}
-            ], lr=lr)
-            self.critic_optimizer = torch.optim.Adam(
-                self.critic.parameters(), lr=lr
-            )
-            
-            logger.info("EnhancedPPOAgent initialized with two-tower architecture")
+        # 【调试】打印双塔架构信息
+        if self.use_two_tower and hasattr(self, 'actor') and hasattr(self, 'partition_encoder'):
+            print(f"🏗️ EnhancedPPOAgent双塔架构配置:")
+            print(f"   ✅ State Tower (Actor): {type(self.actor).__name__}")
+            print(f"   ✅ Action Tower (PartitionEncoder): {type(self.partition_encoder).__name__}")
+            print(f"   📏 Strategy Vector Dim: {self.strategy_vector_dim}")
+            print(f"   🔗 Node Embedding Dim: {self.node_embedding_dim}")
+            print(f"   🔗 Region Embedding Dim: {self.region_embedding_dim}")
+            print(f"   🎯 Partitions: {self.num_partitions}")
+            logger.info("EnhancedPPOAgent using two-tower architecture from parent class")
         else:
+            print(f"⚠️  EnhancedPPOAgent标准架构配置:")
+            print(f"   node_embedding_dim: {self.node_embedding_dim}")
+            print(f"   region_embedding_dim: {self.region_embedding_dim}")
+            print(f"   state_dim: {state_dim}")
+            print(f"   num_partitions: {self.num_partitions}")
             logger.info("EnhancedPPOAgent using standard architecture")
     
     def select_action(self,

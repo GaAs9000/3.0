@@ -480,7 +480,8 @@ def create_enhanced_environment(hetero_data: HeteroData,
                                node_embeddings: Dict[str, torch.Tensor],
                                num_partitions: int,
                                config: Dict[str, Any],
-                               use_enhanced: bool = True) -> Union[EnhancedPowerGridPartitioningEnv, PowerGridPartitioningEnv]:
+                               use_enhanced: bool = True,
+                               gat_encoder: Optional[Any] = None) -> Union[EnhancedPowerGridPartitioningEnv, PowerGridPartitioningEnv]:
     """
     工厂函数：创建环境
     
@@ -490,10 +491,26 @@ def create_enhanced_environment(hetero_data: HeteroData,
         num_partitions: 分区数
         config: 配置
         use_enhanced: 是否使用增强版本
+        gat_encoder: GAT编码器实例（用于验证和后续使用）
     
     Returns:
         环境实例
     """
+    
+    # 🔧 编码器验证逻辑
+    if gat_encoder is not None:
+        # 验证编码器状态
+        device = config.get('device', torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
+        gat_encoder = gat_encoder.to(device)
+        gat_encoder.eval()  # 确保处于评估模式
+        
+        # 验证节点嵌入与编码器输出维度一致性
+        expected_dim = getattr(gat_encoder, 'output_dim', None)
+        if expected_dim is not None:
+            for node_type, embeddings in node_embeddings.items():
+                if embeddings.shape[1] != expected_dim:
+                    print(f"⚠️ 警告：{node_type}节点嵌入维度({embeddings.shape[1]})与编码器输出维度({expected_dim})不匹配")
+    
     common_args = {
         'reward_weights': config.get('reward_weights'),
         'max_steps': config.get('max_steps', 200),
@@ -502,17 +519,25 @@ def create_enhanced_environment(hetero_data: HeteroData,
     }
     
     if use_enhanced:
-        return EnhancedPowerGridPartitioningEnv(
+        env = EnhancedPowerGridPartitioningEnv(
             hetero_data=hetero_data,
             node_embeddings=node_embeddings,
             num_partitions=num_partitions,
             enable_features_cache=config.get('enable_features_cache', True),
             **common_args
         )
+        # 将编码器实例附加到环境（如果需要后续使用）
+        if gat_encoder is not None:
+            env.gat_encoder = gat_encoder
+        return env
     else:
-        return PowerGridPartitioningEnv(
+        env = PowerGridPartitioningEnv(
             hetero_data=hetero_data,
             node_embeddings=node_embeddings,
             num_partitions=num_partitions,
             **common_args
         )
+        # 将编码器实例附加到环境（如果需要后续使用）
+        if gat_encoder is not None:
+            env.gat_encoder = gat_encoder
+        return env

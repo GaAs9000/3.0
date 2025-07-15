@@ -15,14 +15,14 @@ try:
     from .scenario_generator import ScenarioGenerator
     from .scenario_context import ScenarioContext
     from data_processing import PowerGridDataProcessor
-    from gat import create_hetero_graph_encoder
+    from gat import create_hetero_graph_encoder, HeteroGraphEncoder
 except ImportError:
     # 如果相对导入失败，使用绝对导入
     from rl.environment import PowerGridPartitioningEnv
     from rl.scenario_generator import ScenarioGenerator
     from rl.scenario_context import ScenarioContext
     from data_processing import PowerGridDataProcessor
-    from gat import create_hetero_graph_encoder
+    from gat import create_hetero_graph_encoder, HeteroGraphEncoder
 
 
 class PowerGridPartitionGymEnv(gym.Env):
@@ -37,6 +37,7 @@ class PowerGridPartitionGymEnv(gym.Env):
     def __init__(self, 
                  base_case_data: Dict,
                  config: Dict[str, Any],
+                 gat_encoder: Optional["HeteroGraphEncoder"] = None,
                  use_scenario_generator: bool = True,
                  scenario_seed: Optional[int] = None,
                  scale_generator: Optional["ScaleAwareSyntheticGenerator"] = None):
@@ -46,14 +47,24 @@ class PowerGridPartitionGymEnv(gym.Env):
         Args:
             base_case_data: 基础电网案例数据（MATPOWER格式）
             config: 完整配置字典
+            gat_encoder: 预训练的GAT编码器实例（避免重复创建）
             use_scenario_generator: 是否使用场景生成器
             scenario_seed: 场景生成器的随机种子
+            scale_generator: 多尺度拓扑生成器
         """
         super().__init__()
         
         self.base_case = base_case_data
         self.config = config
         self.device = torch.device(config['system']['device'])
+        
+        # 🔧 重要修复：接收并验证GAT编码器
+        self.gat_encoder = gat_encoder
+        if self.gat_encoder is not None:
+            # 确保编码器在正确的设备上
+            self.gat_encoder = self.gat_encoder.to(self.device)
+            # 设置为评估模式以保持权重一致性
+            self.gat_encoder.eval()
         
         # 环境基础参数（在调用 _setup_spaces 之前定义）
         self.num_partitions = config['environment']['num_partitions']
@@ -156,17 +167,24 @@ class PowerGridPartitionGymEnv(gym.Env):
         # 将案例转换为异构图
         self.current_hetero_data = self.processor.graph_from_mpc(current_case, self.config).to(self.device)
         
-        # 使用GAT编码器生成节点嵌入
-        # 过滤掉不支持的参数
-        gat_config = self.config['gat'].copy()
-        supported_params = ['hidden_channels', 'gnn_layers', 'heads', 'output_dim', 'dropout']
-        filtered_gat_config = {k: v for k, v in gat_config.items() if k in supported_params}
-
-        encoder = create_hetero_graph_encoder(
-            self.current_hetero_data,
-            **filtered_gat_config
-        ).to(self.device)
+        # 🔧 重要修复：使用传入的预训练GAT编码器，避免重复创建
+        if self.gat_encoder is not None:
+            # 使用预训练的编码器
+            encoder = self.gat_encoder
+        else:
+            # 回退：如果没有传入编码器，则创建新的（保持向后兼容）
+            from gat import create_hetero_graph_encoder
+            gat_config = self.config['gat'].copy()
+            supported_params = ['hidden_channels', 'gnn_layers', 'heads', 'output_dim', 'dropout']
+            filtered_gat_config = {k: v for k, v in gat_config.items() if k in supported_params}
+            
+            encoder = create_hetero_graph_encoder(
+                self.current_hetero_data,
+                **filtered_gat_config
+            ).to(self.device)
+            print("⚠️ 警告：未传入预训练编码器，创建新编码器实例（可能导致性能下降）")
         
+        # 生成节点嵌入
         with torch.no_grad():
             self.current_node_embeddings, self.current_attention_weights = \
                 encoder.encode_nodes_with_attention(self.current_hetero_data, self.config)

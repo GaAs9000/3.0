@@ -29,26 +29,51 @@ from typing import Dict, List, Tuple, Optional, Any, Union
 from collections import deque
 from abc import ABC, abstractmethod
 import logging
+from functools import wraps
 
 # 添加代码路径
 sys.path.append(str(Path(__file__).parent / 'code' / 'src'))
 sys.path.append(str(Path(__file__).parent / 'code'))
 sys.path.append(str(Path(__file__).parent / 'code' / 'utils'))
 
+
+def handle_exceptions(func):
+    """统一异常处理装饰器"""
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            logger.error(f"函数 {func.__name__} 执行失败: {e}")
+            import traceback
+            logger.error(f"详细错误信息: {traceback.format_exc()}")
+            raise
+    return wrapper
+
+
+def ensure_device_consistency(obj, target_device):
+    """确保对象在目标设备上，避免重复转移"""
+    if hasattr(obj, 'device') and obj.device == target_device:
+        return obj  # 已经在目标设备上，避免重复转移
+    elif hasattr(obj, 'to'):
+        return obj.to(target_device)
+    else:
+        return obj
+
 # 核心模块导入
 try:
     import gymnasium as gym
     from torch_geometric.data import HeteroData
-    from data_processing import PowerGridDataProcessor
-    from gat import create_production_encoder
-    from rl.environment import PowerGridPartitioningEnv
-    from rl.enhanced_environment import EnhancedPowerGridPartitioningEnv, create_enhanced_environment
-    from rl.enhanced_agent import create_enhanced_agent
-    from pretrain.gnn_pretrainer import GNNPretrainer, PretrainConfig
-    from rl.scale_aware_generator import ScaleAwareSyntheticGenerator, GridGenerationConfig
-    from rl.adaptive import AdaptiveDirector
-    from rl.unified_director import UnifiedDirector
-    from rl.gym_wrapper import PowerGridPartitionGymEnv
+    from code.src.data_processing import PowerGridDataProcessor
+    from code.src.gat import create_production_encoder
+    from code.src.rl.environment import PowerGridPartitioningEnv
+    from code.src.rl.enhanced_environment import EnhancedPowerGridPartitioningEnv, create_enhanced_environment
+    from code.src.rl.enhanced_agent import create_enhanced_agent
+    from code.src.pretrain.gnn_pretrainer import GNNPretrainer, PretrainConfig
+    from code.src.rl.scale_aware_generator import ScaleAwareSyntheticGenerator, GridGenerationConfig
+    from code.src.rl.adaptive import AdaptiveDirector
+    from code.src.rl.unified_director import UnifiedDirector
+    from code.src.rl.gym_wrapper import PowerGridPartitionGymEnv
     DEPENDENCIES_OK = True
 except ImportError as e:
     DEPENDENCIES_OK = False
@@ -219,7 +244,7 @@ class DataManager:
             logger.warning(f"修复PandaPower数据类型时出错: {e}")
             pass
     
-    def setup_processor(self, device: torch.device, timestamp_dir: str = None) -> PowerGridDataProcessor:
+    def setup_processor(self, device: torch.device, timestamp_dir: Optional[str] = None) -> PowerGridDataProcessor:
         """设置数据处理器"""
         if self.processor is None:
             # 如果提供了时间戳目录，使用它；否则使用配置中的默认值
@@ -234,10 +259,10 @@ class DataManager:
             )
         return self.processor
     
-    def process_data(self, mpc: Dict, config: Dict[str, Any], device: torch.device, timestamp_dir: str = None) -> HeteroData:
+    def process_data(self, mpc: Dict, config: Dict[str, Any], device: torch.device, timestamp_dir: Optional[str] = None) -> HeteroData:
         """处理电网数据为图数据"""
         processor = self.setup_processor(device, timestamp_dir)
-        hetero_data = processor.graph_from_mpc(mpc, config).to(device)
+        hetero_data = processor.graph_from_mpc(mpc, config).to(str(device))
         logger.info(f"数据处理完成: {hetero_data}")
         return hetero_data
 
@@ -246,6 +271,7 @@ class EnvironmentFactory:
     """环境创建工厂"""
     
     @staticmethod
+    @handle_exceptions
     def create_basic_environment(hetero_data: HeteroData, config: Dict[str, Any]) -> EnhancedPowerGridPartitioningEnv:
         """创建基础环境（无场景生成）"""
         env_config = config['environment']
@@ -253,7 +279,7 @@ class EnvironmentFactory:
         # 确保设备配置正确
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         config_copy = config.copy()
-        config_copy['device'] = device
+        config_copy['device'] = str(device) # 确保传递的是字符串
         config_copy['reward_weights'] = env_config.get('reward_weights', {})
         config_copy['max_steps'] = env_config.get('max_steps', 200)
         config_copy['enable_features_cache'] = env_config.get('enable_features_cache', True)
@@ -272,20 +298,24 @@ class EnvironmentFactory:
         logger.info(f"GAT编码器生成节点嵌入完成: {list(node_embeddings.keys())}")
 
         # 使用原有的create_enhanced_environment函数，这个函数会处理所有必需参数
+        # 🔧 重要修复：传递编码器实例进行统一管理
         env = create_enhanced_environment(
             hetero_data=hetero_data,
             node_embeddings=node_embeddings,
             num_partitions=env_config['num_partitions'],
             config=config_copy,
-            use_enhanced=True
+            use_enhanced=True,
+            gat_encoder=encoder
         )
-
+        
+        assert env is not None, "环境创建失败，返回了None"
         logger.info(f"基础环境创建完成: {env.total_nodes}节点, {env.num_partitions}分区")
         return env
     
     @staticmethod
     def create_scenario_environment(mpc: Dict, config: Dict[str, Any], 
-                                  scale_generator: Optional[ScaleAwareSyntheticGenerator] = None) -> Tuple[EnhancedPowerGridPartitioningEnv, PowerGridPartitionGymEnv]:
+                                  scale_generator: Optional[ScaleAwareSyntheticGenerator] = None,
+                                  gat_encoder: Optional[Any] = None) -> Tuple[EnhancedPowerGridPartitioningEnv, PowerGridPartitionGymEnv]:
         """创建场景生成环境"""
         try:
             # 确保设备配置正确传递
@@ -293,9 +323,11 @@ class EnvironmentFactory:
             device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
             config_copy['system']['device'] = str(device)
             
+            # 🔧 重要修复：传递预训练编码器实例避免重复创建
             gym_env = PowerGridPartitionGymEnv(
                 base_case_data=mpc,
                 config=config_copy,
+                gat_encoder=gat_encoder,  # 传递编码器实例
                 use_scenario_generator=scale_generator is None,  # 如果有多尺度生成器就不用默认生成器
                 scenario_seed=config['system']['seed'],
                 scale_generator=scale_generator
@@ -305,6 +337,7 @@ class EnvironmentFactory:
             obs_array, info = gym_env.reset()
             env = gym_env.internal_env
             
+            assert env is not None, "内部环境初始化失败，返回了None"
             logger.info(f"场景生成环境创建完成: {env.total_nodes}节点, {env.num_partitions}分区")
             return env, gym_env
             
@@ -322,6 +355,7 @@ class AgentFactory:
         """创建增强智能体（双塔架构）"""
         agent_config = config['agent']
 
+        assert env is not None and env.state_manager is not None
         # 调试：打印状态维度信息
         logger.info(f"环境状态维度: {env.state_manager.embedding_dim}")
         logger.info(f"分区数: {env.num_partitions}")
@@ -330,7 +364,7 @@ class AgentFactory:
             state_dim=env.state_manager.embedding_dim,
             num_partitions=env.num_partitions,
             config=agent_config,
-            device=device
+            device=str(device) # 确保传递的是字符串
         )
         
         logger.info("增强智能体创建完成（双塔架构）")
@@ -349,13 +383,28 @@ class AgentFactory:
         Returns:
             GAT编码器，可能已加载预训练权重
         """
+        # 🔧 重要修复：添加配置验证逻辑
+        if not isinstance(config, dict):
+            raise ValueError("config参数必须是字典类型")
+        
+        if 'gat' not in config:
+            raise ValueError("配置中缺少'gat'部分")
+        
+        if not hasattr(hetero_data, 'x_dict') or not hetero_data.x_dict:
+            raise ValueError("hetero_data必须包含有效的x_dict")
+        
         pretrain_config = config.get('gnn_pretrain', {})
         
         # 统一创建编码器
-        from gat import create_production_encoder
+        from code.src.gat import create_production_encoder
         gat_config = config.get('gat', {})
-        gat_encoder = create_production_encoder(hetero_data, gat_config)
-        logger.info(f"创建GAT编码器: {type(gat_encoder).__name__}")
+        
+        try:
+            gat_encoder = create_production_encoder(hetero_data, gat_config)
+            logger.info(f"创建GAT编码器: {type(gat_encoder).__name__}")
+        except Exception as e:
+            logger.error(f"GAT编码器创建失败: {e}")
+            raise RuntimeError(f"无法创建GAT编码器: {e}")
         
         # 检查是否需要执行预训练
         if pretrain_config.get('enabled', False) and training_source:
@@ -373,7 +422,9 @@ class AgentFactory:
             if best_model_path.exists():
                 try:
                     logger.info(f"正在从 {best_model_path} 加载预训练权重...")
-                    checkpoint = torch.load(best_model_path, map_location=torch.device('cpu'))
+                    # 🔧 统一设备处理：确保权重加载到正确设备
+                    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+                    checkpoint = torch.load(best_model_path, map_location=device)
                     
                     # 兼容旧格式和新格式的检查点
                     if 'encoder_state_dict' in checkpoint:
@@ -544,7 +595,7 @@ class TrainingLogger:
     def _setup_tensorboard(self):
         """设置TensorBoard"""
         try:
-            from torch.utils.tensorboard import SummaryWriter
+            from torch.utils.tensorboard.writer import SummaryWriter
             log_dir = Path(self.timestamp_dir) / "logs"
             writer = SummaryWriter(str(log_dir))
             verbose = self.config.get('system', {}).get('verbose', False)
@@ -571,7 +622,7 @@ class TrainingLogger:
         except ImportError:
             return None
     
-    def log_episode(self, episode: int, reward: float, length: int, info: Dict = None):
+    def log_episode(self, episode: int, reward: float, length: int, info: Optional[Dict] = None):
         """记录单个回合"""
         self.episode_rewards.append(reward)
         self.episode_lengths.append(length)
@@ -633,8 +684,8 @@ class TrainingLogger:
             if episode % 10 == 0:
                 self.tensorboard_writer.flush()
     
-    def log_training_step(self, episode: int, actor_loss: float = None,
-                         critic_loss: float = None, entropy: float = None):
+    def log_training_step(self, episode: int, actor_loss: Optional[float] = None,
+                         critic_loss: Optional[float] = None, entropy: Optional[float] = None):
         """记录训练步骤"""
         if actor_loss is not None:
             self.actor_losses.append(actor_loss)
@@ -788,9 +839,10 @@ class BaseTrainer(ABC):
         return False
     
     def _save_model(self, agent: Any, final_stats: Dict[str, Any],
-                   model_suffix: str = "") -> str:
+                   model_suffix: str = "") -> Optional[str]:
         """保存训练模型"""
         try:
+            assert self.logger is not None
             models_dir = Path(self.logger.timestamp_dir) / "models"
             models_dir.mkdir(parents=True, exist_ok=True)
 
@@ -973,56 +1025,43 @@ class TopologyTrainer(BaseTrainer):
         logger.info("🌐 开始拓扑变化训练模式 - 只多尺度生成器")
         
         try:
-            # 1. 数据加载
-            ref_case = self.config['data'].get('reference_case', 'ieee14')
-            mpc = self.data_manager.load_power_grid_data(ref_case)
-            
-            # 2. 创建多尺度生成器 - 从新配置结构读取
-            topology_config = self.config.get('topology_mode', {})
-            if topology_config.get('multi_scale_generation', {}).get('enabled', False):
-                # 使用topology_mode下的配置
-                temp_config = self.config.copy()
-                temp_config['multi_scale_generation'] = topology_config['multi_scale_generation']
-                scale_generator = ScaleGeneratorManager.create_scale_generator(temp_config)
-            else:
-                # 回退到全局配置
-                scale_generator = ScaleGeneratorManager.create_scale_generator(self.config)
-            
-            if scale_generator is None:
-                logger.info("多尺度生成器未启用，使用基础环境进行拓扑训练")
-                # 使用基础环境但保持topology模式的训练逻辑
-                env, gym_env = EnvironmentFactory.create_environment(mpc, self.config)
-            else:
-                # 使用场景生成环境
-                env, gym_env = EnvironmentFactory.create_scenario_environment(
-                    mpc, self.config, scale_generator
-                )
-            
-            # 3. 创建环境（根据是否有多尺度生成器决定）
-            
-            # 4. 创建智能体
-            agent = AgentFactory.create_agent(env, self.config, self.device)
-            
-            # 5. GNN预训练（根据是否有多尺度生成器决定训练源）
-            training_source = scale_generator if scale_generator else None
-            AgentFactory.setup_gnn_pretraining(env.hetero_data, self.config, training_source)
-            
-            # 6. 训练配置
+            # 1. 训练配置
             training_config = self.config['training']
             num_episodes = training_config['num_episodes']
             max_steps_per_episode = training_config['max_steps_per_episode']
             update_interval = training_config['update_interval']
-            
-            # 7. 初始化日志记录器
+
+            # 2. 初始化日志记录器 (提前)
             self.logger = LoggerFactory.create_training_logger(self.config, num_episodes)
+            
+            # 3. 数据加载
+            ref_case = self.config['data'].get('reference_case', 'ieee14')
+            mpc = self.data_manager.load_power_grid_data(ref_case)
+            
+            # 4. 创建多尺度生成器
+            scale_generator = ScaleGeneratorManager.create_scale_generator(self.config)
+
+            # 5. GNN预训练/加载 (在创建环境前完成)
+            sample_hetero_data = self.data_manager.process_data(mpc, self.config, self.device, self.logger.timestamp_dir)
+            gat_encoder = AgentFactory.setup_gnn_pretraining(sample_hetero_data, self.config, scale_generator)
+            
+            # 6. 创建场景生成环境
+            env, gym_env = EnvironmentFactory.create_scenario_environment(
+                mpc, self.config, scale_generator, gat_encoder
+            )
+            
+            # 7. 创建智能体
+            agent = AgentFactory.create_agent(env, self.config, self.device)
             
             # 8. 拓扑变化训练循环
             logger.info(f"开始拓扑变化训练: {num_episodes} episodes")
             
             for episode in range(num_episodes):
                 # 重置环境（会生成新的拓扑变化）
+                assert gym_env is not None, "Gym环境未初始化"
                 obs_array, info = gym_env.reset()
                 env = gym_env.internal_env  # 获取新的内部环境
+                assert env is not None, "内部环境在重置后为None"
                 state, _ = env.reset()
                 
                 episode_reward = 0
@@ -1106,46 +1145,38 @@ class AdaptiveTrainer(BaseTrainer):
         logger.info("🧠 开始自适应训练模式 - 只参数自适应")
         
         try:
-            # 1. 数据加载
+            # 1. 训练配置
+            training_config = self.config['training']
+            num_episodes = training_config['num_episodes']
+            max_steps_per_episode = training_config['max_steps_per_episode']
+            update_interval = training_config['update_interval']
+            
+            # 2. 初始化日志记录器 (提前)
+            self.logger = LoggerFactory.create_training_logger(self.config, num_episodes)
+
+            # 3. 数据加载
             ref_case = self.config['data'].get('reference_case', 'ieee14')
             mpc = self.data_manager.load_power_grid_data(ref_case)
             
-            # 2. 创建自适应导演 - 从新配置结构读取
-            adaptive_config = self.config.get('adaptive_mode', {})
-            if adaptive_config.get('adaptive_curriculum', {}).get('enabled', False):
-                # 使用adaptive_mode下的配置
-                temp_config = self.config.copy()
-                temp_config['adaptive_curriculum'] = adaptive_config['adaptive_curriculum']
-                base_mode = self._detect_base_mode()
-                adaptive_director = AdaptiveDirectorManager.create_adaptive_director(temp_config, base_mode)
-            else:
-                # 回退到全局配置
-                base_mode = self._detect_base_mode()
-                adaptive_director = AdaptiveDirectorManager.create_adaptive_director(self.config, base_mode)
+            # 4. 创建自适应导演
+            base_mode = self._detect_base_mode()
+            adaptive_director = AdaptiveDirectorManager.create_adaptive_director(self.config, base_mode)
             
             if adaptive_director is None:
                 logger.warning("自适应导演未启用，回退到基础训练")
                 basic_trainer = BasicTrainer(self.config)
                 return basic_trainer.train()
             
-            # 3. 创建场景生成环境（无拓扑变化）
-            env, gym_env = EnvironmentFactory.create_scenario_environment(mpc, self.config)
+            # 5. GNN预训练/加载
+            sample_hetero_data = self.data_manager.process_data(mpc, self.config, self.device, self.logger.timestamp_dir)
+            training_source = [sample_hetero_data]
+            gat_encoder = AgentFactory.setup_gnn_pretraining(sample_hetero_data, self.config, training_source)
             
-            # 4. 创建智能体
+            # 6. 创建场景环境 (无拓扑变化)
+            env, gym_env = EnvironmentFactory.create_scenario_environment(mpc, self.config, None, gat_encoder)
+            
+            # 7. 创建智能体
             agent = AgentFactory.create_agent(env, self.config, self.device)
-            
-            # 5. GNN预训练
-            training_source = [env.hetero_data] if hasattr(env, 'hetero_data') else [mpc]
-            AgentFactory.setup_gnn_pretraining(env.hetero_data, self.config, training_source)
-            
-            # 6. 训练配置
-            training_config = self.config['training']
-            num_episodes = training_config['num_episodes']
-            max_steps_per_episode = training_config['max_steps_per_episode']
-            update_interval = training_config['update_interval']
-            
-            # 7. 初始化日志记录器
-            self.logger = LoggerFactory.create_training_logger(self.config, num_episodes)
             
             # 8. 自适应训练循环
             logger.info(f"开始自适应训练: {num_episodes} episodes")
@@ -1153,11 +1184,14 @@ class AdaptiveTrainer(BaseTrainer):
             
             for episode in range(num_episodes):
                 # 重置环境
+                assert gym_env is not None, "Gym环境未初始化"
                 if gym_env is not None:
                     obs_array, info = gym_env.reset()
                     env = gym_env.internal_env
+                    assert env is not None, "内部环境在重置后为None"
                     state, _ = env.reset()
                 else:
+                    # 这个分支理论上不应该执行，因为adaptive_director检查会提前返回
                     state, _ = env.reset()
                 
                 episode_reward = 0
@@ -1295,84 +1329,68 @@ class UnifiedTrainer(BaseTrainer):
         logger.info("🎭 开始统一导演训练模式 - 拓扑变化 + 参数协调")
         
         try:
-            # 1. 数据加载
+            # 1. 训练配置
+            training_config = self.config['training']
+            num_episodes = training_config['num_episodes']
+            max_steps_per_episode = training_config['max_steps_per_episode']
+            update_interval = training_config['update_interval']
+
+            # 2. 初始化日志记录器 (提前)
+            self.logger = LoggerFactory.create_training_logger(self.config, num_episodes)
+
+            # 3. 数据加载
             ref_case = self.config['data'].get('reference_case', 'ieee14')
             mpc = self.data_manager.load_power_grid_data(ref_case)
             
-            # 2. 创建统一导演 - 从新配置结构读取
-            unified_config = self.config.get('unified_mode', {})
-            if unified_config.get('unified_director', {}).get('enabled', False):
-                # 使用unified_mode下的配置
-                temp_config = self.config.copy()
-                temp_config['unified_director'] = unified_config['unified_director']
-                unified_director = UnifiedDirectorManager.create_unified_director(temp_config)
-            else:
-                # 回退到全局配置
-                unified_director = UnifiedDirectorManager.create_unified_director(self.config)
+            # 4. 创建统一导演
+            unified_director = UnifiedDirectorManager.create_unified_director(self.config)
             
             if unified_director is None:
                 logger.warning("统一导演未启用，回退到自适应训练")
                 adaptive_trainer = AdaptiveTrainer(self.config)
                 return adaptive_trainer.train()
             
-            # 3. 创建多尺度生成器
-            if unified_config.get('multi_scale_generation', {}).get('enabled', False):
-                temp_config = self.config.copy()
-                temp_config['multi_scale_generation'] = unified_config['multi_scale_generation']
-                scale_generator = ScaleGeneratorManager.create_scale_generator(temp_config)
-            else:
-                scale_generator = ScaleGeneratorManager.create_scale_generator(self.config)
+            # 5. 创建多尺度生成器
+            scale_generator = ScaleGeneratorManager.create_scale_generator(self.config)
             
-            # 4. 创建自适应导演作为组件
+            # 6. 创建自适应导演作为组件
             base_mode = self._detect_base_mode()
-            if unified_config.get('adaptive_curriculum', {}).get('enabled', False):
-                temp_config = self.config.copy()
-                temp_config['adaptive_curriculum'] = unified_config['adaptive_curriculum']
-                adaptive_director = AdaptiveDirectorManager.create_adaptive_director(temp_config, base_mode)
-            else:
-                adaptive_director = AdaptiveDirectorManager.create_adaptive_director(self.config, base_mode)
+            adaptive_director = AdaptiveDirectorManager.create_adaptive_director(self.config, base_mode)
             
-            # 5. 集成组件到统一导演
+            # 7. 集成组件到统一导演
             unified_director.integrate_components(
                 adaptive_director=adaptive_director,
                 scale_generator=scale_generator
             )
             
-            # 6. 创建场景生成环境
+            # 8. GNN预训练/加载
+            sample_hetero_data = self.data_manager.process_data(mpc, self.config, self.device, self.logger.timestamp_dir)
+            training_source = scale_generator if scale_generator else None
+            gat_encoder = AgentFactory.setup_gnn_pretraining(sample_hetero_data, self.config, training_source)
+            
+            # 9. 创建场景生成环境
             env, gym_env = EnvironmentFactory.create_scenario_environment(
-                mpc, self.config, scale_generator
+                mpc, self.config, scale_generator, gat_encoder
             )
             
-            # 7. 创建智能体
+            # 10. 创建智能体
             agent = AgentFactory.create_agent(env, self.config, self.device)
-            
-            # 8. GNN预训练
-            # 只有当有多尺度生成器时才进行预训练，否则跳过
-            training_source = scale_generator if scale_generator else None
-            gat_encoder = AgentFactory.setup_gnn_pretraining(env.hetero_data, self.config, training_source)
 
-            # 确保智能体使用预训练后的编码器
+            # 确保智能体使用预训练后的编码器（如果智能体需要的话）
             if hasattr(agent, 'gat_encoder'):
                 agent.gat_encoder = gat_encoder
             
-            # 9. 训练配置
-            training_config = self.config['training']
-            num_episodes = training_config['num_episodes']
-            max_steps_per_episode = training_config['max_steps_per_episode']
-            update_interval = training_config['update_interval']
-            
-            # 10. 初始化日志记录器
-            self.logger = LoggerFactory.create_training_logger(self.config, num_episodes)
-            
-            # 11. 统一导演训练循环
+            # 11. 训练循环
             logger.info(f"开始统一导演训练: {num_episodes} episodes")
             unified_decisions = []
             
             for episode in range(num_episodes):
                 # 重置环境
+                assert gym_env is not None, "Gym环境未初始化"
                 if gym_env is not None:
                     obs_array, info = gym_env.reset()
                     env = gym_env.internal_env
+                    assert env is not None, "内部环境在重置后为None"
                     state, _ = env.reset()
                 else:
                     state, _ = env.reset()
@@ -1557,7 +1575,7 @@ class TrainingManager:
             'unified': UnifiedTrainer
         }
         
-    def select_training_mode(self, mode: str = None) -> str:
+    def select_training_mode(self, mode: Optional[str] = None) -> str:
         """选择训练模式
         
         Args:
@@ -1678,7 +1696,7 @@ class TrainingManager:
         
         return len(errors) == 0, errors
     
-    def run_training(self, mode: str = None, **kwargs) -> Dict[str, Any]:
+    def run_training(self, mode: Optional[str] = None, **kwargs) -> Dict[str, Any]:
         """执行训练
         
         Args:

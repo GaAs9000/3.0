@@ -28,6 +28,12 @@ from code.src.rl.environment import PowerGridPartitioningEnv
 from code.src.rl.agent import PPOAgent
 from code.src.rl.scenario_context import ScenarioContext
 
+# 导入必要的工厂类
+import sys
+from pathlib import Path
+sys.path.append(str(Path(__file__).parent.parent.parent))
+from train import EnvironmentFactory
+
 
 class ComprehensiveEvaluator:
     """综合评估器：对比agent和baseline方法"""
@@ -331,27 +337,35 @@ class ComprehensiveEvaluator:
         # 处理数据
         hetero_data = self.processor.graph_from_mpc(base_case, self.config).to(self.device)
         
-        # 创建编码器
-        encoder = create_production_encoder(hetero_data, self.config['gat']).to(self.device)
-        
-        # 获取节点嵌入
-        with torch.no_grad():
-            node_embeddings, attention_weights = encoder.encode_nodes_with_attention(
-                hetero_data, self.config
+        # 🔧 重要修复：使用工厂模式创建环境，避免重复创建编码器
+        # 使用EnvironmentFactory.create_basic_environment替代手动创建
+        try:
+            env = EnvironmentFactory.create_basic_environment(hetero_data, self.config)
+        except Exception as e:
+            # 回退到原来的创建方式以保持兼容性
+            print(f"⚠️ 警告：工厂方法创建环境失败，回退到手动创建: {e}")
+            
+            # 创建编码器
+            encoder = create_production_encoder(hetero_data, self.config['gat']).to(self.device)
+            
+            # 获取节点嵌入
+            with torch.no_grad():
+                node_embeddings, attention_weights = encoder.encode_nodes_with_attention(
+                    hetero_data, self.config
+                )
+            
+            # 创建环境
+            env = PowerGridPartitioningEnv(
+                hetero_data=hetero_data,
+                node_embeddings=node_embeddings,
+                num_partitions=self.config['environment']['num_partitions'],
+                reward_weights=self.config['environment']['reward_weights'],
+                max_steps=self.config['environment']['max_steps'],
+                device=self.device,
+                attention_weights=attention_weights,
+                config=self.config,
+                is_normalized=self.config['data']['normalize']
             )
-        
-        # 创建环境
-        env = PowerGridPartitioningEnv(
-            hetero_data=hetero_data,
-            node_embeddings=node_embeddings,
-            num_partitions=self.config['environment']['num_partitions'],
-            reward_weights=self.config['environment']['reward_weights'],
-            max_steps=self.config['environment']['max_steps'],
-            device=self.device,
-            attention_weights=attention_weights,
-            config=self.config,
-            is_normalized=self.config['data']['normalize']
-        )
         
         # 创建agent（自动检测模型参数）
         if 'model_info' in checkpoint:
@@ -759,11 +773,11 @@ class ComprehensiveEvaluator:
         with open(report_path, 'w') as f:
             json.dump(report, f, indent=2)
         
-        print(f"\\n📄 增强评估报告已保存: {report_path}")
+        print(f"\n📄 增强评估报告已保存: {report_path}")
         
         # 打印总结
         stats = report['summary_statistics']
-        print(f"\\n🎯 测试总结:")
+        print(f"\n🎯 测试总结:")
         print(f"   总对比次数: {stats['total_comparisons']}")
         print(f"   Agent胜率 vs Spectral: {stats['agent_win_rate_vs_spectral']:.1%}")
         print(f"   平均改进: {stats['average_improvement_over_spectral']:.4f}")
