@@ -60,8 +60,61 @@ warnings.filterwarnings("error", message=".*NaN.*", category=RuntimeWarning)
 warnings.filterwarnings('ignore', category=UserWarning)
 
 # 设置日志
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+def setup_logging(verbose: bool = False, debug: bool = False):
+    """设置日志级别和格式"""
+    if debug:
+        level = logging.DEBUG
+    elif verbose:
+        level = logging.INFO
+    else:
+        level = logging.WARNING
+
+    # 设置根日志级别
+    logging.basicConfig(
+        level=level,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+
+    # 设置特定模块的日志级别
+    if not verbose:
+        # 静默第三方库的日志
+        logging.getLogger('pandapower').setLevel(logging.WARNING)
+        logging.getLogger('matplotlib').setLevel(logging.WARNING)
+        # 保留GNN预训练的关键信息，但减少详细输出
+        logging.getLogger('pretrain.gnn_pretrainer').setLevel(logging.INFO)
+        logging.getLogger('rl.enhanced_environment').setLevel(logging.WARNING)
+        logging.getLogger('models.actor_network').setLevel(logging.WARNING)
+        logging.getLogger('models.partition_encoder').setLevel(logging.WARNING)
+        logging.getLogger('rl.enhanced_agent').setLevel(logging.WARNING)
+        logging.getLogger('rl.unified_director').setLevel(logging.WARNING)
+        logging.getLogger('rl.adaptive').setLevel(logging.WARNING)
+
+    # 确保主模块日志始终可见
+    logging.getLogger(__name__).setLevel(logging.INFO if verbose else logging.WARNING)
+
+# 默认设置
+setup_logging()
 logger = logging.getLogger(__name__)
+
+# 简洁输出函数
+def print_header(title: str):
+    """打印标题"""
+    print(f"\n🚀 {title}")
+
+def print_status(message: str, status: str = "info"):
+    """打印状态信息"""
+    icons = {"info": "ℹ️", "success": "✅", "warning": "⚠️", "error": "❌"}
+    icon = icons.get(status, "ℹ️")
+    print(f"{icon} {message}")
+
+def print_progress(current: int, total: int, message: str = ""):
+    """打印进度信息"""
+    percentage = (current / total) * 100 if total > 0 else 0
+    print(f"📊 进度: {current}/{total} ({percentage:.1f}%) {message}")
+
+def print_result(key: str, value: Any):
+    """打印结果信息"""
+    print(f"📈 {key}: {value}")
 
 
 # =====================================================
@@ -491,8 +544,13 @@ class TrainingLogger:
         # 设置进度条
         self.progress_bar = self._setup_progress_bar()
 
-        logger.info(f"训练日志记录器初始化完成: {total_episodes} episodes")
-        logger.info(f"训练目录: {self.timestamp_dir}")
+        # 只在verbose模式下显示详细信息
+        verbose = config.get('system', {}).get('verbose', False)
+        if verbose:
+            logger.info(f"训练日志记录器初始化完成: {total_episodes} episodes")
+            logger.info(f"训练目录: {self.timestamp_dir}")
+        else:
+            print_status(f"训练目录: {Path(self.timestamp_dir).name}")
 
     def _create_timestamp_directory(self) -> str:
         """创建时间戳目录结构"""
@@ -515,13 +573,19 @@ class TrainingLogger:
             from torch.utils.tensorboard import SummaryWriter
             log_dir = Path(self.timestamp_dir) / "logs"
             writer = SummaryWriter(str(log_dir))
-            logger.info(f"TensorBoard已启用: {log_dir}")
+            verbose = self.config.get('system', {}).get('verbose', False)
+            if verbose:
+                logger.info(f"TensorBoard已启用: {log_dir}")
+            else:
+                print_status("TensorBoard已启用")
             return writer
         except ImportError:
-            logger.warning("TensorBoard不可用")
+            if self.config.get('system', {}).get('verbose', False):
+                logger.warning("TensorBoard不可用")
             return None
         except Exception as e:
-            logger.warning(f"TensorBoard初始化失败: {e}")
+            if self.config.get('system', {}).get('verbose', False):
+                logger.warning(f"TensorBoard初始化失败: {e}")
             return None
     
     def _setup_progress_bar(self):
@@ -1786,7 +1850,13 @@ def load_and_merge_config(config_path: str, args: argparse.Namespace) -> Dict[st
     if args.debug:
         config['debug']['enabled'] = True
         config['debug']['verbose_logging'] = True
-        logger.info("已启用调试模式")
+        if args.verbose:
+            logger.info("已启用调试模式")
+
+    # 传递verbose参数到配置
+    if 'system' not in config:
+        config['system'] = {}
+    config['system']['verbose'] = args.verbose or args.debug
     
     if args.verbose:
         config['debug']['verbose_logging'] = True
@@ -1814,48 +1884,77 @@ def merge_dict_recursive(base_dict: Dict, override_dict: Dict):
             base_dict[key] = value
 
 
-def print_system_info():
+def print_system_info(verbose: bool = False):
     """打印系统信息"""
-    logger.info("=" * 60)
-    logger.info("电力网络分区强化学习训练系统 v2.0")
-    logger.info("=" * 60)
-    logger.info(f"PyTorch版本: {torch.__version__}")
-    logger.info(f"设备: {'CUDA' if torch.cuda.is_available() else 'CPU'}")
-    if torch.cuda.is_available():
-        logger.info(f"GPU数量: {torch.cuda.device_count()}")
-        logger.info(f"当前GPU: {torch.cuda.get_device_name()}")
-    logger.info(f"依赖库状态: {'✓ 正常' if DEPENDENCIES_OK else '✗ 错误'}")
-    logger.info("=" * 60)
-
-
-def print_training_summary(result: Dict[str, Any]):
-    """打印训练结果摘要"""
-    logger.info("=" * 60)
-    logger.info("训练完成摘要")
-    logger.info("=" * 60)
-    
-    if result.get('success', False):
-        logger.info(f"✓ 训练成功")
-        logger.info(f"模式: {result.get('selected_mode', 'unknown')}")
-        logger.info(f"训练时间: {result.get('training_time', 0):.2f}秒")
-        
-        if 'best_reward' in result:
-            logger.info(f"最佳奖励: {result['best_reward']:.4f}")
-        
-        if 'model_path' in result:
-            logger.info(f"模型保存: {result['model_path']}")
-        
-        # 评估结果
-        eval_stats = result.get('eval_stats', {})
-        if eval_stats:
-            logger.info(f"评估平均奖励: {eval_stats.get('avg_reward', 0):.4f}")
-            logger.info(f"评估成功率: {eval_stats.get('success_rate', 0):.2%}")
-    
+    if verbose:
+        logger.info("=" * 60)
+        logger.info("电力网络分区强化学习训练系统 v2.0")
+        logger.info("=" * 60)
+        logger.info(f"PyTorch版本: {torch.__version__}")
+        logger.info(f"设备: {'CUDA' if torch.cuda.is_available() else 'CPU'}")
+        if torch.cuda.is_available():
+            logger.info(f"GPU数量: {torch.cuda.device_count()}")
+            logger.info(f"当前GPU: {torch.cuda.get_device_name()}")
+        logger.info(f"依赖库状态: {'✓ 正常' if DEPENDENCIES_OK else '✗ 错误'}")
+        logger.info("=" * 60)
     else:
-        logger.error(f"✗ 训练失败")
-        logger.error(f"错误: {result.get('error', 'Unknown error')}")
-    
-    logger.info("=" * 60)
+        print_header("电力网络分区强化学习训练系统 v2.0")
+        device_info = f"CUDA ({torch.cuda.get_device_name()})" if torch.cuda.is_available() else "CPU"
+        print_status(f"设备: {device_info}")
+        if not DEPENDENCIES_OK:
+            print_status("依赖库检查失败", "error")
+
+
+def print_training_summary(result: Dict[str, Any], verbose: bool = False):
+    """打印训练结果摘要"""
+    if verbose:
+        logger.info("=" * 60)
+        logger.info("训练完成摘要")
+        logger.info("=" * 60)
+
+        if result.get('success', False):
+            logger.info(f"✓ 训练成功")
+            logger.info(f"模式: {result.get('selected_mode', 'unknown')}")
+            logger.info(f"训练时间: {result.get('training_time', 0):.2f}秒")
+
+            if 'best_reward' in result:
+                logger.info(f"最佳奖励: {result['best_reward']:.4f}")
+
+            if 'model_path' in result:
+                logger.info(f"模型保存: {result['model_path']}")
+
+            # 评估结果
+            eval_stats = result.get('eval_stats', {})
+            if eval_stats:
+                logger.info(f"评估平均奖励: {eval_stats.get('avg_reward', 0):.4f}")
+                logger.info(f"评估成功率: {eval_stats.get('success_rate', 0):.2%}")
+
+        else:
+            logger.error(f"✗ 训练失败")
+            logger.error(f"错误: {result.get('error', 'Unknown error')}")
+
+        logger.info("=" * 60)
+    else:
+        # 简洁输出
+        print_header("训练完成")
+
+        if result.get('success', False):
+            print_status(f"训练成功 ({result.get('selected_mode', 'unknown')}模式)", "success")
+            print_result("训练时间", f"{result.get('training_time', 0):.2f}秒")
+
+            if 'best_reward' in result:
+                print_result("最佳奖励", f"{result['best_reward']:.4f}")
+
+            if 'model_path' in result:
+                print_status(f"模型已保存: {Path(result['model_path']).name}")
+
+            # 评估结果
+            eval_stats = result.get('eval_stats', {})
+            if eval_stats:
+                print_result("评估平均奖励", f"{eval_stats.get('avg_reward', 0):.4f}")
+                print_result("评估成功率", f"{eval_stats.get('success_rate', 0):.2%}")
+        else:
+            print_status(f"训练失败: {result.get('error', 'Unknown error')}", "error")
 
 
 def main():
@@ -1863,40 +1962,41 @@ def main():
     # 解析命令行参数
     parser = setup_argument_parser()
     args = parser.parse_args()
-    
+
     # 设置日志级别
-    if args.verbose or args.debug:
-        logging.getLogger().setLevel(logging.DEBUG)
-    
+    setup_logging(verbose=args.verbose, debug=args.debug)
+
     try:
         # 打印系统信息
-        print_system_info()
-        
+        print_system_info(verbose=args.verbose)
+
         # 检查依赖
         if not DEPENDENCIES_OK:
-            logger.error(f"依赖库检查失败: {IMPORT_ERROR}")
-            logger.error("请检查环境配置和依赖库安装")
+            print_status(f"依赖库检查失败: {IMPORT_ERROR}", "error")
+            print_status("请检查环境配置和依赖库安装", "error")
             return 1
-        
+
         # 加载配置
-        logger.info(f"加载配置文件: {args.config}")
+        if args.verbose:
+            logger.info(f"加载配置文件: {args.config}")
         config = load_and_merge_config(args.config, args)
         
         # 模拟运行模式
         if args.dry_run:
-            logger.info("模拟运行模式 - 仅验证配置和依赖")
+            print_header("模拟运行模式")
+            print_status("验证配置和依赖")
             training_manager = TrainingManager(config)
-            
+
             # 验证所有模式
             for mode in ['basic', 'topology', 'adaptive', 'unified']:
                 is_valid, errors = training_manager.validate_config(mode)
-                status = "✓" if is_valid else "✗"
-                logger.info(f"{status} {mode}模式配置验证: {'通过' if is_valid else '失败'}")
-                if errors:
+                status = "success" if is_valid else "error"
+                print_status(f"{mode}模式配置验证: {'通过' if is_valid else '失败'}", status)
+                if errors and args.verbose:
                     for error in errors:
-                        logger.warning(f"  - {error}")
-            
-            logger.info("模拟运行完成")
+                        print_status(f"  - {error}", "warning")
+
+            print_status("模拟运行完成", "success")
             return 0
         
         # 创建训练管理器
@@ -1908,36 +2008,36 @@ def main():
         # 非运行模式 - 仅显示信息
         if not args.run:
             selected_mode = training_manager.select_training_mode(training_mode)
-            logger.info(f"将使用训练模式: {selected_mode}")
-            
+
             # 验证配置
             is_valid, errors = training_manager.validate_config(selected_mode)
             if is_valid:
-                logger.info("✓ 配置验证通过")
-                logger.info("使用 --run 参数开始训练")
+                print_status(f"配置验证通过 ({selected_mode}模式)", "success")
+                print_status("使用 --run 参数开始训练")
             else:
-                logger.error("✗ 配置验证失败:")
-                for error in errors:
-                    logger.error(f"  - {error}")
+                print_status("配置验证失败", "error")
+                if args.verbose:
+                    for error in errors:
+                        print_status(f"  - {error}", "error")
                 return 1
-            
+
             return 0
-        
+
         # 执行训练
-        logger.info("开始训练...")
+        print_header(f"开始{training_mode or 'auto'}模式训练")
         result = training_manager.run_training(training_mode)
-        
+
         # 打印结果摘要
-        print_training_summary(result)
-        
+        print_training_summary(result, verbose=args.verbose)
+
         # 返回状态码
         return 0 if result.get('success', False) else 1
         
     except KeyboardInterrupt:
-        logger.info("用户中断训练")
+        print_status("用户中断训练", "warning")
         return 1
     except Exception as e:
-        logger.error(f"程序异常: {e}")
+        print_status(f"程序异常: {e}", "error")
         if args.debug:
             import traceback
             traceback.print_exc()

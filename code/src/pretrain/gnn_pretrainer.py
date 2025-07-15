@@ -343,7 +343,11 @@ class GNNPretrainer:
         Returns:
             预训练的模型权重字典
         """
+        # 详细日志
         logger.info(f"开始GNN预训练，共 {self.config.epochs} 轮")
+
+        # 简洁提示（无论日志级别如何都显示）
+        print(f"🧠 开始GNN预训练 ({self.config.epochs}轮) - 请耐心等待...")
         
         for epoch in range(self.current_epoch, self.config.epochs):
             self.current_epoch = epoch
@@ -795,13 +799,20 @@ class GNNPretrainer:
     def _log_progress(self, epoch: int, train_loss: float):
         """记录训练进度"""
         lr = self.optimizer.param_groups[0]['lr']
-        
-        logger.info(
-            f"Epoch {epoch}/{self.config.epochs} | "
-            f"Train Loss: {train_loss:.4f} | "
-            f"Best Val Loss: {self.best_val_loss:.4f} | "
-            f"LR: {lr:.6f}"
-        )
+
+        # 检查是否为简洁模式（通过日志级别判断）
+        if logger.getEffectiveLevel() <= logging.INFO:
+            # 详细模式
+            logger.info(
+                f"Epoch {epoch}/{self.config.epochs} | "
+                f"Train Loss: {train_loss:.4f} | "
+                f"Best Val Loss: {self.best_val_loss:.4f} | "
+                f"LR: {lr:.6f}"
+            )
+        else:
+            # 简洁模式 - 只在关键节点显示
+            if epoch == 0 or epoch % 20 == 0 or epoch == self.config.epochs - 1:
+                print(f"🧠 GNN预训练: {epoch}/{self.config.epochs} | 损失: {train_loss:.3f}")
 
 
 # 异构数据支持（与主系统兼容）
