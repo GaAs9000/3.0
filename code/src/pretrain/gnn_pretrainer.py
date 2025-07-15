@@ -316,6 +316,9 @@ class GNNPretrainer:
         self.best_val_loss = float('inf')
         self.patience_counter = 0
         self.training_history = defaultdict(list)
+
+        # 固定验证集（在训练开始时生成一次）
+        self.fixed_val_data = None
         
         # 创建目录
         Path(self.config.checkpoint_dir).mkdir(parents=True, exist_ok=True)
@@ -330,16 +333,16 @@ class GNNPretrainer:
             
         logger.info(f"GNN预训练器初始化完成 (设备: {self.device})")
         
-    def train(self, 
+    def train(self,
               data_generator,
               val_data: Optional[List[Data]] = None) -> Dict[str, torch.Tensor]:
         """
         执行预训练
-        
+
         Args:
             data_generator: 数据生成器（如ScaleAwareSyntheticGenerator）
             val_data: 验证数据集
-            
+
         Returns:
             预训练的模型权重字典
         """
@@ -348,32 +351,43 @@ class GNNPretrainer:
 
         # 简洁提示（无论日志级别如何都显示）
         print(f"🧠 开始GNN预训练 ({self.config.epochs}轮) - 请耐心等待...")
-        
+
+        # 🔧 修复：生成固定验证集（只在训练开始时生成一次）
+        if self.fixed_val_data is None:
+            if val_data is not None:
+                self.fixed_val_data = val_data
+                logger.info(f"使用提供的验证集，包含 {len(val_data)} 个样本")
+            else:
+                logger.info("生成固定验证集...")
+                self.fixed_val_data = self._generate_fixed_val_data(data_generator)
+                logger.info(f"生成固定验证集完成，包含 {len(self.fixed_val_data)} 个样本")
+
         for epoch in range(self.current_epoch, self.config.epochs):
             self.current_epoch = epoch
             
             # 训练阶段
             train_loss = self._train_epoch(data_generator, epoch)
-            
+
             # 验证阶段
+            current_val_loss = None
             if epoch % self.config.validation_interval == 0:
-                val_loss = self._validate(val_data or self._generate_val_data(data_generator))
-                
+                current_val_loss = self._validate(self.fixed_val_data)
+
                 # 学习率调度
-                self.scheduler.step(val_loss)
-                
+                self.scheduler.step(current_val_loss)
+
                 # 早停检查
-                if self._check_early_stopping(val_loss):
+                if self._check_early_stopping(current_val_loss):
                     logger.info(f"早停触发，在第 {epoch} 轮停止训练")
                     break
-                    
+
             # 保存检查点
             if epoch % self.config.save_interval == 0:
                 self._save_checkpoint(epoch)
-                
+
             # 日志记录
             if epoch % self.config.log_interval == 0:
-                self._log_progress(epoch, train_loss)
+                self._log_progress(epoch, train_loss, current_val_loss)
                 
         # 保存最终模型
         self._save_final_model()
@@ -388,10 +402,9 @@ class GNNPretrainer:
         self.encoder.train()
         
         # 根据训练进度获取数据分布
-        stage_config = data_generator.get_progressive_schedule(
-            epoch, 
-            self.config.epochs
-        )
+        # 🔧 修复：使用与RL阶段一致的复杂度调度策略
+        progress = epoch / self.config.epochs
+        stage_config = self._get_unified_progressive_schedule(progress)
         
         # 生成训练批次
         batch_data = data_generator.generate_batch(
@@ -401,8 +414,8 @@ class GNNPretrainer:
         )
         
         total_loss = 0
-        num_batches = 0
-        
+        total_samples = 0  # 🔧 改为按样本数统计
+
         # 将数据转换为PyG格式并训练
         for i in range(0, len(batch_data), self.config.batch_size):
             batch_grids = batch_data[i:i+self.config.batch_size]
@@ -431,10 +444,10 @@ class GNNPretrainer:
             except Exception as e:
                 logger.warning(f"批次数据转换失败: {e}，跳过此批次")
                 continue
-            
+
             # 前向传播
             loss = self._compute_loss(batch)
-            
+
             # 反向传播
             self.optimizer.zero_grad()
 
@@ -445,11 +458,13 @@ class GNNPretrainer:
             else:
                 loss.backward()
                 self.optimizer.step()
-                
-            total_loss += loss.item()
-            num_batches += 1
-            
-        avg_loss = total_loss / num_batches
+
+            # 🔧 修复：按样本数累加而非按批次数
+            batch_size = batch.num_graphs  # 获取实际样本数
+            total_loss += loss.item() * batch_size  # 乘以样本数
+            total_samples += batch_size  # 累加样本数
+
+        avg_loss = total_loss / max(total_samples, 1)  # 🔧 按样本数平均
         self.training_history['train_loss'].append(avg_loss)
         
         return avg_loss
@@ -537,19 +552,22 @@ class GNNPretrainer:
         self.encoder.eval()
         
         total_loss = 0
-        num_batches = 0
-        
+        total_samples = 0  # 🔧 改为按样本数统计
+
         with torch.no_grad():
             # 分批处理验证数据
             for i in range(0, len(val_data), self.config.batch_size):
                 batch_graphs = val_data[i:i+self.config.batch_size]
                 batch = Batch.from_data_list(batch_graphs).to(self.device)
-                
+
                 loss = self._compute_loss(batch)
-                total_loss += loss.item()
-                num_batches += 1
-                
-        avg_loss = total_loss / num_batches
+
+                # 🔧 修复：按样本数累加而非按批次数
+                batch_size = batch.num_graphs  # 获取实际样本数
+                total_loss += loss.item() * batch_size  # 乘以样本数
+                total_samples += batch_size  # 累加样本数
+
+        avg_loss = total_loss / max(total_samples, 1)  # 🔧 按样本数平均
         self.training_history['val_loss'].append(avg_loss)
         
         # 记录到TensorBoard
@@ -579,7 +597,8 @@ class GNNPretrainer:
             'best_val_loss': self.best_val_loss,
             'patience_counter': self.patience_counter,
             'training_history': dict(self.training_history),
-            'config': self.config.__dict__
+            'config': self.config.__dict__,
+            'fixed_val_data': self.fixed_val_data  # 保存固定验证集
         }
         
         if self.scaler:
@@ -620,6 +639,11 @@ class GNNPretrainer:
         self.best_val_loss = checkpoint['best_val_loss']
         self.patience_counter = checkpoint['patience_counter']
         self.training_history = defaultdict(list, checkpoint['training_history'])
+
+        # 恢复固定验证集
+        if 'fixed_val_data' in checkpoint:
+            self.fixed_val_data = checkpoint['fixed_val_data']
+            logger.info(f"恢复固定验证集，包含 {len(self.fixed_val_data) if self.fixed_val_data else 0} 个样本")
         
         if self.scaler and 'scaler_state_dict' in checkpoint:
             self.scaler.load_state_dict(checkpoint['scaler_state_dict'])
@@ -771,42 +795,95 @@ class GNNPretrainer:
                 edge_attr=fallback_edge_attr
             )
         
-    def _generate_val_data(self, data_generator) -> List[Data]:
-        """生成验证数据"""
-        val_config = {'small': 0.5, 'medium': 0.3, 'large': 0.2}
-        val_batch = data_generator.generate_batch(
-            val_config,
-            batch_size=int(self.config.batch_size * self.config.validation_split),
-            return_k_values=False
-        )
+    def _generate_fixed_val_data(self, data_generator) -> List[Data]:
+        """生成固定验证数据（整个训练过程中保持不变）"""
+        # 🔧 修复：设置固定随机种子确保验证集可重现
+        import random
+        import numpy as np
 
-        # 处理数据格式：如果是元组，提取字典部分
-        processed_grids = []
-        for item in val_batch:
-            if isinstance(item, tuple):
-                # (grid_data, k_value) 格式
-                processed_grids.append(item[0])
-            else:
-                # 直接是grid_data字典
-                processed_grids.append(item)
+        # 保存当前随机状态
+        random_state = random.getstate()
+        numpy_state = np.random.get_state()
+        torch_state = torch.get_rng_state()
 
         try:
+            # 设置固定种子生成验证集
+            random.seed(42)
+            np.random.seed(42)
+            torch.manual_seed(42)
+
+            # 使用平衡的验证数据分布，与训练保持一致
+            val_config = {'small': 0.4, 'medium': 0.4, 'large': 0.2}
+            val_batch_size = max(int(self.config.batch_size * self.config.validation_split * 10), 20)  # 增大验证集
+
+            val_batch = data_generator.generate_batch(
+                val_config,
+                batch_size=val_batch_size,
+                return_k_values=False
+            )
+
+            # 处理数据格式：如果是元组，提取字典部分
+            processed_grids = []
+            for item in val_batch:
+                if isinstance(item, tuple):
+                    # (grid_data, k_value) 格式
+                    processed_grids.append(item[0])
+                else:
+                    # 直接是grid_data字典
+                    processed_grids.append(item)
+
             return [self._grid_to_graph(grid) for grid in processed_grids]
+
         except Exception as e:
-            logger.error(f"验证数据转换失败: {e}")
+            logger.error(f"固定验证数据生成失败: {e}")
             return []
+        finally:
+            # 恢复原始随机状态
+            random.setstate(random_state)
+            np.random.set_state(numpy_state)
+            torch.set_rng_state(torch_state)
+
+    def _get_unified_progressive_schedule(self, progress: float) -> Dict[str, float]:
+        """
+        获取与RL阶段一致的渐进式复杂度调度
+
+        Args:
+            progress: 训练进度 (0.0 - 1.0)
+
+        Returns:
+            规模分布字典，与UnifiedDirector保持一致
+        """
+        # 与UnifiedDirector的DataMixConfig保持一致的调度策略
+        early_phase_end = 0.3    # 早期阶段结束点
+        balance_phase_end = 0.7  # 平衡阶段结束点
+
+        if progress <= early_phase_end:
+            # 早期阶段：专注小规模，与RL阶段保持一致
+            return {'small': 0.7, 'medium': 0.3, 'large': 0.0}
+
+        elif progress <= balance_phase_end:
+            # 平衡阶段：三种规模平衡发展
+            return {'small': 0.4, 'medium': 0.4, 'large': 0.2}
+
+        else:
+            # 后期阶段：重点大规模，与RL阶段保持一致
+            return {'small': 0.2, 'medium': 0.3, 'large': 0.5}
         
-    def _log_progress(self, epoch: int, train_loss: float):
+    def _log_progress(self, epoch: int, train_loss: float, current_val_loss: Optional[float] = None):
         """记录训练进度"""
         lr = self.optimizer.param_groups[0]['lr']
 
         # 检查是否为简洁模式（通过日志级别判断）
         if logger.getEffectiveLevel() <= logging.INFO:
             # 详细模式
+            val_info = f"Best Val Loss: {self.best_val_loss:.4f}"
+            if current_val_loss is not None:
+                val_info += f" | Current Val Loss: {current_val_loss:.4f}"
+
             logger.info(
                 f"Epoch {epoch}/{self.config.epochs} | "
                 f"Train Loss: {train_loss:.4f} | "
-                f"Best Val Loss: {self.best_val_loss:.4f} | "
+                f"{val_info} | "
                 f"LR: {lr:.6f}"
             )
         else:

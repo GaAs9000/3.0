@@ -415,10 +415,12 @@ class PPOAgent:
         self.k_epochs = agent_config.get('k_epochs', 4)
         self.entropy_coef = agent_config.get('entropy_coef', 0.01)
         self.value_coef = agent_config.get('value_coef', 0.5)
-        self.max_grad_norm = agent_config.get('max_grad_norm', 0.5)
+        # 🔧 调整梯度裁剪阈值：从0.5提高到1.5以允许更大的有效梯度
+        self.max_grad_norm = agent_config.get('max_grad_norm', 1.5)
         
-        lr_actor = agent_config.get('lr_actor', 3e-4)
-        lr_critic = agent_config.get('lr_critic', 1e-3)
+        # 🔧 调整学习率：降低以提高训练稳定性
+        lr_actor = agent_config.get('lr_actor', 5e-5)  # 从3e-4降低到5e-5
+        lr_critic = agent_config.get('lr_critic', 1e-4)  # 从1e-3降低到1e-4
         memory_capacity = agent_config.get('memory_capacity', 2048)
         hidden_dim = agent_config.get('hidden_dim', 256)
         dropout = agent_config.get('dropout', 0.1)
@@ -427,7 +429,7 @@ class PPOAgent:
 
         # 网络
         # 使用新的EnhancedActorNetwork替代旧的ActorNetwork
-        from models.actor_network import create_actor_network
+        from code.src.models.actor_network import create_actor_network
         actor_config = {
             'node_embedding_dim': node_embedding_dim,
             'region_embedding_dim': region_embedding_dim,
@@ -466,6 +468,10 @@ class PPOAgent:
             'critic_loss': deque(maxlen=100),
             'entropy': deque(maxlen=100)
         }
+
+        # 🔍 梯度监控：添加更新计数器和TensorBoard支持
+        self.update_count = 0
+        self.writer = None  # 可选的TensorBoard writer
 
         # 调试标志
         self._debug_grad_norm = False
@@ -615,22 +621,36 @@ class PPOAgent:
         # 计算优势和回报
         advantages, returns = self._compute_advantages(rewards_tensor, old_values_tensor, dones_tensor)
 
-        # PPO更新
-        stats = {'actor_loss': 0, 'critic_loss': 0, 'entropy': 0}
+        # PPO更新 - 改进版：按样本数平均而非按epoch平均
+        agg_stats = {
+            'actor_loss': 0.0,
+            'critic_loss': 0.0,
+            'entropy': 0.0,
+            'grad_norm': 0.0,
+            'actor_param_change': 0.0,
+            'critic_param_change': 0.0
+        }
+        total_samples = 0
 
-        for epoch in range(self.k_epochs):
-            epoch_stats = self._ppo_epoch(states, actions, old_log_probs_tensor, advantages, returns)
-            for key in stats:
-                stats[key] += epoch_stats[key]
+        for _ in range(self.k_epochs):
+            epoch_stats, batch_size = self._ppo_epoch(
+                states, actions, old_log_probs_tensor, advantages, returns)
 
-        # 平均化统计
-        for key in stats:
-            stats[key] /= self.k_epochs
+            # 将"batch平均loss"乘回样本数，变成"样本总loss"
+            for key in agg_stats:
+                if key in epoch_stats:
+                    agg_stats[key] += epoch_stats[key] * batch_size
+
+            total_samples += batch_size
+
+        # 真正的样本平均
+        for key in agg_stats:
+            agg_stats[key] /= max(total_samples, 1)  # 防止除零
 
         # 更新训练统计
-        self.training_stats['actor_loss'].append(stats['actor_loss'])
-        self.training_stats['critic_loss'].append(stats['critic_loss'])
-        self.training_stats['entropy'].append(stats['entropy'])
+        self.training_stats['actor_loss'].append(agg_stats['actor_loss'])
+        self.training_stats['critic_loss'].append(agg_stats['critic_loss'])
+        self.training_stats['entropy'].append(agg_stats['entropy'])
 
         # 更新学习率调度器
         if self.actor_scheduler:
@@ -641,7 +661,18 @@ class PPOAgent:
         # 清空内存
         self.memory.clear()
 
-        return stats
+        # 添加详细日志记录
+        if hasattr(self, 'update_count') and self.update_count % 10 == 0:
+            print(f"📊 训练统计 | Actor Loss: {agg_stats['actor_loss']:.4f}, "
+                  f"Critic Loss: {agg_stats['critic_loss']:.4f}, "
+                  f"Entropy: {agg_stats['entropy']:.4f}, "
+                  f"Grad Norm: {agg_stats.get('grad_norm', 0):.2f}")
+
+            # 记录当前学习率
+            current_lr = self.get_current_learning_rates()
+            print(f"📈 当前学习率 | Actor: {current_lr['actor_lr']:.6f}, Critic: {current_lr['critic_lr']:.6f}")
+
+        return agg_stats
         
     def _compute_advantages(self, 
                             rewards: torch.Tensor, 
@@ -690,6 +721,53 @@ class PPOAgent:
         advantages = torch.nan_to_num(advantages, nan=0.0, posinf=0.0, neginf=0.0)
 
         return advantages, returns
+
+    def _compute_grad_norm(self, model: nn.Module) -> float:
+        """
+        计算模型的梯度范数
+
+        Args:
+            model: 要计算梯度范数的模型
+
+        Returns:
+            梯度的L2范数
+        """
+        total_norm = 0.0
+        param_count = 0
+        for param in model.parameters():
+            if param.grad is not None:
+                param_norm = param.grad.data.norm(2)
+                total_norm += param_norm.item() ** 2
+                param_count += 1
+
+        if param_count == 0:
+            return 0.0
+        return (total_norm ** 0.5)
+
+    def _compute_param_norm(self, model: nn.Module) -> float:
+        """
+        计算模型的参数范数
+
+        Args:
+            model: 要计算参数范数的模型
+
+        Returns:
+            参数的L2范数
+        """
+        total_norm = 0.0
+        for param in model.parameters():
+            param_norm = param.data.norm(2)
+            total_norm += param_norm.item() ** 2
+        return (total_norm ** 0.5)
+
+    def set_tensorboard_writer(self, writer):
+        """
+        设置TensorBoard writer用于梯度监控
+
+        Args:
+            writer: TensorBoard SummaryWriter实例
+        """
+        self.writer = writer
         
     def _ppo_epoch(self,
                    states: List[Dict[str, torch.Tensor]],
@@ -713,6 +791,10 @@ class PPOAgent:
         batch_size = len(states)
         if batch_size == 0:
             return {'actor_loss': 0.0, 'critic_loss': 0.0, 'entropy': 0.0}
+
+        # 🔍 添加梯度监控：计算更新前的参数范数
+        actor_param_norm_before = self._compute_param_norm(self.actor)
+        critic_param_norm_before = self._compute_param_norm(self.critic)
 
         # ---- 1. 数据批量化 ----
         batched_state = self._prepare_batched_state(states)
@@ -791,13 +873,29 @@ class PPOAgent:
 
         self.scaler.scale(total_loss).backward()
 
+        # 🔍 梯度监控：计算梯度范数（裁剪前）
+        actor_grad_norm_before = self._compute_grad_norm(self.actor)
+        critic_grad_norm_before = self._compute_grad_norm(self.critic)
+
         # 梯度裁剪（如果启用）
         if self.max_grad_norm is not None:
             # 在梯度裁剪前unscale梯度
             self.scaler.unscale_(self.actor_optimizer)
             self.scaler.unscale_(self.critic_optimizer)
             all_params = list(self.actor.parameters()) + list(self.critic.parameters())
-            torch.nn.utils.clip_grad_norm_(all_params, self.max_grad_norm)
+            total_grad_norm = torch.nn.utils.clip_grad_norm_(all_params, self.max_grad_norm)
+
+            # 🔍 梯度监控：记录裁剪后的梯度范数
+            actor_grad_norm_after = self._compute_grad_norm(self.actor)
+            critic_grad_norm_after = self._compute_grad_norm(self.critic)
+
+            # 记录梯度被裁剪的比例
+            grad_clip_ratio = 1.0
+            if actor_grad_norm_before > 0:
+                grad_clip_ratio = min(1.0, actor_grad_norm_after / actor_grad_norm_before)
+        else:
+            total_grad_norm = torch.tensor(0.0)
+            grad_clip_ratio = 1.0
 
         # 执行优化器步骤
         self.scaler.step(self.actor_optimizer)
@@ -806,11 +904,42 @@ class PPOAgent:
         # 每次都更新scaler - 这是PyTorch AMP的正确使用方式
         self.scaler.update()
 
-        return {
+        # 🔍 参数监控：计算更新后的参数范数
+        actor_param_norm_after = self._compute_param_norm(self.actor)
+        critic_param_norm_after = self._compute_param_norm(self.critic)
+
+        # 计算参数变化率
+        actor_param_change = (actor_param_norm_after - actor_param_norm_before) / (actor_param_norm_before + 1e-8)
+        critic_param_change = (critic_param_norm_after - critic_param_norm_before) / (critic_param_norm_before + 1e-8)
+
+        # 记录到TensorBoard（如果可用）
+        if hasattr(self, 'writer') and self.writer is not None:
+            self.writer.add_scalar('Gradients/Actor_Norm_Before', actor_grad_norm_before, self.update_count)
+            self.writer.add_scalar('Gradients/Critic_Norm_Before', critic_grad_norm_before, self.update_count)
+            self.writer.add_scalar('Gradients/Total_Norm', total_grad_norm, self.update_count)
+            self.writer.add_scalar('Gradients/Clip_Ratio', grad_clip_ratio, self.update_count)
+            self.writer.add_scalar('Parameters/Actor_Change', actor_param_change, self.update_count)
+            self.writer.add_scalar('Parameters/Critic_Change', critic_param_change, self.update_count)
+
+        # 更新计数器
+        self.update_count += 1
+
+        # 检测梯度异常
+        if actor_grad_norm_before > 100 or critic_grad_norm_before > 100:
+            print(f"⚠️ 警告：检测到大梯度 - Actor: {actor_grad_norm_before:.2f}, Critic: {critic_grad_norm_before:.2f}")
+
+        # 检测参数变化异常
+        if abs(actor_param_change) > 0.1 or abs(critic_param_change) > 0.1:
+            print(f"⚠️ 警告：参数变化过大 - Actor: {actor_param_change:.2f}, Critic: {critic_param_change:.2f}")
+
+        return ({
             'actor_loss': actor_loss.item(),
             'critic_loss': critic_loss.item(),
-            'entropy': entropy.item()
-        }
+            'entropy': entropy.item(),
+            'grad_norm': total_grad_norm.item(),
+            'actor_param_change': actor_param_change,
+            'critic_param_change': critic_param_change
+        }, batch_size)
 
     def enable_gradient_norm_debug(self, enable: bool = True):
         """启用/禁用梯度范数调试打印"""

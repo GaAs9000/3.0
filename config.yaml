@@ -20,13 +20,13 @@ data:
 # 训练基础配置
 # =====================================================
 training:
-  num_episodes: 500            # 增加到500个episodes进行充分训练
+  num_episodes: 100            # 测试用：减少到100个episodes
   max_steps_per_episode: 20    # 每个episode最多20步
   update_interval: 10          # 每10个episode更新一次
   save_interval: 100
   eval_interval: 50
   gradient_clipping:
-    max_norm: 0.5
+    max_norm: 1.5  # 与agent配置保持一致
   success_criteria:
     cv_threshold: 0.3
     connectivity_threshold: 0.7
@@ -76,9 +76,9 @@ agent:
     use_layer_norm: true
     use_cache: true
     cache_size: 1000
-  # PPO训练参数
-  lr_actor: 3.0e-4
-  lr_critic: 1.0e-3
+  # PPO训练参数 - 已修改以提高稳定性
+  lr_actor: 5.0e-5  # 从3.0e-4降低到5.0e-5
+  lr_critic: 1.0e-4  # 从1.0e-3降低到1.0e-4
   gamma: 0.99
   eps_clip: 0.2
   k_epochs: 4
@@ -86,7 +86,7 @@ agent:
   value_coef: 0.5
   hidden_dim: 256
   dropout: 0.1
-  max_grad_norm: 0.5
+  max_grad_norm: 1.5  # 从0.5提高到1.5
   memory_capacity: 10000
   actor_scheduler:
     enabled: true
@@ -126,7 +126,7 @@ gnn_pretrain:
 
 # 基础训练模式配置（BasicTrainer）
 basic_mode:
-  enabled: false                  # 手动控制，或通过--mode basic启用
+  enabled: false                  # 禁用基础模式
   description: "纯基础训练 - 无课程学习、无拓扑变化"
   # 基础模式使用默认配置，无额外组件
 
@@ -224,7 +224,7 @@ adaptive_mode:
 
 # 统一导演模式配置（UnifiedTrainer）
 unified_mode:
-  enabled: true                   # 默认启用最高级模式
+  enabled: true                   # 使用统一模式进行测试
   description: "统一导演 - 拓扑变化 + 参数协调"
   
   # 统一导演系统配置

@@ -378,7 +378,9 @@ class AgentFactory:
                 early_stopping_patience=early_stopping.get('patience', 10),
                 early_stopping_min_delta=early_stopping.get('min_delta', 1e-4),
                 # 检查点参数
-                checkpoint_dir=config['gnn_pretrain'].get('checkpoint_dir', 'data/latest/pretrain_checkpoints')
+                checkpoint_dir=config['gnn_pretrain'].get('checkpoint_dir', 'data/latest/pretrain_checkpoints'),
+                # 日志参数
+                log_dir=config['logging'].get('log_dir', 'data/latest/logs') + '/pretrain'
             )
 
             # 创建GAT编码器
