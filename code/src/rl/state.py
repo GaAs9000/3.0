@@ -415,7 +415,7 @@ class StateManager:
             try:
                 boundary_set = set(self.boundary_nodes.cpu().numpy())
             except RuntimeError:
-                boundary_set = set(self.boundary_nodes.cpu().tolist())
+                boundary_set = set(self.boundary_nodes.flatten().cpu().tolist())
         else:
             boundary_set = set()
         

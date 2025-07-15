@@ -20,8 +20,11 @@ from pathlib import Path
 import sys
 import pandas as pd
 
-# Add project root to path
-sys.path.append(str(Path(__file__).parent.parent))
+# Add project root to path robustly
+# This allows the script to be run from anywhere
+project_root = Path(__file__).resolve().parent.parent.parent
+sys.path.append(str(project_root))
+
 
 # Import necessary components from the training script and codebase
 from train import DataManager, EnvironmentFactory, AgentFactory

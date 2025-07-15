@@ -1,5 +1,5 @@
 {
-  "timestamp": "20250716_011049",
+  "timestamp": "20250716_032042",
   "checkpoint_id": "episode_0",
   "state": {
     "episode": 0,
@@ -19,22 +19,22 @@
       "total_alerts": 0,
       "recent_alerts": [],
       "has_safe_state": false,
-      "uptime": 4.490761041641235
+      "uptime": 2.366175889968872
     },
     "performance_metrics": {
-      "avg_reward": 0.37547865625825294,
+      "avg_reward": 0.03556299115198741,
       "std_reward": 0.0,
-      "min_reward": 0.37547865625825294,
-      "max_reward": 0.37547865625825294,
-      "avg_length": 19.0,
-      "avg_quality": 0.7748178190707244,
-      "avg_connectivity": 0.0,
+      "min_reward": 0.03556299115198741,
+      "max_reward": 0.03556299115198741,
+      "avg_length": 20.0,
+      "avg_quality": 0.650827530489652,
+      "avg_connectivity": 1.0,
       "sample_count": 1
     },
     "director_decisions_count": 1
   },
   "metadata": {
-    "save_time": 1752599449.5293753,
+    "save_time": 1752607242.9317474,
     "version": "2.0"
   }
 }

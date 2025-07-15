@@ -13,6 +13,17 @@
 版本：2.0 - 清晰架构重构版
 """
 
+import sys
+import os
+from pathlib import Path
+
+# 将 code/src 目录添加到 Python 搜索路径，以解决模块导入问题
+# 这使得脚本无论从哪里运行，都能正确找到 rl 等模块
+project_root = Path(__file__).resolve().parent
+src_path = project_root / 'code' / 'src'
+if str(src_path) not in sys.path:
+    sys.path.insert(0, str(src_path))
+
 import torch
 import numpy as np
 import argparse
@@ -32,9 +43,9 @@ import logging
 from functools import wraps
 
 # 添加代码路径
-sys.path.append(str(Path(__file__).parent / 'code' / 'src'))
-sys.path.append(str(Path(__file__).parent / 'code'))
-sys.path.append(str(Path(__file__).parent / 'code' / 'utils'))
+# sys.path.append(str(Path(__file__).parent / 'code' / 'src'))  <- 冗余，已由顶部的代码取代
+# sys.path.append(str(Path(__file__).parent / 'code')) <- 冗余
+# sys.path.append(str(Path(__file__).parent / 'code' / 'utils')) <- 冗余
 
 
 def handle_exceptions(func):
@@ -298,7 +309,7 @@ class EnvironmentFactory:
         logger.info(f"GAT编码器生成节点嵌入完成: {list(node_embeddings.keys())}")
 
         # 使用原有的create_enhanced_environment函数，这个函数会处理所有必需参数
-        # 🔧 重要修复：传递编码器实例进行统一管理
+        # �� 重要修复：传递编码器实例进行统一管理
         env = create_enhanced_environment(
             hetero_data=hetero_data,
             node_embeddings=node_embeddings,
@@ -507,7 +518,12 @@ class AdaptiveDirectorManager:
     @staticmethod
     def create_adaptive_director(config: Dict[str, Any], base_mode: str = 'fast') -> Optional[AdaptiveDirector]:
         """创建自适应导演"""
-        if not config.get('adaptive_curriculum', {}).get('enabled', False):
+        # 兼容新旧配置结构：首先检查嵌套配置，然后回退到顶层
+        adaptive_mode_cfg = config.get('adaptive_mode', {})
+        is_enabled_in_mode = adaptive_mode_cfg.get('adaptive_curriculum', {}).get('enabled', False)
+        is_enabled_at_top = config.get('adaptive_curriculum', {}).get('enabled', False)
+
+        if not (is_enabled_in_mode or is_enabled_at_top):
             return None
             
         try:
@@ -525,7 +541,12 @@ class UnifiedDirectorManager:
     @staticmethod
     def create_unified_director(config: Dict[str, Any]) -> Optional[UnifiedDirector]:
         """创建统一导演"""
-        if not config.get('unified_director', {}).get('enabled', False):
+        # 兼容新旧配置结构：首先检查嵌套配置，然后回退到顶层
+        unified_mode_cfg = config.get('unified_mode', {})
+        is_enabled_in_mode = unified_mode_cfg.get('unified_director', {}).get('enabled', False)
+        is_enabled_at_top = config.get('unified_director', {}).get('enabled', False)
+
+        if not (is_enabled_in_mode or is_enabled_at_top):
             return None
             
         try:

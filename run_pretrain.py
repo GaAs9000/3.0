@@ -17,6 +17,9 @@ import torch
 import argparse
 import sys
 from pathlib import Path
+from dataclasses import fields
+from datetime import datetime
+import shutil
 
 # Add project root to path for module resolution
 sys.path.append(str(Path(__file__).parent.parent))
@@ -39,6 +42,31 @@ def main(config_path: str):
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
     print("✅ Configuration loaded.")
+
+    # 1.5 Setup timestamped directories for backup and latest for convenience
+    print("\n🚀 1.5. Setting up output directories...")
+    timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+    
+    # Define paths
+    base_pretrain_dir = Path("data/pretrain")
+    timestamp_dir = base_pretrain_dir / timestamp
+    latest_dir = Path("data/latest/pretrain_checkpoints")
+    
+    # Create directories
+    timestamp_checkpoints_dir = timestamp_dir / "checkpoints"
+    timestamp_logs_dir = timestamp_dir / "logs"
+    timestamp_checkpoints_dir.mkdir(parents=True, exist_ok=True)
+    timestamp_logs_dir.mkdir(parents=True, exist_ok=True)
+    latest_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"   - Timestamped backup directory: {timestamp_dir}")
+    print(f"   - 'Latest' model directory: {latest_dir}")
+
+    # Override config paths to use the timestamped directory for this run
+    if 'gnn_pretrain' not in config:
+        config['gnn_pretrain'] = {}
+    config['gnn_pretrain']['checkpoint_dir'] = str(timestamp_checkpoints_dir)
+    config['gnn_pretrain']['log_dir'] = str(timestamp_logs_dir)
 
     # 2. Initialize Components
     print("\n🚀 2. Initializing components...")
@@ -71,7 +99,19 @@ def main(config_path: str):
     
     # Pre-trainer
     pretrain_cfg_dict = config.get('gnn_pretrain', {})
-    pretrain_config = PretrainConfig(**pretrain_cfg_dict)
+
+    # Flatten loss_weights if it exists
+    if 'loss_weights' in pretrain_cfg_dict:
+        loss_weights = pretrain_cfg_dict.pop('loss_weights', {})
+        pretrain_cfg_dict.update(loss_weights)
+
+    # Get the valid fields for PretrainConfig
+    valid_keys = {f.name for f in fields(PretrainConfig)}
+    
+    # Filter the dictionary to only include valid keys
+    filtered_cfg = {k: v for k, v in pretrain_cfg_dict.items() if k in valid_keys}
+
+    pretrain_config = PretrainConfig(**filtered_cfg)
     pretrainer = GNNPretrainer(encoder, pretrain_config)
     print("✅ GNNPretrainer initialized.")
 
@@ -80,11 +120,32 @@ def main(config_path: str):
     pretrainer.train(data_generator=scale_generator)
     print("\n✅ Pre-training finished successfully!")
 
-    # 4. Final summary
+    # 4. Copy final models to 'latest' directory for easy access
+    try:
+        print(f"\n🚀 4. Copying final models to '{latest_dir}'...")
+        best_model_src = timestamp_checkpoints_dir / 'best_model.pt'
+        final_model_src = timestamp_checkpoints_dir / 'final_model.pt'
+
+        if best_model_src.exists():
+            shutil.copy(best_model_src, latest_dir / 'best_model.pt')
+            print(f"   - ✅ Best model copied.")
+        else:
+            print(f"   - ⚠️ Best model not found, skipping copy.")
+            
+        if final_model_src.exists():
+            shutil.copy(final_model_src, latest_dir / 'final_model.pt')
+            print(f"   - ✅ Final model copied.")
+        else:
+            print(f"   - ⚠️ Final model not found, skipping copy.")
+            
+    except Exception as e:
+        print(f"   - ❌ Error copying models: {e}")
+
+    # 5. Final summary
     print("\n📊 Pre-training Summary:")
-    print(f"   - Final model saved to: {pretrain_config.checkpoint_dir}/final_model.pt")
-    print(f"   - Best model saved to: {pretrain_config.checkpoint_dir}/best_model.pt")
-    print(f"   - TensorBoard logs can be found in: {pretrain_config.log_dir}")
+    print(f"   - Models and logs saved in timestamped folder: {timestamp_dir}")
+    print(f"   - Best model for quick access: {latest_dir / 'best_model.pt'}")
+    print(f"   - TensorBoard logs command: tensorboard --logdir {base_pretrain_dir}")
 
 
 if __name__ == '__main__':

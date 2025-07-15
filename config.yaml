@@ -102,7 +102,7 @@ agent:
 # =====================================================
 gnn_pretrain:
   enabled: true                   # 双塔架构必须启用
-  epochs: 50
+  epochs: 400
   batch_size: 32
   learning_rate: 1.0e-3
   loss_weights:

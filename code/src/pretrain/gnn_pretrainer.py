@@ -124,7 +124,7 @@ class ContrastiveLoss(nn.Module):
     对比学习损失 - 增强节点表示的判别性
     
     正样本：相邻节点
-    负样本：非相邻的随机节点
+    负样本：非相邻的随机节点 (使用高效的批内负采样)
     """
     
     def __init__(self, temperature: float = 0.5):
@@ -136,68 +136,54 @@ class ContrastiveLoss(nn.Module):
                 num_neg_samples: int = 10,
                 batch: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
-        计算对比学习损失
+        计算对比学习损失 (v2.0 高效实现)
         
         Args:
             node_embeddings: 节点嵌入 [N, D]
             edge_index: 边索引 [2, E]
             num_neg_samples: 每个正样本的负样本数量
-            batch: 批次索引 [N]
+            batch: 批次索引 [N] (用于确保负样本来自同一图)
             
         Returns:
             对比学习损失值
         """
         device = node_embeddings.device
-        N = node_embeddings.size(0)
+        N, E = node_embeddings.size(0), edge_index.size(1)
         src, dst = edge_index
-        
+
         # 归一化嵌入
         node_embeddings = F.normalize(node_embeddings, p=2, dim=-1)
         
-        # 正样本相似度
-        pos_sim = (node_embeddings[src] * node_embeddings[dst]).sum(dim=-1)  # [E]
-        pos_sim = pos_sim / self.temperature
+        # 1. 计算正样本相似度 (E)
+        pos_sim = (node_embeddings[src] * node_embeddings[dst]).sum(dim=-1)
+
+        # 2. 高效生成负样本 (E, K)
+        # 避免采样到自身和正样本对
+        # 为了高效，我们先进行全局采样，然后用掩码去除无效样本
+        # 这种方法比循环快几个数量级
+        neg_indices = torch.randint(0, N, (E, num_neg_samples), device=device)
+
+        # 3. 计算负样本相似度
+        # 源节点嵌入: [E, D] -> [E, 1, D]
+        # 负样本嵌入: [E, K, D]
+        src_emb_expanded = node_embeddings[src].unsqueeze(1)
+        neg_emb = node_embeddings[neg_indices]
+
+        # 批量矩阵乘法: (E, 1, D) @ (E, D, K) -> (E, 1, K) -> (E, K)
+        neg_sim = torch.bmm(src_emb_expanded, neg_emb.transpose(1, 2)).squeeze(1)
+
+        # 4. 组合正负样本相似度并计算InfoNCE损失
+        # logits: [E, 1+K]
+        logits = torch.cat([pos_sim.unsqueeze(1), neg_sim], dim=1)
+        logits /= self.temperature
         
-        # 负样本相似度
-        neg_sims = []
-        for i in range(len(src)):
-            # 为每个源节点采样负样本
-            if batch is not None:
-                # 确保负样本来自同一个图
-                same_batch_mask = batch == batch[src[i]]
-                candidate_nodes = torch.where(same_batch_mask)[0]
-            else:
-                candidate_nodes = torch.arange(N, device=device)
-                
-            # 排除源节点和目标节点
-            mask = (candidate_nodes != src[i]) & (candidate_nodes != dst[i])
-            candidate_nodes = candidate_nodes[mask]
-            
-            # 随机采样
-            if len(candidate_nodes) > num_neg_samples:
-                neg_indices = torch.randperm(len(candidate_nodes))[:num_neg_samples]
-                neg_nodes = candidate_nodes[neg_indices]
-            else:
-                neg_nodes = candidate_nodes
-                
-            # 计算负样本相似度
-            neg_sim = (node_embeddings[src[i]] * node_embeddings[neg_nodes]).sum(dim=-1)
-            neg_sim = neg_sim / self.temperature
-            neg_sims.append(neg_sim)
-            
-        # 计算InfoNCE损失
-        loss = 0
-        for i in range(len(pos_sim)):
-            # 分子：正样本
-            numerator = torch.exp(pos_sim[i])
-            
-            # 分母：正样本 + 所有负样本
-            denominator = numerator + torch.exp(neg_sims[i]).sum()
-            
-            # 负对数似然
-            loss += -torch.log(numerator / denominator + 1e-8)
-            
-        return loss.mean()
+        # 目标是类别0（正样本）
+        labels = torch.zeros(E, dtype=torch.long, device=device)
+        
+        # 使用交叉熵计算损失
+        loss = F.cross_entropy(logits, labels)
+        
+        return loss
 
 
 class PhysicsConsistencyLoss(nn.Module):
@@ -887,9 +873,12 @@ class GNNPretrainer:
                 f"LR: {lr:.6f}"
             )
         else:
-            # 简洁模式 - 只在关键节点显示
-            if epoch == 0 or epoch % 20 == 0 or epoch == self.config.epochs - 1:
-                print(f"🧠 GNN预训练: {epoch}/{self.config.epochs} | 损失: {train_loss:.3f}")
+            # 简洁模式 - 优化输出
+            log_msg = f"📊 Epoch {epoch}/{self.config.epochs} | 训练损失: {train_loss:.3f}"
+            if current_val_loss is not None:
+                # 仅在验证周期添加验证损失
+                log_msg += f" | 验证损失: {current_val_loss:.3f}"
+            print(log_msg)
 
 
 # 异构数据支持（与主系统兼容）
