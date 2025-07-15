@@ -339,7 +339,7 @@ class AgentFactory:
     @staticmethod
     def setup_gnn_pretraining(hetero_data: Any, config: Dict[str, Any],
                             training_source: Union[List, Any] = None) -> Any:
-        """设置GNN预训练（双塔架构必需）
+        """设置GNN预训练并选择性地加载权重（v3.0增强）
 
         Args:
             hetero_data: 异构图数据，用于创建GAT编码器
@@ -347,78 +347,50 @@ class AgentFactory:
             training_source: 训练数据源（可选）
 
         Returns:
-            预训练后的GAT编码器，如果失败则返回新创建的编码器
+            GAT编码器，可能已加载预训练权重
         """
-        if not config.get('gnn_pretrain', {}).get('enabled', True):
-            # 如果不启用预训练，直接创建新的编码器
-            from gat import create_production_encoder
-            gat_config = config.get('gat', {})
-            return create_production_encoder(hetero_data, gat_config)
+        pretrain_config = config.get('gnn_pretrain', {})
+        
+        # 统一创建编码器
+        from gat import create_production_encoder
+        gat_config = config.get('gat', {})
+        gat_encoder = create_production_encoder(hetero_data, gat_config)
+        logger.info(f"创建GAT编码器: {type(gat_encoder).__name__}")
+        
+        # 检查是否需要执行预训练
+        if pretrain_config.get('enabled', False) and training_source:
+            try:
+                # ... (此处省略了预训练的详细实现，因为它在 run_pretrain.py 中)
+                logger.info("在此处将调用 run_pretrain.py，此处只负责加载")
+            except Exception as e:
+                logger.error(f"GNN预训练执行失败: {e}")
+                
+        # 检查是否需要加载预训练权重
+        if pretrain_config.get('load_pretrained_weights', True): # 默认为True
+            checkpoint_dir = Path(pretrain_config.get('checkpoint_dir', 'data/latest/pretrain_checkpoints'))
+            best_model_path = checkpoint_dir / 'best_model.pt'
+            
+            if best_model_path.exists():
+                try:
+                    logger.info(f"正在从 {best_model_path} 加载预训练权重...")
+                    checkpoint = torch.load(best_model_path, map_location=torch.device('cpu'))
+                    
+                    # 兼容旧格式和新格式的检查点
+                    if 'encoder_state_dict' in checkpoint:
+                        weights = checkpoint['encoder_state_dict']
+                    else:
+                        weights = checkpoint
 
-        try:
-            # 提取损失权重
-            loss_weights = config['gnn_pretrain'].get('loss_weights', {
-                'smoothness': 0.4,
-                'contrastive': 0.3,
-                'physics': 0.3
-            })
-
-            # 提取早停配置
-            early_stopping = config['gnn_pretrain'].get('early_stopping', {})
-
-            pretrain_config = PretrainConfig(
-                epochs=config['gnn_pretrain'].get('epochs', 50),
-                batch_size=config['gnn_pretrain'].get('batch_size', 32),
-                learning_rate=config['gnn_pretrain'].get('learning_rate', 1e-3),
-                # 分别设置损失权重
-                smoothness_weight=loss_weights.get('smoothness', 0.4),
-                contrastive_weight=loss_weights.get('contrastive', 0.3),
-                physics_weight=loss_weights.get('physics', 0.3),
-                # 早停参数
-                early_stopping_patience=early_stopping.get('patience', 10),
-                early_stopping_min_delta=early_stopping.get('min_delta', 1e-4),
-                # 检查点参数
-                checkpoint_dir=config['gnn_pretrain'].get('checkpoint_dir', 'data/latest/pretrain_checkpoints'),
-                # 日志参数
-                log_dir=config['logging'].get('log_dir', 'data/latest/logs') + '/pretrain'
-            )
-
-            # 创建GAT编码器
-            from gat import create_production_encoder
-            gat_config = config.get('gat', {})
-            gat_encoder = create_production_encoder(hetero_data, gat_config)
-            logger.info(f"创建GAT编码器: {type(gat_encoder).__name__}")
-
-            # 创建预训练器
-            pretrainer = GNNPretrainer(gat_encoder, pretrain_config)
-            logger.info("GNNPretrainer创建成功")
-
-            # 执行预训练（如果有训练数据源）
-            if training_source:
-                pretrainer.train(training_source)
-                logger.info("GNN预训练完成")
+                    gat_encoder.load_state_dict(weights)
+                    logger.info("✅ 成功加载预训练GNN权重。")
+                except Exception as e:
+                    logger.warning(f"⚠️ 加载预训练GNN权重失败: {e}。将使用随机初始化的GNN。")
             else:
-                logger.info("跳过GNN预训练（无训练数据源）")
-
-            return gat_encoder
-
-        except Exception as e:
-            logger.error(f"GNN预训练失败: {e}")
-            logger.error(f"错误详情: {type(e).__name__}: {str(e)}")
-
-            # 检查是否是数据格式问题
-            if "数据转换失败" in str(e) or "格式" in str(e).lower():
-                logger.error("数据格式不兼容，需要修复数据生成器或预训练器")
-
-            # 检查是否是模型架构问题
-            if "编码器" in str(e) or "模型" in str(e):
-                logger.error("模型架构问题，需要检查GAT编码器配置")
-
-            # 返回新创建的编码器，但记录这是一个严重问题
-            logger.warning("⚠️  使用未预训练的模型继续训练，这可能影响性能")
-            from gat import create_production_encoder
-            gat_config = config.get('gat', {})
-            return create_production_encoder(hetero_data, gat_config)
+                logger.warning(f"⚠️ 未找到预训练权重文件: {best_model_path}。将使用随机初始化的GNN。")
+        else:
+            logger.info("未启用加载预训练权重，使用随机初始化的GNN。")
+            
+        return gat_encoder
 
 
 class LoggerFactory:
@@ -1456,7 +1428,7 @@ class UnifiedTrainer(BaseTrainer):
                 # 智能体更新
                 if episode % update_interval == 0 and episode > 0:
                     try:
-                        training_stats = agent.update()
+                        training_stats = agent.update(env=env)
                         if training_stats:
                             self.logger.log_training_step(
                                 episode,

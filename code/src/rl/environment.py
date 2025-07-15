@@ -10,6 +10,8 @@ try:
     from .action_space import ActionSpace, ActionMask
     from .reward import RewardFunction
     from .utils import MetisInitializer, PartitionEvaluator
+    from .env_utils import calculate_single_partition_features, get_connectivity_safe_partitions_placeholder
+    from ..models.partition_encoder import PartitionFeatures
 except ImportError:
     # 如果相对导入失败，尝试绝对导入
     try:
@@ -17,6 +19,8 @@ except ImportError:
         from rl.action_space import ActionSpace, ActionMask
         from rl.reward import RewardFunction
         from rl.utils import MetisInitializer, PartitionEvaluator
+        from rl.env_utils import calculate_single_partition_features, get_connectivity_safe_partitions_placeholder
+        from rl.models.partition_encoder import PartitionFeatures
     except ImportError:
         print("警告：无法导入RL模块的某些组件")
 
@@ -119,6 +123,9 @@ class PowerGridPartitioningEnv:
         # 缓存频繁使用的数据
         self._setup_cached_data()
 
+        # v3.0 新增：分区特征缓存
+        self._feature_cache: Dict[int, PartitionFeatures] = {}
+
     def _validate_input_data(self, hetero_data: HeteroData, node_embeddings: Dict[str, torch.Tensor]):
         """验证输入数据的完整性"""
         # 验证 hetero_data
@@ -181,8 +188,18 @@ class PowerGridPartitioningEnv:
         # 全局节点映射（本地索引到全局索引）
         self.global_node_mapping = self.state_manager.get_global_node_mapping()
 
-        # 用于奖励计算的边信息
+        # 用于奖励计算和特征计算的全局边信息
         self.edge_info = self._extract_edge_info()
+
+        # v3.0 新增: 缓存总负荷和总发电量
+        self.total_load = 0.0
+        self.total_generation = 0.0
+        if 'bus' in self.hetero_data.x_dict:
+            # 假设 bus 特征: [P_load, G_gen, V_mag, V_ang, ...]
+            bus_features = self.hetero_data.x_dict['bus']
+            if bus_features.shape[1] >= 2:
+                self.total_load = bus_features[:, 0].sum().item()
+                self.total_generation = bus_features[:, 1].sum().item()
         
     def _extract_edge_info(self) -> Dict[str, torch.Tensor]:
         """提取奖励计算所需的边信息"""
@@ -208,6 +225,54 @@ class PowerGridPartitioningEnv:
         edge_info['edge_attr'] = torch.cat(all_edge_attrs, dim=0)
         
         return edge_info
+
+    def get_partition_features(self, partition_ids: List[int]) -> torch.Tensor:
+        """
+        获取指定分区列表的特征张量，使用缓存 (v3.0 新增)
+        
+        Args:
+            partition_ids: 分区ID列表
+        
+        Returns:
+            特征张量 [num_partitions, feature_dim]
+        """
+        features_list = []
+        for pid in partition_ids:
+            if pid in self._feature_cache:
+                features = self._feature_cache[pid]
+            else:
+                partition_nodes = (self.state_manager.current_partition == pid).nonzero(as_tuple=True)[0]
+                features = calculate_single_partition_features(
+                    partition_nodes=partition_nodes,
+                    hetero_data=self.hetero_data,
+                    total_nodes=self.total_nodes,
+                    total_load=self.total_load,
+                    total_generation=self.total_generation,
+                    global_edge_index=self.edge_info['edge_index'],
+                    state_manager=self.state_manager
+                )
+                self._feature_cache[pid] = features
+            
+            features_list.append(features.to_tensor(self.device))
+        
+        if not features_list:
+            # 确保在没有特征时返回正确形状的空张量
+            return torch.empty(0, 6, device=self.device)
+            
+        return torch.stack(features_list, dim=0)
+
+    def invalidate_feature_cache(self, partition_ids: List[int]):
+        """使指定分区的特征缓存失效 (v3.0 新增)"""
+        for pid in partition_ids:
+            self._feature_cache.pop(pid, None)
+
+    def get_connectivity_safe_partitions(self, node_id: int) -> List[int]:
+        """
+        获取给定节点移动后能保证连通性的所有目标分区 (v3.o 核心)
+        
+        当前使用占位符实现。
+        """
+        return get_connectivity_safe_partitions_placeholder(node_id, self.state_manager)
 
     def _generate_enhanced_embeddings(self,
                                     node_embeddings: Dict[str, torch.Tensor],
@@ -460,6 +525,9 @@ class PowerGridPartitioningEnv:
         # 【新增】在回合开始时，计算并存储初始分区的指标
         self.previous_metrics = initial_metrics
         
+        # v3.0: 重置特征缓存
+        self.invalidate_feature_cache(list(range(1, self.num_partitions + 2)))
+
         info = {
             'step': self.current_step,
             'metrics': initial_metrics,
@@ -522,7 +590,11 @@ class PowerGridPartitioningEnv:
 
         # 4. 执行动作，更新内部状态
         node_idx, target_partition = action
+        old_partition_id = self.state_manager.current_partition[node_idx].item()
         self.state_manager.update_partition(node_idx, target_partition)
+
+        # v3.0: 动作执行后，使受影响分区的特征缓存失效
+        self.invalidate_feature_cache([old_partition_id, target_partition])
 
         # 5. 【核心】计算奖励 - 使用自适应质量导向奖励系统
         plateau_result = None
@@ -788,6 +860,7 @@ class PowerGridPartitioningEnv:
             del self.edge_info
         if hasattr(self, 'global_node_mapping'):
             del self.global_node_mapping
+        self._feature_cache.clear()
             
         # 清理组件引用
         self.state_manager = None

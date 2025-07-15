@@ -389,25 +389,25 @@ class PPOAgent:
     def __init__(self,
                  node_embedding_dim: int,
                  region_embedding_dim: int,
-                 num_partitions: int,
                  agent_config: Dict[str, Any],
-                 device: Optional[torch.device] = None):
+                 device: Optional[torch.device] = None,
+                 num_partitions: int = -1): # num_partitions is now optional and for backward compatibility only
         """
         初始化优化的PPO智能体。
 
         Args:
             node_embedding_dim (int): 节点嵌入维度。
             region_embedding_dim (int): 区域嵌入维度。
-            num_partitions (int): 目标分区数量。
             agent_config (Dict[str, Any]): 包含所有PPO超参数的配置字典。
             device (Optional[torch.device]): 计算设备。
+            num_partitions (int): [已废弃] 仅用于向后兼容，不应再使用。
         """
         self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.num_partitions = num_partitions
-
+        
         # 存储维度信息（用于模型保存）
         self.node_embedding_dim = node_embedding_dim
         self.region_embedding_dim = region_embedding_dim
+        self.strategy_vector_dim = agent_config.get('strategy_vector_dim', 128)
 
         # 从配置字典中解析超参数
         self.gamma = agent_config.get('gamma', 0.99)
@@ -427,25 +427,35 @@ class PPOAgent:
         actor_scheduler_config = agent_config.get('actor_scheduler', {})
         critic_scheduler_config = agent_config.get('critic_scheduler', {})
 
-        # 网络
-        # 使用新的EnhancedActorNetwork替代旧的ActorNetwork
+        # --- v3.0 架构改造 ---
+        # 1. 导入新的工厂函数
         from code.src.models.actor_network import create_actor_network
+        from code.src.models.partition_encoder import create_partition_encoder
+
+        # 2. 创建 Actor (状态塔)
         actor_config = {
             'node_embedding_dim': node_embedding_dim,
             'region_embedding_dim': region_embedding_dim,
-            'strategy_vector_dim': agent_config.get('strategy_vector_dim', 128),
+            'strategy_vector_dim': self.strategy_vector_dim,
             'hidden_dim': hidden_dim,
             'dropout': dropout,
-            'backward_compatible': True  # PPOAgent需要兼容模式
         }
-        self.actor = create_actor_network(actor_config, use_two_tower=False).to(self.device)
+        self.actor = create_actor_network(actor_config, use_two_tower=True).to(self.device)
+
+        # 3. 创建 PartitionEncoder (动作塔)
+        encoder_config = agent_config.get('partition_encoder', {})
+        encoder_config.setdefault('embedding_dim', self.strategy_vector_dim)
+        self.partition_encoder = create_partition_encoder(encoder_config).to(self.device)
+        # --- 结束改造 ---
 
         self.critic = CriticNetwork(
             node_embedding_dim, region_embedding_dim, hidden_dim, dropout
         ).to(self.device)
 
         # 优化器
-        self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=lr_actor)
+        # 将 partition_encoder 的参数也加入 actor_optimizer
+        actor_params = list(self.actor.parameters()) + list(self.partition_encoder.parameters())
+        self.actor_optimizer = torch.optim.Adam(actor_params, lr=lr_actor)
         self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=lr_critic)
 
         # AMP GradScaler
@@ -523,12 +533,17 @@ class PPOAgent:
         except:
             return {'actor_lr': 0.0, 'critic_lr': 0.0}
 
-    def select_action(self, state: Dict[str, torch.Tensor], training: bool = True) -> Tuple[Optional[Tuple[int, int]], float, float]:
+    def select_action(self, 
+                      state: Dict[str, torch.Tensor], 
+                      env: Any, # 环境实例，用于调用新方法
+                      training: bool = True
+                      ) -> Tuple[Optional[Tuple[int, int]], float, float]:
         """
-        使用当前策略选择动作 (已重构，接口统一)
+        使用当前策略选择动作 (v3.0 双塔架构重构)
         
         Args:
             state: 状态观察
+            env: 环境实例，用于获取候选动作和分区特征
             training: 是否处于训练模式
             
         Returns:
@@ -547,41 +562,63 @@ class PPOAgent:
             if batched_state.boundary_nodes.numel() == 0:
                 return None, 0.0, value
 
-            # 4. 获取动作 logits
-            node_logits, partition_logits = self.actor(batched_state)
-            
-            # 5. 采样或贪心选择
-            # 获取action_mask中每个边界节点是否有任何有效分区
-            boundary_mask = batched_state.action_mask[batched_state.boundary_nodes]
-            valid_node_mask = boundary_mask.any(dim=1)
-            
-            # 对无效节点应用掩码
-            node_logits = node_logits.masked_fill(~valid_node_mask, -1e9)
+            # --- v3.0 两阶段决策流程 ---
+            # 4. 获取策略向量
+            node_logits, strategy_vectors = self.actor(batched_state)
 
+            # 5. 阶段一：节点过滤与掩码
+            # 确定每个边界节点是否有任何有效的移动
+            valid_node_mask_list = [
+                bool(env.get_connectivity_safe_partitions(node_id.item()))
+                for node_id in batched_state.boundary_nodes
+            ]
+            valid_node_mask = torch.tensor(valid_node_mask_list, device=self.device, dtype=torch.bool)
+            
+            # 如果没有任何节点有有效移动，则提前退出
+            if not valid_node_mask.any():
+                return None, 0.0, value
+
+            # 应用掩码，屏蔽掉没有有效移动的节点
+            masked_node_logits = node_logits.masked_fill(~valid_node_mask, -1e9)
+
+            # 6. 阶段二：安全采样
+            # 从有效节点中采样或贪心选择
             if training:
-                # 采样模式
-                node_probs = F.softmax(node_logits, dim=0)
+                node_probs = F.softmax(masked_node_logits, dim=0)
                 node_dist = torch.distributions.Categorical(probs=node_probs)
-                node_action_idx = node_dist.sample() # 这是在 batched_state.boundary_nodes 中的索引
+                node_action_idx = node_dist.sample() # boundary_nodes 中的索引
+            else: # 贪心模式
+                node_action_idx = torch.argmax(masked_node_logits)
 
-                partition_probs = F.softmax(partition_logits[node_action_idx], dim=0)
+            selected_node_global_id = batched_state.boundary_nodes[node_action_idx].item()
+            available_partitions = env.get_connectivity_safe_partitions(selected_node_global_id)
+
+            # 7. 获取选定节点的策略向量
+            strategy_vector = strategy_vectors[node_action_idx]
+
+            # 8. 编码可用分区
+            partition_features = env.get_partition_features(available_partitions)
+            partition_embeddings = self.partition_encoder(partition_features)
+
+            # 9. 计算相似度并采样分区
+            similarities = self.partition_encoder.compute_similarity(strategy_vector, partition_embeddings)
+            
+            if training:
+                partition_probs = F.softmax(similarities, dim=0)
                 partition_dist = torch.distributions.Categorical(probs=partition_probs)
-                partition_action = partition_dist.sample()
-
-                log_prob = (node_dist.log_prob(node_action_idx) + 
-                            partition_dist.log_prob(partition_action)).item()
-
-            else:
-                # 贪心模式
-                node_action_idx = torch.argmax(node_logits)
-                partition_action = torch.argmax(partition_logits[node_action_idx])
+                selected_partition_local_idx = partition_dist.sample()
+                
+                # 计算组合对数概率
+                log_prob_node = node_dist.log_prob(node_action_idx)
+                log_prob_partition = partition_dist.log_prob(selected_partition_local_idx)
+                log_prob = (log_prob_node + log_prob_partition).item()
+            else: # 贪心模式
+                selected_partition_local_idx = torch.argmax(similarities)
                 log_prob = 0.0
 
-            # 6. 将索引转换回原始ID
-            selected_node = batched_state.boundary_nodes[node_action_idx].item()
-            selected_partition = partition_action.item() + 1
-            
-            action = (selected_node, selected_partition)
+            # 10. 转换回分区ID
+            selected_partition_id = available_partitions[selected_partition_local_idx.item()]
+            action = (selected_node_global_id, selected_partition_id)
             
         return action, log_prob, value
         
@@ -605,15 +642,20 @@ class PPOAgent:
         """
         self.memory.store(state, action, reward, log_prob, value, done)
         
-    def update(self) -> Dict[str, float]:
+    def update(self, **kwargs) -> Dict[str, float]:
         """
-        使用PPO更新网络（优化版本 - 避免CPU-GPU传输）
+        使用PPO更新网络（v3.0重构，需要env实例）
 
         Returns:
             训练统计信息
         """
         if len(self.memory) == 0:
             return {}
+            
+        # v3.0: 必须将 env 实例传入 _ppo_epoch
+        if 'env' not in kwargs:
+             raise ValueError("PPOAgent.update() now requires 'env' keyword argument for v3.0 architecture.")
+        env = kwargs['env']
 
         # 🚀 关键优化：直接获取张量，避免CPU-GPU传输
         states, actions, rewards_tensor, old_log_probs_tensor, old_values_tensor, dones_tensor = self.memory.get_batch_tensors()
@@ -621,31 +663,28 @@ class PPOAgent:
         # 计算优势和回报
         advantages, returns = self._compute_advantages(rewards_tensor, old_values_tensor, dones_tensor)
 
-        # PPO更新 - 改进版：按样本数平均而非按epoch平均
+        # PPO更新
         agg_stats = {
             'actor_loss': 0.0,
             'critic_loss': 0.0,
             'entropy': 0.0,
             'grad_norm': 0.0,
-            'actor_param_change': 0.0,
-            'critic_param_change': 0.0
         }
         total_samples = 0
 
         for _ in range(self.k_epochs):
             epoch_stats, batch_size = self._ppo_epoch(
-                states, actions, old_log_probs_tensor, advantages, returns)
+                states, actions, old_log_probs_tensor, advantages, returns, env=env)
 
-            # 将"batch平均loss"乘回样本数，变成"样本总loss"
             for key in agg_stats:
                 if key in epoch_stats:
                     agg_stats[key] += epoch_stats[key] * batch_size
 
             total_samples += batch_size
 
-        # 真正的样本平均
+        # 样本平均
         for key in agg_stats:
-            agg_stats[key] /= max(total_samples, 1)  # 防止除零
+            agg_stats[key] /= max(total_samples, 1)
 
         # 更新训练统计
         self.training_stats['actor_loss'].append(agg_stats['actor_loss'])
@@ -660,17 +699,6 @@ class PPOAgent:
 
         # 清空内存
         self.memory.clear()
-
-        # 添加详细日志记录
-        if hasattr(self, 'update_count') and self.update_count % 10 == 0:
-            print(f"📊 训练统计 | Actor Loss: {agg_stats['actor_loss']:.4f}, "
-                  f"Critic Loss: {agg_stats['critic_loss']:.4f}, "
-                  f"Entropy: {agg_stats['entropy']:.4f}, "
-                  f"Grad Norm: {agg_stats.get('grad_norm', 0):.2f}")
-
-            # 记录当前学习率
-            current_lr = self.get_current_learning_rates()
-            print(f"📈 当前学习率 | Actor: {current_lr['actor_lr']:.6f}, Critic: {current_lr['critic_lr']:.6f}")
 
         return agg_stats
         
@@ -774,171 +802,113 @@ class PPOAgent:
                    actions: List[Tuple[int, int]],
                    old_log_probs: torch.Tensor,
                    advantages: torch.Tensor,
-                   returns: torch.Tensor) -> Dict[str, float]:
+                   returns: torch.Tensor,
+                   env: Any) -> Tuple[Dict[str, float], int]:
         """
-        执行单个PPO更新周期。
-
-        Args:
-            states (List[Dict[str, torch.Tensor]]): 批处理的状态列表。
-            actions (List[Tuple[int, int]]): 批处理的动作列表。
-            old_log_probs (torch.Tensor): 旧策略下对应动作的对数概率。
-            advantages (torch.Tensor): 计算出的优势函数。
-            returns (torch.Tensor): 计算出的回报。
-
-        Returns:
-            Dict[str, float]: 包含actor损失、critic损失和熵的字典。
+        执行单个PPO更新周期 (v3.0 双塔架构重构)。
         """
         batch_size = len(states)
         if batch_size == 0:
-            return {'actor_loss': 0.0, 'critic_loss': 0.0, 'entropy': 0.0}
+            return {'actor_loss': 0.0, 'critic_loss': 0.0, 'entropy': 0.0}, 0
 
-        # 🔍 添加梯度监控：计算更新前的参数范数
-        actor_param_norm_before = self._compute_param_norm(self.actor)
-        critic_param_norm_before = self._compute_param_norm(self.critic)
-
-        # ---- 1. 数据批量化 ----
+        # ---- 1. 数据批量化 和 价值估计 ----
         batched_state = self._prepare_batched_state(states)
+        values = self.critic(batched_state).squeeze()
 
-        # 计算每个样本在 node_embeddings 中的起始偏移量，用于将局部节点索引转换为全局索引
-        node_offsets = torch.zeros(batch_size, dtype=torch.long, device=self.device)
-        offset = 0
-        for i, s in enumerate(states):
-            node_offsets[i] = offset
-            offset += s['node_embeddings'].size(0)
+        # ---- 2. 核心：为批次中的每个动作重新计算 log_prob 和熵 ----
+        node_logits, strategy_vectors = self.actor(batched_state)
+        boundary_batch_idx = batched_state.node_batch_idx[batched_state.boundary_nodes]
+        
+        mock_env = copy.copy(env) # 创建一个副本以安全地修改其状态
+        
+        log_probs_list = []
+        entropy_list = []
 
-        # 将动作拆分为节点索引和分区索引
-        node_indices_local = torch.tensor([a[0] for a in actions], dtype=torch.long, device=self.device)
-        partition_indices = torch.tensor([a[1] - 1 for a in actions], dtype=torch.long, device=self.device)  # 0-based
-        node_indices_global = node_indices_local + node_offsets  # [batch_size]
+        # 这是一个性能瓶颈，理想情况下应批量化。但为了逻辑清晰，先使用循环实现。
+        for i in range(batch_size):
+            mock_env.state_manager.current_partition = states[i]['current_partition']
+            
+            sample_mask = (boundary_batch_idx == i)
+            sample_boundary_nodes = batched_state.boundary_nodes[sample_mask]
+            
+            if sample_boundary_nodes.numel() == 0: continue
 
-        # 使用 bfloat16 autocast 上下文进行混合精度计算
+            # a) 节点过滤与掩码
+            valid_node_mask = torch.tensor([
+                bool(mock_env.get_connectivity_safe_partitions(node_id.item()))
+                for node_id in sample_boundary_nodes
+            ], device=self.device, dtype=torch.bool)
+            
+            if not valid_node_mask.any(): continue
+
+            masked_node_logits = node_logits[sample_mask].masked_fill(~valid_node_mask, -1e9)
+            node_probs = F.softmax(masked_node_logits, dim=0)
+            node_dist = torch.distributions.Categorical(probs=node_probs)
+            
+            # b) 获取动作
+            node_id, partition_id = actions[i]
+            
+            # c) 编码分区
+            available_partitions = mock_env.get_connectivity_safe_partitions(node_id)
+            if not available_partitions: continue
+
+            partition_features = mock_env.get_partition_features(available_partitions)
+            partition_embeddings = self.partition_encoder(partition_features)
+            
+            # d) 计算分区概率
+            node_action_idx_in_sample = (sample_boundary_nodes == node_id).nonzero(as_tuple=True)[0]
+            strategy_vector = strategy_vectors[sample_mask][node_action_idx_in_sample].squeeze(0)
+            similarities = self.partition_encoder.compute_similarity(strategy_vector, partition_embeddings)
+            partition_probs = F.softmax(similarities, dim=0)
+            partition_dist = torch.distributions.Categorical(probs=partition_probs)
+            
+            # e) 计算LogProb和熵
+            try:
+                part_action_idx_in_list = available_partitions.index(partition_id)
+                log_prob = node_dist.log_prob(node_action_idx_in_sample) + \
+                           partition_dist.log_prob(torch.tensor(part_action_idx_in_list, device=self.device))
+                log_probs_list.append(log_prob)
+                entropy_list.append(node_dist.entropy() + partition_dist.entropy())
+            except ValueError:
+                continue
+
+        if not log_probs_list:
+            return {'actor_loss': 0.0, 'critic_loss': 0.0, 'entropy': 0.0}, 0
+            
+        new_log_probs = torch.stack(log_probs_list)
+        entropy = torch.stack(entropy_list).mean()
+
+        # ---- 3. PPO 损失计算 ----
         with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16):
-            # ---- 2. 前向传播 ----
-            node_logits, partition_logits = self.actor(batched_state)  # logits 按 boundary_nodes 顺序
-            values = self.critic(batched_state)  # [batch_size]
-
-            # ---- 3. 选取所执行动作对应的 logits/probs ----
-            # 构造 (batch_size, num_boundary) 布尔矩阵，找到每个样本对应 boundary 位置
-            boundary_nodes = batched_state.boundary_nodes  # [num_boundary]
-            boundary_batch_idx = batched_state.node_batch_idx[boundary_nodes]  # [num_boundary]
-
-            # 使用张量比较计算位置索引，避免Python循环
-            equal_matrix = (boundary_nodes.unsqueeze(0) == node_indices_global.unsqueeze(1))  # [batch_size, num_boundary]
-            selected_positions = equal_matrix.float().argmax(dim=1)  # [batch_size] 每行保证唯一 True
-
-            # 取出对应节点 logits 行
-            selected_node_logits = node_logits[selected_positions]  # [batch_size]
-            selected_partition_logits = partition_logits[selected_positions]  # [batch_size, num_partitions]
-
-            # ---- 4. 计算概率 & 对数概率 ----
-            # 节点 softmax 需要在各自样本范围内执行
-            node_logits_clipped = torch.clamp(node_logits, min=-20, max=20)
-            exp_node = torch.exp(node_logits_clipped)
-            sum_exp_node = scatter_sum(exp_node, boundary_batch_idx, dim=0)  # [batch_size]
-            node_probs = exp_node / sum_exp_node[boundary_batch_idx]  # [num_boundary]
-            selected_node_probs = node_probs[selected_positions]  # [batch_size]
-
-            # 分区概率（仅选中节点）
-            partition_logits_clipped = torch.clamp(selected_partition_logits, min=-20, max=20)
-            exp_part = torch.exp(partition_logits_clipped)
-            partition_probs = exp_part / exp_part.sum(dim=1, keepdim=True)
-            selected_partition_probs = partition_probs[torch.arange(batch_size, device=self.device), partition_indices]
-
-            # 安全取对数
-            new_log_probs = safe_log_prob(selected_node_probs) + safe_log_prob(selected_partition_probs)
-
-            # ---- 5. PPO 损失 ----
-            log_prob_diff = torch.clamp(new_log_probs - old_log_probs, min=-20, max=20)
-            ratio = torch.exp(log_prob_diff)
-            ratio = torch.nan_to_num(ratio, nan=1.0, posinf=1.0, neginf=0.0)
-
+            ratio = torch.exp(new_log_probs - old_log_probs)
             surr1 = ratio * advantages
             surr2 = torch.clamp(ratio, 1 - self.eps_clip, 1 + self.eps_clip) * advantages
             actor_loss = -torch.min(surr1, surr2).mean()
-
-            critic_loss = F.mse_loss(values.squeeze(), returns.squeeze())
-
-            # ---- 6. 熵 ----
-            node_entropy_all = -(node_probs * safe_log_prob(node_probs))
-            node_entropy_per_batch = scatter_sum(node_entropy_all, boundary_batch_idx, dim=0)
-            partition_entropy = -(partition_probs * safe_log_prob(partition_probs)).sum(dim=1)  # [batch_size]
-            entropy = (node_entropy_per_batch + partition_entropy).mean()
-
-            # The loss needs to be float32 to be scaled
+            critic_loss = F.mse_loss(values, returns)
             total_loss = (actor_loss + self.value_coef * critic_loss - self.entropy_coef * entropy).float()
 
-        # ---- 7. 反向传播 & 更新 (使用 GradScaler) ----
+        # ---- 4. 反向传播 & 更新 ----
         self.actor_optimizer.zero_grad(set_to_none=True)
         self.critic_optimizer.zero_grad(set_to_none=True)
 
         self.scaler.scale(total_loss).backward()
 
-        # 🔍 梯度监控：计算梯度范数（裁剪前）
-        actor_grad_norm_before = self._compute_grad_norm(self.actor)
-        critic_grad_norm_before = self._compute_grad_norm(self.critic)
-
-        # 梯度裁剪（如果启用）
+        total_grad_norm = torch.tensor(0.0)
         if self.max_grad_norm is not None:
-            # 在梯度裁剪前unscale梯度
             self.scaler.unscale_(self.actor_optimizer)
             self.scaler.unscale_(self.critic_optimizer)
-            all_params = list(self.actor.parameters()) + list(self.critic.parameters())
+            all_params = list(self.actor.parameters()) + list(self.partition_encoder.parameters()) + list(self.critic.parameters())
             total_grad_norm = torch.nn.utils.clip_grad_norm_(all_params, self.max_grad_norm)
 
-            # 🔍 梯度监控：记录裁剪后的梯度范数
-            actor_grad_norm_after = self._compute_grad_norm(self.actor)
-            critic_grad_norm_after = self._compute_grad_norm(self.critic)
-
-            # 记录梯度被裁剪的比例
-            grad_clip_ratio = 1.0
-            if actor_grad_norm_before > 0:
-                grad_clip_ratio = min(1.0, actor_grad_norm_after / actor_grad_norm_before)
-        else:
-            total_grad_norm = torch.tensor(0.0)
-            grad_clip_ratio = 1.0
-
-        # 执行优化器步骤
         self.scaler.step(self.actor_optimizer)
         self.scaler.step(self.critic_optimizer)
-
-        # 每次都更新scaler - 这是PyTorch AMP的正确使用方式
         self.scaler.update()
-
-        # 🔍 参数监控：计算更新后的参数范数
-        actor_param_norm_after = self._compute_param_norm(self.actor)
-        critic_param_norm_after = self._compute_param_norm(self.critic)
-
-        # 计算参数变化率
-        actor_param_change = (actor_param_norm_after - actor_param_norm_before) / (actor_param_norm_before + 1e-8)
-        critic_param_change = (critic_param_norm_after - critic_param_norm_before) / (critic_param_norm_before + 1e-8)
-
-        # 记录到TensorBoard（如果可用）
-        if hasattr(self, 'writer') and self.writer is not None:
-            self.writer.add_scalar('Gradients/Actor_Norm_Before', actor_grad_norm_before, self.update_count)
-            self.writer.add_scalar('Gradients/Critic_Norm_Before', critic_grad_norm_before, self.update_count)
-            self.writer.add_scalar('Gradients/Total_Norm', total_grad_norm, self.update_count)
-            self.writer.add_scalar('Gradients/Clip_Ratio', grad_clip_ratio, self.update_count)
-            self.writer.add_scalar('Parameters/Actor_Change', actor_param_change, self.update_count)
-            self.writer.add_scalar('Parameters/Critic_Change', critic_param_change, self.update_count)
-
-        # 更新计数器
-        self.update_count += 1
-
-        # 检测梯度异常
-        if actor_grad_norm_before > 100 or critic_grad_norm_before > 100:
-            print(f"⚠️ 警告：检测到大梯度 - Actor: {actor_grad_norm_before:.2f}, Critic: {critic_grad_norm_before:.2f}")
-
-        # 检测参数变化异常
-        if abs(actor_param_change) > 0.1 or abs(critic_param_change) > 0.1:
-            print(f"⚠️ 警告：参数变化过大 - Actor: {actor_param_change:.2f}, Critic: {critic_param_change:.2f}")
 
         return ({
             'actor_loss': actor_loss.item(),
             'critic_loss': critic_loss.item(),
             'entropy': entropy.item(),
             'grad_norm': total_grad_norm.item(),
-            'actor_param_change': actor_param_change,
-            'critic_param_change': critic_param_change
         }, batch_size)
 
     def enable_gradient_norm_debug(self, enable: bool = True):
