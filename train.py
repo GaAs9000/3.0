@@ -166,18 +166,24 @@ class DataManager:
             logger.warning(f"修复PandaPower数据类型时出错: {e}")
             pass
     
-    def setup_processor(self, device: torch.device) -> PowerGridDataProcessor:
+    def setup_processor(self, device: torch.device, timestamp_dir: str = None) -> PowerGridDataProcessor:
         """设置数据处理器"""
         if self.processor is None:
+            # 如果提供了时间戳目录，使用它；否则使用配置中的默认值
+            if timestamp_dir:
+                cache_dir = str(Path(timestamp_dir) / "cache")
+            else:
+                cache_dir = self.data_config.get('cache_dir', 'data/latest/cache')
+
             self.processor = PowerGridDataProcessor(
                 normalize=self.data_config.get('normalize', True),
-                cache_dir=self.data_config.get('cache_dir', 'data/latest/cache')
+                cache_dir=cache_dir
             )
         return self.processor
     
-    def process_data(self, mpc: Dict, config: Dict[str, Any], device: torch.device) -> HeteroData:
+    def process_data(self, mpc: Dict, config: Dict[str, Any], device: torch.device, timestamp_dir: str = None) -> HeteroData:
         """处理电网数据为图数据"""
-        processor = self.setup_processor(device)
+        processor = self.setup_processor(device, timestamp_dir)
         hetero_data = processor.graph_from_mpc(mpc, config).to(device)
         logger.info(f"数据处理完成: {hetero_data}")
         return hetero_data
@@ -460,12 +466,15 @@ class UnifiedDirectorManager:
 
 class TrainingLogger:
     """训练日志记录器"""
-    
+
     def __init__(self, config: Dict[str, Any], total_episodes: int):
         self.config = config
         self.start_time = time.time()
         self.total_episodes = total_episodes
-        
+
+        # 创建时间戳目录
+        self.timestamp_dir = self._create_timestamp_directory()
+
         # 训练指标
         self.episode_rewards = []
         self.episode_lengths = []
@@ -474,24 +483,39 @@ class TrainingLogger:
         self.entropies = []
         self.success_rates = []
         self.best_reward = -float('inf')
-        
+
         # 设置TensorBoard
         self.use_tensorboard = config.get('logging', {}).get('use_tensorboard', False)
         self.tensorboard_writer = self._setup_tensorboard() if self.use_tensorboard else None
-        
+
         # 设置进度条
         self.progress_bar = self._setup_progress_bar()
-        
+
         logger.info(f"训练日志记录器初始化完成: {total_episodes} episodes")
-    
+        logger.info(f"训练目录: {self.timestamp_dir}")
+
+    def _create_timestamp_directory(self) -> str:
+        """创建时间戳目录结构"""
+        from datetime import datetime
+
+        # 创建时间戳
+        timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+        timestamp_dir = Path("data") / timestamp
+
+        # 创建完整的目录结构
+        subdirs = ['logs', 'checkpoints', 'models', 'figures', 'cache', 'output']
+        for subdir in subdirs:
+            (timestamp_dir / subdir).mkdir(parents=True, exist_ok=True)
+
+        return str(timestamp_dir)
+
     def _setup_tensorboard(self):
         """设置TensorBoard"""
         try:
             from torch.utils.tensorboard import SummaryWriter
-            log_dir = self.config['logging']['log_dir']
-            timestamp = time.strftime('%Y%m%d_%H%M%S')
-            writer = SummaryWriter(f"{log_dir}/training_{timestamp}")
-            logger.info(f"TensorBoard已启用: {log_dir}/training_{timestamp}")
+            log_dir = Path(self.timestamp_dir) / "logs"
+            writer = SummaryWriter(str(log_dir))
+            logger.info(f"TensorBoard已启用: {log_dir}")
             return writer
         except ImportError:
             logger.warning("TensorBoard不可用")
@@ -725,15 +749,14 @@ class BaseTrainer(ABC):
         
         return False
     
-    def _save_model(self, agent: Any, final_stats: Dict[str, Any], 
+    def _save_model(self, agent: Any, final_stats: Dict[str, Any],
                    model_suffix: str = "") -> str:
         """保存训练模型"""
         try:
-            models_dir = Path("data/models")
+            models_dir = Path(self.logger.timestamp_dir) / "models"
             models_dir.mkdir(parents=True, exist_ok=True)
-            
-            timestamp = time.strftime('%Y%m%d_%H%M%S')
-            model_filename = f"agent_{model_suffix}_{timestamp}.pth"
+
+            model_filename = f"agent_{model_suffix}.pth"
             model_path = models_dir / model_filename
             
             # 保存模型
@@ -743,7 +766,8 @@ class BaseTrainer(ABC):
                 'actor_optimizer_state_dict': agent.actor_optimizer.state_dict(),
                 'critic_optimizer_state_dict': agent.critic_optimizer.state_dict(),
                 'training_stats': final_stats,
-                'timestamp': timestamp,
+                'timestamp': Path(self.logger.timestamp_dir).name,
+                'training_directory': self.logger.timestamp_dir,
                 'config': self.config,
                 'model_info': {
                     'node_embedding_dim': agent.node_embedding_dim,
@@ -775,12 +799,21 @@ class BasicTrainer(BaseTrainer):
         logger.info("🔥 开始基础训练模式 - 无课程学习、无拓扑变化")
         
         try:
-            # 1. 数据加载和处理
+            # 1. 训练配置
+            training_config = self.config['training']
+            num_episodes = training_config['num_episodes']
+            max_steps_per_episode = training_config['max_steps_per_episode']
+            update_interval = training_config['update_interval']
+
+            # 2. 初始化日志记录器（需要先创建时间戳目录）
+            self.logger = LoggerFactory.create_training_logger(self.config, num_episodes)
+
+            # 3. 数据加载和处理
             ref_case = self.config['data'].get('reference_case', 'ieee14')
             mpc = self.data_manager.load_power_grid_data(ref_case)
-            hetero_data = self.data_manager.process_data(mpc, self.config, self.device)
+            hetero_data = self.data_manager.process_data(mpc, self.config, self.device, self.logger.timestamp_dir)
 
-            # 2. 创建基础环境（无场景生成）
+            # 4. 创建基础环境（无场景生成）
             try:
                 env = EnvironmentFactory.create_basic_environment(hetero_data, self.config)
             except Exception as e:
@@ -789,7 +822,7 @@ class BasicTrainer(BaseTrainer):
                 logger.error(f"详细错误信息: {traceback.format_exc()}")
                 raise
 
-            # 3. 创建智能体
+            # 5. 创建智能体
             try:
                 agent = AgentFactory.create_agent(env, self.config, self.device)
             except Exception as e:
@@ -797,17 +830,8 @@ class BasicTrainer(BaseTrainer):
                 import traceback
                 logger.error(f"详细错误信息: {traceback.format_exc()}")
                 raise
-            
-            # 4. GNN预训练已在环境创建时完成
-            
-            # 5. 训练配置
-            training_config = self.config['training']
-            num_episodes = training_config['num_episodes']
-            max_steps_per_episode = training_config['max_steps_per_episode']
-            update_interval = training_config['update_interval']
-            
-            # 6. 初始化日志记录器
-            self.logger = LoggerFactory.create_training_logger(self.config, num_episodes)
+
+            # 6. GNN预训练已在环境创建时完成
             
             # 7. 基础训练循环
             logger.info(f"开始基础训练: {num_episodes} episodes")
