@@ -556,6 +556,14 @@ class EnhancedPPOAgent(PPOAgent):
             # 确保分区ID是整数而不是张量
             if isinstance(selected_partition, torch.Tensor):
                 selected_partition = selected_partition.item()
+            elif not isinstance(selected_partition, int):
+                selected_partition = int(selected_partition)
+
+            # 确保节点ID也是整数
+            if isinstance(selected_node, torch.Tensor):
+                selected_node = selected_node.item()
+            elif not isinstance(selected_node, int):
+                selected_node = int(selected_node)
 
             action = (selected_node, selected_partition)
             

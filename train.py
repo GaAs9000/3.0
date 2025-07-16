@@ -1125,7 +1125,9 @@ class TopologyTrainer(BaseTrainer):
                                 training_stats.get('entropy')
                             )
                     except Exception as e:
+                        import traceback
                         logger.warning(f"Episode {episode} 智能体更新失败: {e}")
+                        logger.warning(f"详细错误信息: {traceback.format_exc()}")
             
             # 9. 训练完成
             final_stats = self.logger.get_statistics()

@@ -649,58 +649,69 @@ class PPOAgent:
         Returns:
             训练统计信息
         """
-        if len(self.memory) == 0:
-            return {}
-            
-        # v3.0: 必须将 env 实例传入 _ppo_epoch
-        if 'env' not in kwargs:
-             raise ValueError("PPOAgent.update() now requires 'env' keyword argument for v3.0 architecture.")
-        env = kwargs['env']
+        try:
+            if len(self.memory) == 0:
+                return {}
 
-        # 🚀 关键优化：直接获取张量，避免CPU-GPU传输
-        states, actions, rewards_tensor, old_log_probs_tensor, old_values_tensor, dones_tensor = self.memory.get_batch_tensors()
-        
-        # 计算优势和回报
-        advantages, returns = self._compute_advantages(rewards_tensor, old_values_tensor, dones_tensor)
+            # v3.0: 必须将 env 实例传入 _ppo_epoch
+            if 'env' not in kwargs:
+                 raise ValueError("PPOAgent.update() now requires 'env' keyword argument for v3.0 architecture.")
+            env = kwargs['env']
 
-        # PPO更新
-        agg_stats = {
-            'actor_loss': 0.0,
-            'critic_loss': 0.0,
-            'entropy': 0.0,
-            'grad_norm': 0.0,
-        }
-        total_samples = 0
+            # 🚀 关键优化：直接获取张量，避免CPU-GPU传输
+            states, actions, rewards_tensor, old_log_probs_tensor, old_values_tensor, dones_tensor = self.memory.get_batch_tensors()
 
-        for _ in range(self.k_epochs):
-            epoch_stats, batch_size = self._ppo_epoch(
-                states, actions, old_log_probs_tensor, advantages, returns, env=env)
+            # 计算优势和回报
+            advantages, returns = self._compute_advantages(rewards_tensor, old_values_tensor, dones_tensor)
 
+            # PPO更新
+            agg_stats = {
+                'actor_loss': 0.0,
+                'critic_loss': 0.0,
+                'entropy': 0.0,
+                'grad_norm': 0.0,
+            }
+            total_samples = 0
+
+            for _ in range(self.k_epochs):
+                epoch_stats, batch_size = self._ppo_epoch(
+                    states, actions, old_log_probs_tensor, advantages, returns, env=env)
+
+                for key in agg_stats:
+                    if key in epoch_stats:
+                        agg_stats[key] += epoch_stats[key] * batch_size
+
+                total_samples += batch_size
+
+            # 样本平均
             for key in agg_stats:
-                if key in epoch_stats:
-                    agg_stats[key] += epoch_stats[key] * batch_size
+                agg_stats[key] /= max(total_samples, 1)
 
-            total_samples += batch_size
+            # 更新训练统计
+            self.training_stats['actor_loss'].append(agg_stats['actor_loss'])
+            self.training_stats['critic_loss'].append(agg_stats['critic_loss'])
+            self.training_stats['entropy'].append(agg_stats['entropy'])
 
-        # 样本平均
-        for key in agg_stats:
-            agg_stats[key] /= max(total_samples, 1)
+            # 更新学习率调度器
+            if self.actor_scheduler:
+                self.actor_scheduler.step()
+            if self.critic_scheduler:
+                self.critic_scheduler.step()
 
-        # 更新训练统计
-        self.training_stats['actor_loss'].append(agg_stats['actor_loss'])
-        self.training_stats['critic_loss'].append(agg_stats['critic_loss'])
-        self.training_stats['entropy'].append(agg_stats['entropy'])
+            # 清空内存
+            self.memory.clear()
 
-        # 更新学习率调度器
-        if self.actor_scheduler:
-            self.actor_scheduler.step()
-        if self.critic_scheduler:
-            self.critic_scheduler.step()
+            return agg_stats
 
-        # 清空内存
-        self.memory.clear()
-
-        return agg_stats
+        except Exception as e:
+            # 🔧 DEBUG: 捕获所有异常并打印详细信息
+            print(f"\n=== AGENT UPDATE ERROR ===")
+            print(f"Error: {e}")
+            print(f"Error type: {type(e)}")
+            import traceback
+            print(f"Full traceback:\n{traceback.format_exc()}")
+            print("=== END AGENT UPDATE ERROR ===\n")
+            raise e
         
     def _compute_advantages(self, 
                             rewards: torch.Tensor, 
@@ -846,15 +857,76 @@ class PPOAgent:
                 node_probs = F.softmax(masked_node_logits, dim=0)
                 node_dist = torch.distributions.Categorical(probs=node_probs)
                 
-                # b) 获取动作
-                node_id, partition_id = actions[i]
+                # b) 获取动作并确保类型正确
+                action = actions[i]
+
+                # 🔧 DEBUG: 添加详细的调试信息
+                if i == 0:  # 只在第一个样本时打印，避免过多输出
+                    print(f"\n=== DEBUG Episode {i} Action Analysis ===")
+                    print(f"action = {action}")
+                    print(f"type(action) = {type(action)}")
+                    if hasattr(action, '__len__') and len(action) >= 2:
+                        print(f"action[0] = {action[0]}, type = {type(action[0])}")
+                        print(f"action[1] = {action[1]}, type = {type(action[1])}")
+                    print("=== END DEBUG ===\n")
+
+                # 🔧 修复：确保action是正确的格式
+                if isinstance(action, (list, tuple)) and len(action) >= 2:
+                    node_id = action[0]
+                    partition_id = action[1]
+
+                    # 确保node_id是整数
+                    if isinstance(node_id, torch.Tensor):
+                        node_id = node_id.item()
+                    elif not isinstance(node_id, int):
+                        node_id = int(node_id)
+
+                    # 确保partition_id是整数
+                    if isinstance(partition_id, (list, tuple)):
+                        partition_id = partition_id[0] if len(partition_id) > 0 else 1
+                    elif isinstance(partition_id, torch.Tensor):
+                        partition_id = partition_id.item()
+                    elif not isinstance(partition_id, int):
+                        partition_id = int(partition_id)
+                else:
+                    # 如果action格式不正确，跳过这个样本
+                    continue
                 
                 # c) 编码分区
                 available_partitions = env.get_connectivity_safe_partitions(node_id)
                 if not available_partitions: continue
 
-                partition_features = env.get_partition_features(available_partitions)
-                partition_embeddings = self.partition_encoder(partition_features)
+                # 🔧 修复：为每个分区分别获取特征并转换为张量
+                partition_features_list = []
+                for pid in available_partitions:
+                    features = env.get_partition_features(pid)
+                    partition_features_list.append(features)
+
+                # 将特征列表转换为张量
+                if partition_features_list:
+                    # 假设每个特征都是字典，需要转换为张量
+                    if isinstance(partition_features_list[0], dict):
+                        # 提取特征值并堆叠成张量
+                        feature_tensors = []
+                        for features in partition_features_list:
+                            # 将字典值转换为张量并连接
+                            values = []
+                            for key in sorted(features.keys()):  # 保证顺序一致
+                                val = features[key]
+                                if isinstance(val, (int, float)):
+                                    values.append(val)
+                                elif isinstance(val, torch.Tensor):
+                                    values.append(val.item() if val.numel() == 1 else val.mean().item())
+                            feature_tensors.append(torch.tensor(values, device=self.device))
+                        partition_features_tensor = torch.stack(feature_tensors)
+                    else:
+                        # 如果已经是张量，直接堆叠
+                        partition_features_tensor = torch.stack(partition_features_list)
+
+                    partition_embeddings = self.partition_encoder(partition_features_tensor)
+                else:
+                    # 如果没有可用分区，创建空张量
+                    partition_embeddings = torch.empty(0, self.partition_encoder.output_dim, device=self.device)
                 
                 # d) 计算分区概率
                 node_action_idx_in_sample = (sample_boundary_nodes == node_id).nonzero(as_tuple=True)[0]
@@ -865,20 +937,36 @@ class PPOAgent:
                 
                 # e) 计算LogProb和熵
                 try:
-                    # 🔧 DEBUG: 打印关键数据类型
-                    print(f"\n=== DEBUG Episode {i} ===")
-                    print(f"actions[i] = {actions[i]}")
-                    print(f"type(actions[i]) = {type(actions[i])}")
-                    if isinstance(actions[i], (list, tuple)) and len(actions[i]) >= 2:
-                        print(f"partition_id = {actions[i][1]}")
-                        print(f"type(partition_id) = {type(actions[i][1])}")
-                    print(f"available_partitions = {available_partitions}")
-                    print(f"type(available_partitions) = {type(available_partitions)}")
-                    if available_partitions:
-                        print(f"available_partitions[0] type = {type(available_partitions[0])}")
-                    print("=== END DEBUG ===\n")
-                    
+                    # 🔧 修复：确保partition_id是整数类型
+                    if isinstance(partition_id, (list, tuple)):
+                        # 如果partition_id是list或tuple，取第一个元素
+                        partition_id = partition_id[0] if len(partition_id) > 0 else 1
+                    elif isinstance(partition_id, torch.Tensor):
+                        # 如果是张量，转换为整数
+                        partition_id = partition_id.item()
+                    elif not isinstance(partition_id, int):
+                        # 其他类型，尝试转换为整数
+                        partition_id = int(partition_id)
+
+                    # 确保available_partitions中的元素也是整数
+                    available_partitions = [int(p) if isinstance(p, torch.Tensor) else int(p)
+                                          for p in available_partitions]
+
                     part_action_idx_in_list = available_partitions.index(partition_id)
+                except Exception as debug_e:
+                    # 🔧 DEBUG: 详细的错误信息
+                    print(f"\n=== DETAILED ERROR DEBUG ===")
+                    print(f"Error: {debug_e}")
+                    print(f"Error type: {type(debug_e)}")
+                    print(f"partition_id = {partition_id}, type = {type(partition_id)}")
+                    print(f"available_partitions = {available_partitions}")
+                    print(f"available_partitions types = {[type(p) for p in available_partitions]}")
+                    import traceback
+                    print(f"Traceback: {traceback.format_exc()}")
+                    print("=== END ERROR DEBUG ===\n")
+                    raise debug_e
+
+                try:
                     log_prob = node_dist.log_prob(node_action_idx_in_sample) + \
                                partition_dist.log_prob(torch.tensor(part_action_idx_in_list, device=self.device))
                     log_probs_list.append(log_prob)

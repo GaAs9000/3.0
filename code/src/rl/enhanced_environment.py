@@ -203,6 +203,14 @@ class EnhancedPowerGridPartitioningEnv(PowerGridPartitioningEnv):
         Returns:
             分区特征字典
         """
+        # 🔧 修复：确保partition_id是单个值而不是list
+        if isinstance(partition_id, (list, tuple)):
+            if len(partition_id) == 0:
+                return self._empty_partition_features()
+            partition_id = partition_id[0]  # 取第一个元素
+        elif isinstance(partition_id, torch.Tensor):
+            partition_id = partition_id.item()
+
         # 检查缓存
         if self.enable_features_cache and partition_id in self.partition_features_cache:
             return self.partition_features_cache[partition_id]
