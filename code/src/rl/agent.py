@@ -416,15 +416,21 @@ class PPOAgent:
         self.gamma = agent_config.get('gamma', 0.99)
         self.gae_lambda = agent_config.get('gae_lambda', 0.95)
         self.clip_epsilon = agent_config.get('clip_epsilon', 0.2)
+        self.eps_clip = agent_config.get('eps_clip', 0.2)  # 添加eps_clip别名
+        self.k_epochs = agent_config.get('k_epochs', 4)  # 添加缺失的k_epochs
         self.entropy_coef = agent_config.get('entropy_coef', 0.01)
         self.value_loss_coef = agent_config.get('value_loss_coef', 0.5)
+        self.value_coef = agent_config.get('value_coef', 0.5)  # 添加value_coef别名
+        self.max_grad_norm = agent_config.get('max_grad_norm', 1.5)  # 添加梯度裁剪阈值
         self.device = device
         self.use_mixed_precision = use_mixed_precision
         self.grad_scaler = torch.cuda.amp.GradScaler(enabled=use_mixed_precision)
+        self.scaler = self.grad_scaler  # 添加scaler别名
 
         self.node_embedding_dim = node_embedding_dim
         self.region_embedding_dim = region_embedding_dim
         self.num_partitions = num_partitions
+        self.strategy_vector_dim = agent_config.get('strategy_vector_dim', 128)
 
         actor_config = agent_config.get('actor', {})
         critic_config = agent_config.get('critic', {})
@@ -461,21 +467,58 @@ class PPOAgent:
             config=partition_enc_cfg
         ).to(device)
 
+        # 分离的优化器 - 修复缺失的actor_optimizer和critic_optimizer
+        lr_actor = agent_config.get('lr_actor', 5e-5)
+        lr_critic = agent_config.get('lr_critic', 1e-4)
+
+        # 将partition_encoder的参数也加入actor_optimizer
+        actor_params = list(self.actor.parameters()) + list(self.partition_encoder.parameters())
+        self.actor_optimizer = torch.optim.Adam(actor_params, lr=lr_actor)
+        self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=lr_critic)
+
+        # 保持向后兼容的统一优化器
         self.optimizer = torch.optim.Adam(
             list(self.actor.parameters()) + list(self.critic.parameters()) + list(self.partition_encoder.parameters()),
             lr=agent_config.get('learning_rate', 3e-4),
             eps=agent_config.get('adam_eps', 1e-5)
         )
 
+        # 学习率调度器
+        self.actor_scheduler = None
+        self.critic_scheduler = None
+        actor_scheduler_config = agent_config.get('actor_scheduler', {})
+        critic_scheduler_config = agent_config.get('critic_scheduler', {})
+
+        if actor_scheduler_config.get('enabled', False):
+            self.actor_scheduler = torch.optim.lr_scheduler.StepLR(
+                self.actor_optimizer,
+                step_size=actor_scheduler_config.get('step_size', 50),
+                gamma=actor_scheduler_config.get('gamma', 0.9)
+            )
+        if critic_scheduler_config.get('enabled', False):
+            self.critic_scheduler = torch.optim.lr_scheduler.StepLR(
+                self.critic_optimizer,
+                step_size=critic_scheduler_config.get('step_size', 50),
+                gamma=critic_scheduler_config.get('gamma', 0.9)
+            )
+
+        # 保持向后兼容的统一调度器
         self.scheduler = None
         if agent_config.get('use_lr_scheduler', False):
             self.scheduler = torch.optim.lr_scheduler.StepLR(
-                self.optimizer, 
+                self.optimizer,
                 step_size=agent_config.get('lr_step_size', 50),
                 gamma=agent_config.get('lr_gamma', 0.9)
             )
 
         self.memory = FastPPOMemory()
+
+        # 训练统计
+        self.training_stats = {
+            'actor_loss': deque(maxlen=100),
+            'critic_loss': deque(maxlen=100),
+            'entropy': deque(maxlen=100)
+        }
 
     @classmethod
     def from_config(cls, env, config, device, use_mixed_precision=False):

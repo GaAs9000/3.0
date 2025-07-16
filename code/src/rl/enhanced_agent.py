@@ -395,7 +395,14 @@ class EnhancedPPOAgent(PPOAgent):
         sample_obs, _ = env.reset()
         actual_node_dim = sample_obs['node_embeddings'].shape[1]
         actual_region_dim = sample_obs['region_embeddings'].shape[1] if sample_obs['region_embeddings'].numel() > 0 else actual_node_dim * 2
-        
+
+        # 【关键修复】确保strategy_vector_dim与node_embedding_dim一致
+        # 这是解决维度不匹配问题的根本方案
+        agent_config = agent_config.copy()  # 避免修改原始配置
+        agent_config['strategy_vector_dim'] = actual_node_dim
+
+        logger.info(f"🔧 维度对齐: node_embedding_dim={actual_node_dim}, strategy_vector_dim={actual_node_dim}")
+
         # 调用父类构造函数，传递实际的维度值
         super().__init__(
             node_embedding_dim=actual_node_dim,
@@ -523,23 +530,13 @@ class EnhancedPPOAgent(PPOAgent):
             # 注意：boundary_nodes包含的是在原始图中的节点ID
             selected_node_embedding = batched_state.node_embeddings[selected_node]
 
-            # 调试：维度一致性检查
+            # 维度一致性验证（现在应该总是一致的）
             if selected_strategy_vector.size(0) != selected_node_embedding.size(0):
                 logger.error(
                     f"维度不一致: strategy_dim={selected_strategy_vector.size(0)} vs node_emb_dim={selected_node_embedding.size(0)}"
                 )
-                # 可选：将较小者进行零填充以继续
-                if selected_strategy_vector.size(0) < selected_node_embedding.size(0):
-                    pad_size = selected_node_embedding.size(0) - selected_strategy_vector.size(0)
-                    selected_strategy_vector = torch.cat([
-                        selected_strategy_vector,
-                        torch.zeros(pad_size, device=self.device)
-                    ])
-                elif selected_strategy_vector.size(0) > selected_node_embedding.size(0):
-                    selected_node_embedding = torch.cat([
-                        selected_node_embedding,
-                        torch.zeros(selected_strategy_vector.size(0) - selected_node_embedding.size(0), device=self.device)
-                    ])
+                # 这种情况现在不应该发生，如果发生说明配置有问题
+                raise ValueError(f"维度配置错误: strategy_vector_dim应该等于node_embedding_dim ({selected_node_embedding.size(0)})")
             
             # 12. 创建抽象决策上下文
             # 生成边界节点嵌入和状态嵌入

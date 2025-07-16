@@ -1369,7 +1369,10 @@ class AdaptiveTrainer(BaseTrainer):
                 # 自适应导演决策
                 director_decision = adaptive_director.step(episode, episode_summary)
                 director_decisions.append(director_decision)
-                
+
+                # 【新增】添加训练进度信息到决策中
+                director_decision['training_progress'] = episode / num_episodes
+
                 # 应用自适应导演的参数调整
                 self._apply_adaptive_decision(env, agent, director_decision)
                 
@@ -1451,7 +1454,11 @@ class AdaptiveTrainer(BaseTrainer):
             if 'learning_rate_factor' in decision and decision['learning_rate_factor'] != 1.0:
                 if hasattr(agent, 'update_learning_rate'):
                     agent.update_learning_rate(decision['learning_rate_factor'])
-                    
+
+            # 【新增】更新动态置信度阈值
+            if 'training_progress' in decision and hasattr(env, 'update_similarity_threshold'):
+                env.update_similarity_threshold(training_progress=decision['training_progress'])
+
         except Exception as e:
             logger.warning(f"应用自适应决策失败: {e}")
 
@@ -1571,7 +1578,10 @@ class UnifiedTrainer(BaseTrainer):
                 # 统一导演决策
                 unified_decision = unified_director.step(episode, episode_summary)
                 unified_decisions.append(unified_decision)
-                
+
+                # 【新增】添加训练进度信息到决策中
+                unified_decision['training_progress'] = episode / num_episodes
+
                 # 应用统一导演的决策
                 self._apply_unified_decision(env, agent, unified_decision)
                 
@@ -1689,7 +1699,11 @@ class UnifiedTrainer(BaseTrainer):
             if 'learning_rate_factor' in decision and decision['learning_rate_factor'] != 1.0:
                 if hasattr(agent, 'update_learning_rate'):
                     agent.update_learning_rate(decision['learning_rate_factor'])
-                    
+
+            # 【新增】更新动态置信度阈值
+            if 'training_progress' in decision and hasattr(env, 'update_similarity_threshold'):
+                env.update_similarity_threshold(training_progress=decision['training_progress'])
+
         except Exception as e:
             logger.warning(f"应用自适应决策失败: {e}")
 
@@ -2051,8 +2065,10 @@ def print_training_summary(result: Dict[str, Any], verbose: bool = False):
             if 'best_reward' in result:
                 logger.info(f"最佳奖励: {result['best_reward']:.4f}")
 
-            if 'model_path' in result:
+            if 'model_path' in result and result['model_path'] is not None:
                 logger.info(f"模型保存: {result['model_path']}")
+            elif 'model_path' in result:
+                logger.warning("模型保存失败")
 
             # 评估结果
             eval_stats = result.get('eval_stats', {})
@@ -2076,8 +2092,10 @@ def print_training_summary(result: Dict[str, Any], verbose: bool = False):
             if 'best_reward' in result:
                 print_result("最佳奖励", f"{result['best_reward']:.4f}")
 
-            if 'model_path' in result:
+            if 'model_path' in result and result['model_path'] is not None:
                 print_status(f"模型已保存: {Path(result['model_path']).name}")
+            elif 'model_path' in result:
+                print_status("模型保存失败", "error")
 
             # 评估结果
             eval_stats = result.get('eval_stats', {})

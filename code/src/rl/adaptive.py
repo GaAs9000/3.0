@@ -60,7 +60,7 @@ class ParameterEvolutionConfig:
 @dataclass
 class SafetyConfig:
     """安全监控配置"""
-    min_episode_length: int = 3
+    min_episode_length: int = 1  # 降低到1，适应小网络快速收敛
     max_reward_threshold: float = -100
     max_loss_threshold: float = 10
     performance_deterioration_patience: int = 50

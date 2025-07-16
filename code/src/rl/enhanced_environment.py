@@ -57,7 +57,16 @@ class EnhancedPowerGridPartitioningEnv(PowerGridPartitioningEnv):
         
         # 初始化分区信息
         self._update_partition_info()
-        
+
+        # 【新增】动态置信度阈值 - 支持课程学习
+        self.dynamic_similarity_threshold = 0.05  # 初始值很低，允许早期训练
+        self.similarity_threshold_config = {
+            'initial': 0.05,    # 训练初期
+            'target': 0.3,      # 训练后期目标
+            'min': 0.01,        # 最小值
+            'max': 0.8,         # 最大值
+        }
+
         logger.info("EnhancedPowerGridPartitioningEnv initialized")
     
     def _build_nx_graph(self):
@@ -446,21 +455,57 @@ class EnhancedPowerGridPartitioningEnv(PowerGridPartitioningEnv):
         
         return obs, reward, terminated, truncated, info
     
-    def materialize_action(self, context: AbstractDecisionContext, 
-                          similarity_threshold: float = 0.8) -> Optional[Tuple[int, int]]:
+    def update_similarity_threshold(self, training_progress: float = None,
+                                   episode: int = None, total_episodes: int = None):
+        """
+        更新动态置信度阈值 - 课程学习支持
+
+        Args:
+            training_progress: 训练进度 (0.0-1.0)
+            episode: 当前episode
+            total_episodes: 总episode数
+        """
+        if training_progress is None and episode is not None and total_episodes is not None:
+            training_progress = episode / max(total_episodes, 1)
+
+        if training_progress is not None:
+            # 使用平滑的指数增长曲线
+            initial = self.similarity_threshold_config['initial']
+            target = self.similarity_threshold_config['target']
+
+            # 指数增长：前期增长缓慢，后期加速
+            growth_factor = training_progress ** 2
+            new_threshold = initial + (target - initial) * growth_factor
+
+            # 应用边界限制
+            new_threshold = max(self.similarity_threshold_config['min'],
+                              min(self.similarity_threshold_config['max'], new_threshold))
+
+            old_threshold = self.dynamic_similarity_threshold
+            self.dynamic_similarity_threshold = new_threshold
+
+            if abs(new_threshold - old_threshold) > 0.01:  # 只在显著变化时记录
+                logger.info(f"🎯 动态置信度阈值更新: {old_threshold:.3f} → {new_threshold:.3f} (进度: {training_progress:.2%})")
+
+    def materialize_action(self, context: AbstractDecisionContext,
+                          similarity_threshold: float = None) -> Optional[Tuple[int, int]]:
         """
         将抽象决策上下文实体化为具体的执行动作
-        
+
         这是v3.0架构的关键方法，实现跨拓扑泛化：
         通过嵌入相似度匹配，将抽象表示转换为当前环境的具体动作。
-        
+
         Args:
             context: 抽象决策上下文
-            similarity_threshold: 相似度阈值，低于此值认为无法匹配
+            similarity_threshold: 相似度阈值，如果为None则使用动态阈值
         
         Returns:
             (node_id, partition_id) tuple，或None如果无法匹配
         """
+        # 使用动态阈值（如果未指定）
+        if similarity_threshold is None:
+            similarity_threshold = self.dynamic_similarity_threshold
+
         try:
             # 获取当前环境的节点和分区嵌入
             current_state = self.state_manager.get_observation()
