@@ -22,6 +22,7 @@ import time
 from .agent import PPOAgent, BatchedState
 from models.partition_encoder import PartitionEncoder, create_partition_encoder
 from models.actor_network import EnhancedActorNetwork, create_actor_network
+from .decision_context import AbstractDecisionContext, create_decision_context
 
 logger = logging.getLogger(__name__)
 
@@ -373,104 +374,72 @@ class EnhancedPPOAgent(PPOAgent):
     继承自原PPOAgent，重写关键方法以支持双塔架构
     """
     
-    def __init__(self,
-                 state_dim: int,
-                 num_partitions: int,
-                 config: Dict[str, Any],
-                 device: str = 'auto'):
+    def __init__(
+        self, 
+        env: 'EnhancedUnifiedEnvironment', 
+        agent_config: dict, 
+        device: torch.device,
+        use_mixed_precision: bool = False
+    ):
         """
         初始化增强的PPO智能体
 
         Args:
-            state_dim: 状态维度
-            num_partitions: 初始分区数
-            config: 配置字典，需包含:
-                - node_dim: 节点特征维度
-                - edge_dim: 边特征维度
-                - gnn_hidden: GNN隐藏层维度
-                - strategy_vector_dim: 策略向量维度
-                - partition_encoder: 分区编码器配置
-                - use_two_tower: 是否使用双塔架构
+            env: 增强的统一环境实例
+            agent_config: 智能体配置字典
             device: 计算设备
+            use_mixed_precision: 是否使用混合精度训练
         """
-        # 【关键修复】使用实际的状态维度，而不是配置中的固定值
-        # state_dim是从环境实际获取的节点嵌入维度，能够适应不同模式
-        node_embedding_dim = state_dim  # 使用实际的节点嵌入维度
-
-        # 区域嵌入维度 = 2 * 实际节点嵌入维度
-        region_embedding_dim = 2 * node_embedding_dim
+        # 核心修复：从env的实际观察中获取正确的维度
+        # 先获取一个观察样本来确定实际维度
+        sample_obs, _ = env.reset()
+        actual_node_dim = sample_obs['node_embeddings'].shape[1]
+        actual_region_dim = sample_obs['region_embeddings'].shape[1] if sample_obs['region_embeddings'].numel() > 0 else actual_node_dim * 2
         
-        # 处理设备参数
-        if isinstance(device, str):
-            if device == 'auto':
-                device_obj = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-            else:
-                device_obj = torch.device(device)
-        else:
-            device_obj = device
-        
-        # 调用父类初始化，传递正确的参数
+        # 调用父类构造函数，传递实际的维度值
         super().__init__(
-            node_embedding_dim=node_embedding_dim,
-            region_embedding_dim=region_embedding_dim,
-            num_partitions=num_partitions,
-            agent_config=config,  # 传递整个config作为agent_config
-            device=device_obj
+            node_embedding_dim=actual_node_dim,
+            region_embedding_dim=actual_region_dim,
+            num_partitions=env.num_partitions,
+            agent_config=agent_config,
+            device=device,
+            use_mixed_precision=use_mixed_precision
         )
 
         # 【新增】初始化预测性回退机制组件
         self.connectivity_cache = ConnectivityCache(
-            max_size=config.get('cache_size', 1000),
-            ttl_seconds=config.get('cache_ttl', 300)
+            max_size=agent_config.get('cache_size', 1000),
+            ttl_seconds=agent_config.get('cache_ttl', 300)
         )
-        self.risk_predictor = RiskPredictor(device_obj)
+        self.risk_predictor = RiskPredictor(device)
 
         # 【新增】自适应约束参数
-        self.adaptive_constraint_config = config.get('adaptive_constraints', {
-            'enabled': True,
-            'initial_strictness': 0.8,
-            'min_strictness': 0.3,
-            'max_strictness': 1.0,
-            'adjustment_rate': 0.05,
-            'evaluation_window': 50,  # 评估窗口大小
-            'success_threshold': 0.6,  # 成功率阈值
-            'connectivity_threshold': 0.5  # 连通性阈值
-        })
-        self.current_constraint_strictness = self.adaptive_constraint_config['initial_strictness']
+        self.adaptive_constraint_config = agent_config.get('adaptive_constraints', {})
+        self.current_constraint_strictness = self.adaptive_constraint_config.get('initial_strictness', 0.8)
 
         # 【新增】性能监控组件
         self.performance_monitor = PerformanceMonitor(
-            window_size=self.adaptive_constraint_config['evaluation_window']
+            window_size=self.adaptive_constraint_config.get('evaluation_window', 50)
         )
         
-        # 检查是否启用双塔架构（父类已经创建了双塔架构）
-        self.use_two_tower = config.get('use_two_tower', True)
-        self.num_partitions = num_partitions
+        # 记录关键维度和组件信息
+        logger.info("🏗️ EnhancedPPOAgent双塔架构配置:")
+        logger.info(f"   ✅ State Tower (Actor): {type(self.actor).__name__}")
+        logger.info(f"   ✅ Action Tower (PartitionEncoder): {type(self.partition_encoder).__name__}")
+        logger.info(f"   📏 Strategy Vector Dim: {self.strategy_vector_dim}")
+        logger.info(f"   🔗 Node Embedding Dim: {self.node_embedding_dim}")
+        logger.info(f"   🔗 Region Embedding Dim: {self.region_embedding_dim}")
+        logger.info(f"   🎯 Partitions: {self.num_partitions}")
 
-        # 【调试】打印双塔架构信息
-        if self.use_two_tower and hasattr(self, 'actor') and hasattr(self, 'partition_encoder'):
-            print(f"🏗️ EnhancedPPOAgent双塔架构配置:")
-            print(f"   ✅ State Tower (Actor): {type(self.actor).__name__}")
-            print(f"   ✅ Action Tower (PartitionEncoder): {type(self.partition_encoder).__name__}")
-            print(f"   📏 Strategy Vector Dim: {self.strategy_vector_dim}")
-            print(f"   🔗 Node Embedding Dim: {self.node_embedding_dim}")
-            print(f"   🔗 Region Embedding Dim: {self.region_embedding_dim}")
-            print(f"   🎯 Partitions: {self.num_partitions}")
-            logger.info("EnhancedPPOAgent using two-tower architecture from parent class")
-        else:
-            print(f"⚠️  EnhancedPPOAgent标准架构配置:")
-            print(f"   node_embedding_dim: {self.node_embedding_dim}")
-            print(f"   region_embedding_dim: {self.region_embedding_dim}")
-            print(f"   state_dim: {state_dim}")
-            print(f"   num_partitions: {self.num_partitions}")
-            logger.info("EnhancedPPOAgent using standard architecture")
-    
     def select_action(self,
                      state: Dict[str, torch.Tensor],
                      training: bool = True,
-                     return_embeddings: bool = False) -> Tuple[Optional[Tuple[int, int]], float, float, Optional[Dict]]:
+                     return_embeddings: bool = False) -> Tuple[Optional[AbstractDecisionContext], float, float, Optional[Dict]]:
         """
-        使用动作嵌入机制选择动作
+        使用v3.0双塔架构选择动作，返回抽象决策上下文
+        
+        核心改变：不再返回具体的(node_id, partition_id)，而是返回完整的
+        决策上下文，支持跨拓扑泛化和PPO重新计算。
         
         Args:
             state: 状态字典，需包含:
@@ -480,8 +449,8 @@ class EnhancedPPOAgent(PPOAgent):
             return_embeddings: 是否返回嵌入向量（用于调试）
         
         Returns:
-            action: 选择的动作 (node_idx, partition_idx)
-            log_prob: 动作的对数概率
+            decision_context: 抽象决策上下文，包含完整嵌入表示
+            log_prob: 选择动作的对数概率
             value: 状态价值估计
             embeddings: 嵌入信息（如果return_embeddings=True）
         """
@@ -496,7 +465,7 @@ class EnhancedPPOAgent(PPOAgent):
             
             # 3. 检查边界节点
             if batched_state.boundary_nodes.numel() == 0:
-                return None, 0.0, value, None
+                return None, value, None
             
             # 4. 获取节点logits和策略向量
             node_logits, strategy_vectors = self.actor(batched_state)
@@ -550,22 +519,46 @@ class EnhancedPPOAgent(PPOAgent):
                 partition_idx = torch.argmax(similarities)
                 log_prob = 0.0
             
-            # 11. 转换为实际的分区ID
-            selected_partition = available_partitions[partition_idx.item()]
+            # 11. 获取节点嵌入（从batched_state中提取）
+            # 注意：boundary_nodes包含的是在原始图中的节点ID
+            selected_node_embedding = batched_state.node_embeddings[selected_node]
 
-            # 确保分区ID是整数而不是张量
-            if isinstance(selected_partition, torch.Tensor):
-                selected_partition = selected_partition.item()
-            elif not isinstance(selected_partition, int):
-                selected_partition = int(selected_partition)
-
-            # 确保节点ID也是整数
-            if isinstance(selected_node, torch.Tensor):
-                selected_node = selected_node.item()
-            elif not isinstance(selected_node, int):
-                selected_node = int(selected_node)
-
-            action = (selected_node, selected_partition)
+            # 调试：维度一致性检查
+            if selected_strategy_vector.size(0) != selected_node_embedding.size(0):
+                logger.error(
+                    f"维度不一致: strategy_dim={selected_strategy_vector.size(0)} vs node_emb_dim={selected_node_embedding.size(0)}"
+                )
+                # 可选：将较小者进行零填充以继续
+                if selected_strategy_vector.size(0) < selected_node_embedding.size(0):
+                    pad_size = selected_node_embedding.size(0) - selected_strategy_vector.size(0)
+                    selected_strategy_vector = torch.cat([
+                        selected_strategy_vector,
+                        torch.zeros(pad_size, device=self.device)
+                    ])
+                elif selected_strategy_vector.size(0) > selected_node_embedding.size(0):
+                    selected_node_embedding = torch.cat([
+                        selected_node_embedding,
+                        torch.zeros(selected_strategy_vector.size(0) - selected_node_embedding.size(0), device=self.device)
+                    ])
+            
+            # 12. 创建抽象决策上下文
+            # 生成边界节点嵌入和状态嵌入
+            boundary_nodes_embeddings = batched_state.node_embeddings[batched_state.boundary_nodes] if batched_state.boundary_nodes.numel() > 0 else torch.empty(0, batched_state.node_embeddings.size(1), device=self.device)
+            state_embedding = torch.mean(batched_state.node_embeddings, dim=0)  # 简单的全局状态表示
+            
+            try:
+                decision_context = create_decision_context(
+                    strategy_vector=selected_strategy_vector,
+                    candidate_embeddings=partition_embeddings,
+                    node_embedding=selected_node_embedding,
+                    boundary_nodes_embeddings=boundary_nodes_embeddings,
+                    state_embedding=state_embedding,
+                    temperature=1.0  # 可以从config中获取
+                )
+            except Exception as e:
+                logger.error(f"创建DecisionContext失败: {e}")
+                # 返回默认值，避免训练中断
+                return None, 0.0, 0.0, None
             
             # 准备返回的嵌入信息
             embeddings = None
@@ -574,10 +567,15 @@ class EnhancedPPOAgent(PPOAgent):
                     'strategy_vector': selected_strategy_vector.cpu().numpy(),
                     'partition_embeddings': partition_embeddings.cpu().numpy(),
                     'similarities': similarities.cpu().numpy(),
-                    'node_logits': node_logits.cpu().numpy()
+                    'node_logits': node_logits.cpu().numpy(),
+                    'decision_context': decision_context
                 }
             
-            return action, log_prob, value, embeddings
+            # train.py期望4个返回值: action, log_prob, value, embeddings
+            # 从decision_context中提取log_prob
+            log_prob = decision_context.probability_distribution[torch.argmax(decision_context.similarity_scores)].log()
+            
+            return decision_context, log_prob.item(), value, embeddings
     
     def _get_available_partitions(self, 
                                  state: Dict,
@@ -1187,20 +1185,27 @@ class EnhancedPPOAgent(PPOAgent):
             return strategy_vectors
 
 
-def create_enhanced_agent(state_dim: int,
-                         num_partitions: int,
-                         config: Dict[str, Any],
-                         device: str = 'auto') -> EnhancedPPOAgent:
+def create_enhanced_agent(
+    env: 'EnhancedUnifiedEnvironment',
+    agent_config: Dict[str, Any],
+    device: torch.device,
+    use_mixed_precision: bool = False
+) -> EnhancedPPOAgent:
     """
-    工厂函数：创建增强PPO智能体
+    工厂函数，用于创建 EnhancedPPOAgent 实例
 
     Args:
-        state_dim: 状态维度
-        num_partitions: 分区数
-        config: 配置字典
-        device: 设备
+        env: 完整的环境对象
+        agent_config: Agent的配置字典
+        device: 计算设备
+        use_mixed_precision: 是否启用混合精度
 
     Returns:
-        增强PPO智能体实例
+        一个 EnhancedPPOAgent 实例
     """
-    return EnhancedPPOAgent(state_dim, num_partitions, config, device)
+    return EnhancedPPOAgent(
+        env=env,
+        agent_config=agent_config,
+        device=device,
+        use_mixed_precision=use_mixed_precision
+    )

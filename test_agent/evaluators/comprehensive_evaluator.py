@@ -487,10 +487,15 @@ class ComprehensiveEvaluator:
             # 处理新的case数据
             hetero_data = self.processor.graph_from_mpc(case_data, self.config).to(self.device)
             
-            # 创建环境以测试baseline
+            # 创建环境以测试baseline（使用标准化嵌入）
+            node_features = hetero_data['bus'].x
+            embedding_dim = min(64, node_features.size(1))
+            node_embeddings = torch.zeros(node_features.size(0), 64, device=self.device)
+            node_embeddings[:, :embedding_dim] = node_features[:, :embedding_dim]
+            
             test_env = PowerGridPartitioningEnv(
                 hetero_data=hetero_data,
-                node_embeddings={'bus': torch.randn(hetero_data['bus'].x.shape[0], 64).to(self.device)},  # 临时嵌入字典
+                node_embeddings={'bus': node_embeddings},  # 基于实际特征的嵌入
                 num_partitions=num_partitions,
                 reward_weights=self.config['environment']['reward_weights'],
                 max_steps=self.config['environment']['max_steps'],

@@ -20,6 +20,7 @@ import logging
 from .environment import PowerGridPartitioningEnv
 from .state import StateManager
 from .action_space import ActionSpace
+from .decision_context import AbstractDecisionContext, materialize_decision_context
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +70,15 @@ class EnhancedPowerGridPartitioningEnv(PowerGridPartitioningEnv):
         
         # 添加边（从异构图的边索引）
         edge_index = self.hetero_data['bus', 'connects', 'bus'].edge_index
-        edges = edge_index.t().cpu().numpy()
+        
+        # 过滤无效边索引
+        valid_mask = (edge_index[0] < num_nodes) & (edge_index[1] < num_nodes) & (edge_index[0] >= 0) & (edge_index[1] >= 0)
+        invalid_count = (~valid_mask).sum().item()
+        if invalid_count > 0:
+            logger.warning(f"Filtered {invalid_count} invalid edges (out of range [0,{num_nodes-1}])")
+            edge_index = edge_index[:, valid_mask]
+        
+        edges = edge_index.t().cpu().numpy()  # 使用过滤后的edge_index
         self.nx_graph.add_edges_from(edges)
         
         logger.info(f"Built NetworkX graph with {num_nodes} nodes and {len(edges)} edges")
@@ -103,10 +112,16 @@ class EnhancedPowerGridPartitioningEnv(PowerGridPartitioningEnv):
         current_assignment = self.state_manager.current_partition[node_idx]
 
         # 获取节点的邻居分区（这是必要的计算）
+        # 修复索引偏移问题
+        max_node_id = max(self.nx_graph.nodes()) if self.nx_graph.nodes() else 0
+        if node_id_int > max_node_id:
+            logger.warning(f"Node {node_id_int} exceeds graph range [0,{max_node_id}], mapping to valid range")
+            node_id_int = node_id_int % (max_node_id + 1)
+        
         try:
             neighbors = list(self.nx_graph.neighbors(node_id_int))
         except Exception as e:
-            logger.warning(f"Failed to get neighbors for node {node_id_int}: {e}")
+            logger.warning(f"Failed to get neighbors for node {node_id_int}: {e}. Graph has {len(self.nx_graph.nodes())} nodes (0-{max(self.nx_graph.nodes()) if self.nx_graph.nodes() else 0})")
             # 回退：返回除当前分区外的所有分区
             num_partitions = int(self.state_manager.current_partition.max().item())
             return [p for p in range(1, num_partitions + 1) if p != current_assignment]
@@ -144,7 +159,7 @@ class EnhancedPowerGridPartitioningEnv(PowerGridPartitioningEnv):
                 if self.connectivity_cache[move_key]:
                     safe_partitions.append(target_partition)
             else:
-                # 临时移动节点
+                # 模拟节点移动进行连通性验证
                 test_partition = self.state_manager.current_partition.clone()
                 test_partition[node_id_int] = target_partition
 
@@ -395,14 +410,32 @@ class EnhancedPowerGridPartitioningEnv(PowerGridPartitioningEnv):
                 if pid > 0:  # 忽略未分配
                     self.get_partition_features(pid)
     
-    def step(self, action: Tuple[int, int]) -> Tuple[Dict[str, torch.Tensor], float, bool, bool, Dict[str, Any]]:
+    def step(self, action: Union[Tuple[int, int], AbstractDecisionContext]) -> Tuple[Dict[str, torch.Tensor], float, bool, bool, Dict[str, Any]]:
         """
-        执行环境步骤（增强版本）
+        执行环境步骤（增强版本，支持v3.0 AbstractDecisionContext）
         
-        在执行父类step之前/之后添加额外的信息
+        Args:
+            action: 具体动作tuple或AbstractDecisionContext
+        
+        Returns:
+            观察、奖励、终止标志、截断标志、信息字典
         """
+        # v3.0架构：将AbstractDecisionContext转换为具体动作
+        if isinstance(action, AbstractDecisionContext):
+            materialized_action = self.materialize_action(action)
+            if materialized_action is None:
+                # 无法实体化，返回无效动作
+                return self.state_manager.get_observation(), -1.0, True, False, {
+                    'termination_reason': 'materialize_failed',
+                    'error': 'Cannot materialize AbstractDecisionContext to concrete action'
+                }
+            concrete_action = materialized_action
+        else:
+            # 传统具体动作
+            concrete_action = action
+        
         # 执行父类step
-        obs, reward, terminated, truncated, info = super().step(action)
+        obs, reward, terminated, truncated, info = super().step(concrete_action)
         
         # 如果动作成功执行，更新分区信息
         if not terminated or info.get('termination_reason') != 'invalid_action':
@@ -412,6 +445,93 @@ class EnhancedPowerGridPartitioningEnv(PowerGridPartitioningEnv):
         obs = self._enhance_observation(obs)
         
         return obs, reward, terminated, truncated, info
+    
+    def materialize_action(self, context: AbstractDecisionContext, 
+                          similarity_threshold: float = 0.8) -> Optional[Tuple[int, int]]:
+        """
+        将抽象决策上下文实体化为具体的执行动作
+        
+        这是v3.0架构的关键方法，实现跨拓扑泛化：
+        通过嵌入相似度匹配，将抽象表示转换为当前环境的具体动作。
+        
+        Args:
+            context: 抽象决策上下文
+            similarity_threshold: 相似度阈值，低于此值认为无法匹配
+        
+        Returns:
+            (node_id, partition_id) tuple，或None如果无法匹配
+        """
+        try:
+            # 获取当前环境的节点和分区嵌入
+            current_state = self.state_manager.get_observation()
+            
+            # 获取节点嵌入
+            # 注意：这里需要从GNN编码器获取节点嵌入
+            if 'node_embeddings' in current_state:
+                current_node_embeddings = current_state['node_embeddings']
+            else:
+                # 如果观察中没有预计算的嵌入，需要通过GNN生成
+                # 这可能需要调用状态管理器或GNN编码器
+                logger.warning("当前观察中缺少node_embeddings，使用简化的特征映射")
+                # 简化实现：使用节点特征作为嵌入代理
+                current_node_embeddings = current_state.get('x', torch.randn(self.graph.number_of_nodes(), 
+                                                                           context.node_embedding.size(0)))
+            
+            # 获取分区嵌入（需要为所有当前分区计算嵌入）
+            current_partitions = torch.unique(current_state['current_partition'])
+            partition_embeddings_list = []
+            
+            for pid in current_partitions:
+                # 获取分区特征并编码为嵌入
+                partition_features = self.get_partition_features(pid.item())
+                
+                # 转换为标准化特征向量（与PartitionEncoder期望的格式一致）
+                expected_features = [
+                    'size_ratio', 'load_ratio', 'generation_ratio',
+                    'internal_connectivity', 'boundary_ratio', 'power_imbalance'
+                ]
+                
+                feature_values = []
+                for key in expected_features:
+                    val = partition_features.get(key, 0.0)
+                    if isinstance(val, (int, float)):
+                        feature_values.append(float(val))
+                    elif isinstance(val, torch.Tensor):
+                        feature_values.append(val.item() if val.numel() == 1 else val.mean().item())
+                    else:
+                        feature_values.append(0.0)
+                
+                feature_tensor = torch.tensor(feature_values, dtype=torch.float32, device=self.device)
+                partition_embeddings_list.append(feature_tensor)
+            
+            if partition_embeddings_list:
+                current_partition_embeddings = torch.stack(partition_embeddings_list)
+            else:
+                logger.error("无法获取当前分区嵌入")
+                return None
+            
+            # 使用decision_context模块的materialize函数
+            # 创建候选映射：从当前分区ID列表
+            candidate_mappings = [(0, pid.item()) for pid in current_partitions]  # 简化映射
+            
+            result = materialize_decision_context(
+                context=context,
+                candidate_mappings=candidate_mappings,
+                similarity_threshold=similarity_threshold
+            )
+            
+            if result is not None:
+                node_id, partition_idx = result
+                # 将分区索引转换为实际的分区ID
+                actual_partition_id = current_partitions[partition_idx].item()
+                return (node_id, actual_partition_id)
+            else:
+                logger.warning(f"无法将DecisionContext实体化：相似度低于阈值{similarity_threshold}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"materialize_action失败: {e}")
+            return None
     
     def _enhance_observation(self, obs: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         """
@@ -449,7 +569,184 @@ class EnhancedPowerGridPartitioningEnv(PowerGridPartitioningEnv):
         # 添加网格全局信息
         obs['grid_info'] = self._get_grid_info()
         
+        # v3.0架构：添加嵌入信息以支持相似度匹配
+        obs = self._add_embedding_info(obs)
+        
         return obs
+    
+    def _add_embedding_info(self, obs: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        """
+        为观察添加嵌入信息，支持v3.0架构的相似度匹配
+        
+        Args:
+            obs: 原始观察字典
+            
+        Returns:
+            增强的观察字典，包含节点和分区嵌入
+        """
+        try:
+            # 添加节点嵌入信息
+            # 注意：这里假设我们有一个GNN编码器可以生成节点嵌入
+            # 实际实现中，这可能需要调用state_manager的GNN编码功能
+            
+            if hasattr(self.state_manager, 'get_node_embeddings'):
+                # 如果state_manager支持直接获取节点嵌入
+                node_embeddings = self.state_manager.get_node_embeddings()
+                obs['node_embeddings'] = node_embeddings
+            else:
+                # 生成标准化的节点嵌入（基于节点特征）
+                node_features = obs.get('x', self.state_manager.hetero_data['bus'].x)
+                if node_features.size(1) >= 64:
+                    obs['node_embeddings'] = node_features[:, :64]  # 截取前64维
+                else:
+                    # 扩展到64维（工程级实现）
+                    pad_size = 64 - node_features.size(1)
+                    padding = torch.zeros(node_features.size(0), pad_size, device=node_features.device)
+                    obs['node_embeddings'] = torch.cat([node_features, padding], dim=1)
+            
+            # 添加当前分区的嵌入信息
+            current_partitions = torch.unique(obs['current_partition'])
+            partition_embeddings = self._compute_partition_embeddings(current_partitions)
+            obs['partition_embeddings'] = partition_embeddings
+            obs['partition_ids'] = current_partitions
+            
+            # 添加边界节点的嵌入索引，便于快速查找
+            boundary_nodes = self.state_manager.get_boundary_nodes()
+            obs['boundary_node_indices'] = boundary_nodes
+            
+        except Exception as e:
+            logger.warning(f"添加嵌入信息失败：{e}，使用简化版本")
+            # 即使失败也要提供基本的嵌入信息
+            num_nodes = self.graph.number_of_nodes()
+            obs['node_embeddings'] = torch.randn(num_nodes, 64, device=self.device)
+            obs['partition_embeddings'] = torch.randn(1, 6, device=self.device)  # 至少有一个分区
+            obs['partition_ids'] = torch.tensor([1], device=self.device)
+            obs['boundary_node_indices'] = torch.tensor([], dtype=torch.long, device=self.device)
+        
+        return obs
+    
+    def _compute_partition_embeddings(self, partition_ids: torch.Tensor) -> torch.Tensor:
+        """
+        计算分区嵌入表示
+        
+        Args:
+            partition_ids: 分区ID张量
+            
+        Returns:
+            分区嵌入张量 [num_partitions, embedding_dim]
+        """
+        embeddings = []
+        
+        for pid in partition_ids:
+            if pid.item() == 0:  # 跳过未分配的节点
+                continue
+                
+            # 获取分区特征
+            partition_features = self.get_partition_features(pid.item())
+            
+            # 转换为标准化特征向量
+            expected_features = [
+                'size_ratio', 'load_ratio', 'generation_ratio',
+                'internal_connectivity', 'boundary_ratio', 'power_imbalance'
+            ]
+            
+            feature_values = []
+            for key in expected_features:
+                val = partition_features.get(key, 0.0)
+                if isinstance(val, (int, float)):
+                    feature_values.append(float(val))
+                elif isinstance(val, torch.Tensor):
+                    feature_values.append(val.item() if val.numel() == 1 else val.mean().item())
+                else:
+                    feature_values.append(0.0)
+            
+            # 确保特征长度正确
+            if len(feature_values) != 6:
+                feature_values = feature_values[:6] + [0.0] * (6 - len(feature_values))
+            
+            feature_tensor = torch.tensor(feature_values, dtype=torch.float32, device=self.device)
+            embeddings.append(feature_tensor)
+        
+        if embeddings:
+            return torch.stack(embeddings)
+        else:
+            # 如果没有有效分区，返回空张量
+            return torch.empty((0, 6), dtype=torch.float32, device=self.device)
+    
+    def get_current_embeddings(self) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        获取当前环境的完整嵌入信息
+        
+        便捷方法，用于AbstractDecisionContext的实体化过程
+        
+        Returns:
+            (node_embeddings, partition_embeddings, partition_ids)
+        """
+        current_obs = self.state_manager.get_observation()
+        enhanced_obs = self._add_embedding_info(current_obs)
+        
+        return (
+            enhanced_obs['node_embeddings'],
+            enhanced_obs['partition_embeddings'], 
+            enhanced_obs['partition_ids']
+        )
+    
+    def find_similar_node(self, target_embedding: torch.Tensor, 
+                         threshold: float = 0.8) -> Optional[int]:
+        """
+        通过嵌入相似度查找最相似的节点
+        
+        Args:
+            target_embedding: 目标节点嵌入
+            threshold: 相似度阈值
+            
+        Returns:
+            最相似的节点ID，或None如果没有满足阈值的节点
+        """
+        node_embeddings, _, _ = self.get_current_embeddings()
+        
+        similarities = torch.cosine_similarity(
+            target_embedding.unsqueeze(0),
+            node_embeddings,
+            dim=1
+        )
+        
+        best_similarity, best_idx = torch.max(similarities, dim=0)
+        
+        if best_similarity.item() >= threshold:
+            return best_idx.item()
+        else:
+            return None
+    
+    def find_similar_partition(self, target_embedding: torch.Tensor,
+                              threshold: float = 0.8) -> Optional[int]:
+        """
+        通过嵌入相似度查找最相似的分区
+        
+        Args:
+            target_embedding: 目标分区嵌入
+            threshold: 相似度阈值
+            
+        Returns:
+            最相似的分区ID，或None如果没有满足阈值的分区
+        """
+        _, partition_embeddings, partition_ids = self.get_current_embeddings()
+        
+        if partition_embeddings.size(0) == 0:
+            return None
+        
+        similarities = torch.cosine_similarity(
+            target_embedding.unsqueeze(0),
+            partition_embeddings,
+            dim=1
+        )
+        
+        best_similarity, best_idx = torch.max(similarities, dim=0)
+        
+        if best_similarity.item() >= threshold:
+            return partition_ids[best_idx].item()
+        else:
+            return None
     
     def reset(self, *args, **kwargs) -> Tuple[Dict[str, torch.Tensor], Dict[str, Any]]:
         """
@@ -512,61 +809,46 @@ def create_enhanced_environment(hetero_data: HeteroData,
                                use_enhanced: bool = True,
                                gat_encoder: Optional[Any] = None) -> Union[EnhancedPowerGridPartitioningEnv, PowerGridPartitioningEnv]:
     """
-    工厂函数：创建环境
-    
+    环境创建的工厂函数
+
     Args:
         hetero_data: 异构图数据
-        node_embeddings: 节点嵌入
+        node_embeddings: 预计算的节点嵌入
         num_partitions: 分区数
-        config: 配置
-        use_enhanced: 是否使用增强版本
-        gat_encoder: GAT编码器实例（用于验证和后续使用）
-    
+        config: 配置字典
+        use_enhanced: 是否创建增强环境
+        gat_encoder: [v3.0] 预训练的GAT编码器实例
+
     Returns:
         环境实例
     """
+    env_config = config.get('environment', {})
+    device = torch.device(config.get('system', {}).get('device', 'cpu'))
+
+    state_manager = StateManager(
+        hetero_data=hetero_data,
+        node_embeddings=node_embeddings,
+        num_partitions=num_partitions,
+        config=config,
+        gat_encoder=gat_encoder,  # 传递给状态管理器
+        device=device
+    )
+
+    action_space = ActionSpace(
+        state_manager=state_manager,
+        config=config
+    )
+
+    env_class = EnhancedPowerGridPartitioningEnv if use_enhanced else PowerGridPartitioningEnv
     
-    # 🔧 编码器验证逻辑
+    env = env_class(
+        state_manager=state_manager,
+        action_space=action_space,
+        config=env_config
+    )
+
+    # 核心修复：将GAT编码器实例附加到env对象上，以便Agent可以访问
     if gat_encoder is not None:
-        # 验证编码器状态
-        device = config.get('device', torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
-        gat_encoder = gat_encoder.to(device)
-        gat_encoder.eval()  # 确保处于评估模式
-        
-        # 验证节点嵌入与编码器输出维度一致性
-        expected_dim = getattr(gat_encoder, 'output_dim', None)
-        if expected_dim is not None:
-            for node_type, embeddings in node_embeddings.items():
-                if embeddings.shape[1] != expected_dim:
-                    print(f"⚠️ 警告：{node_type}节点嵌入维度({embeddings.shape[1]})与编码器输出维度({expected_dim})不匹配")
-    
-    common_args = {
-        'reward_weights': config.get('reward_weights'),
-        'max_steps': config.get('max_steps', 200),
-        'device': config.get('device'),
-        'config': config
-    }
-    
-    if use_enhanced:
-        env = EnhancedPowerGridPartitioningEnv(
-            hetero_data=hetero_data,
-            node_embeddings=node_embeddings,
-            num_partitions=num_partitions,
-            enable_features_cache=config.get('enable_features_cache', True),
-            **common_args
-        )
-        # 将编码器实例附加到环境（如果需要后续使用）
-        if gat_encoder is not None:
-            env.gat_encoder = gat_encoder
-        return env
-    else:
-        env = PowerGridPartitioningEnv(
-            hetero_data=hetero_data,
-            node_embeddings=node_embeddings,
-            num_partitions=num_partitions,
-            **common_args
-        )
-        # 将编码器实例附加到环境（如果需要后续使用）
-        if gat_encoder is not None:
-            env.gat_encoder = gat_encoder
-        return env
+        env.gat_encoder = gat_encoder
+
+    return env

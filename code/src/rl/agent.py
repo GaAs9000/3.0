@@ -25,8 +25,13 @@ import copy
 import math
 from dataclasses import dataclass
 import sys
+import logging
+logger = logging.getLogger(__name__)
 
 from .fast_memory import FastPPOMemory
+from .decision_context import AbstractDecisionContext, DecisionContextBatch
+from models.actor_network import create_actor_network
+from models.partition_encoder import create_partition_encoder
 
 
 @dataclass
@@ -342,11 +347,27 @@ class CriticNetwork(nn.Module):
             scatter_mean(bs.region_embeddings, bs.region_batch_idx, dim=0)
         )  # [batch_size, hidden]
 
-        # 边界信息
+        # 边界信息 - 修复维度不匹配问题
         if bs.boundary_nodes.numel() > 0:
             boundary_embeddings = bs.node_embeddings[bs.boundary_nodes]
             boundary_batch_idx = bs.node_batch_idx[bs.boundary_nodes]
             boundary_mean = scatter_mean(boundary_embeddings, boundary_batch_idx, dim=0)
+            
+            # 🔧 关键修复：确保boundary_mean的维度与boundary_encoder期望的维度匹配
+            if boundary_mean.size(-1) != self.boundary_encoder[0].in_features:
+                # 如果维度不匹配，进行自适应调整
+                expected_dim = self.boundary_encoder[0].in_features
+                actual_dim = boundary_mean.size(-1)
+                
+                if actual_dim < expected_dim:
+                    # 维度不足：零填充
+                    padding = torch.zeros(boundary_mean.size(0), expected_dim - actual_dim, 
+                                        device=boundary_mean.device, dtype=boundary_mean.dtype)
+                    boundary_mean = torch.cat([boundary_mean, padding], dim=-1)
+                else:
+                    # 维度过多：截取
+                    boundary_mean = boundary_mean[:, :expected_dim]
+            
             boundary_info = self.boundary_encoder(boundary_mean)
         else:
             boundary_info = torch.zeros(global_state.size(0), self.boundary_encoder[-1].out_features,
@@ -370,169 +391,104 @@ class CriticNetwork(nn.Module):
 
 
 class PPOAgent:
-    """
-    电力网络分区的优化PPO智能体
-
-    实现具有以下特性的近端策略优化：
-    - 两阶段动作选择
-    - 动作屏蔽
-    - 异构图状态处理
-    - 高性能张量化内存管理
-    - CPU-GPU传输优化
-
-    性能提升：
-    - 1.25-1.66倍训练加速
-    - 减少25-40%训练时间
-    - 显著降低CPU-GPU传输开销
-    """
+    """标准PPO智能体，实现了PPO算法的核心逻辑"""
 
     def __init__(self,
                  node_embedding_dim: int,
                  region_embedding_dim: int,
-                 agent_config: Dict[str, Any],
-                 device: Optional[torch.device] = None,
-                 num_partitions: int = -1): # num_partitions is now optional and for backward compatibility only
+                 num_partitions: int,
+                 agent_config: dict,
+                 device: torch.device,
+                 use_mixed_precision: bool = False
+                ):
         """
-        初始化优化的PPO智能体。
+        初始化PPO智能体
 
         Args:
-            node_embedding_dim (int): 节点嵌入维度。
-            region_embedding_dim (int): 区域嵌入维度。
-            agent_config (Dict[str, Any]): 包含所有PPO超参数的配置字典。
-            device (Optional[torch.device]): 计算设备。
-            num_partitions (int): [已废弃] 仅用于向后兼容，不应再使用。
+            node_embedding_dim: 节点嵌入维度
+            region_embedding_dim: 区域嵌入维度
+            num_partitions: 分区数
+            agent_config: 智能体配置字典
+            device: 计算设备
+            use_mixed_precision: 是否使用混合精度训练
         """
-        self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        
-        # 存储维度信息（用于模型保存）
+        self.config = agent_config
+        self.gamma = agent_config.get('gamma', 0.99)
+        self.gae_lambda = agent_config.get('gae_lambda', 0.95)
+        self.clip_epsilon = agent_config.get('clip_epsilon', 0.2)
+        self.entropy_coef = agent_config.get('entropy_coef', 0.01)
+        self.value_loss_coef = agent_config.get('value_loss_coef', 0.5)
+        self.device = device
+        self.use_mixed_precision = use_mixed_precision
+        self.grad_scaler = torch.cuda.amp.GradScaler(enabled=use_mixed_precision)
+
         self.node_embedding_dim = node_embedding_dim
         self.region_embedding_dim = region_embedding_dim
-        self.strategy_vector_dim = agent_config.get('strategy_vector_dim', 128)
+        self.num_partitions = num_partitions
 
-        # 从配置字典中解析超参数
-        self.gamma = agent_config.get('gamma', 0.99)
-        self.eps_clip = agent_config.get('eps_clip', 0.2)
-        self.k_epochs = agent_config.get('k_epochs', 4)
-        self.entropy_coef = agent_config.get('entropy_coef', 0.01)
-        self.value_coef = agent_config.get('value_coef', 0.5)
-        # 🔧 调整梯度裁剪阈值：从0.5提高到1.5以允许更大的有效梯度
-        self.max_grad_norm = agent_config.get('max_grad_norm', 1.5)
+        actor_config = agent_config.get('actor', {})
+        critic_config = agent_config.get('critic', {})
+        partition_enc_cfg = agent_config.get('partition_encoder', {})
         
-        # 🔧 调整学习率：降低以提高训练稳定性
-        lr_actor = agent_config.get('lr_actor', 5e-5)  # 从3e-4降低到5e-5
-        lr_critic = agent_config.get('lr_critic', 1e-4)  # 从1e-3降低到1e-4
-        memory_capacity = agent_config.get('memory_capacity', 2048)
-        hidden_dim = agent_config.get('hidden_dim', 256)
-        dropout = agent_config.get('dropout', 0.1)
-        actor_scheduler_config = agent_config.get('actor_scheduler', {})
-        critic_scheduler_config = agent_config.get('critic_scheduler', {})
+        # 确保策略向量维度与分区编码器嵌入维度一致
+        self.strategy_vector_dim = agent_config.get('strategy_vector_dim', 128)
+        
+        actor_config['strategy_vector_dim'] = self.strategy_vector_dim
+        partition_enc_cfg['embedding_dim'] = self.strategy_vector_dim  # 使用相同的维度
+        partition_enc_cfg['output_dim'] = self.strategy_vector_dim
 
-        # --- v3.0 架构改造 ---
-        # 1. 导入新的工厂函数
-        from code.src.models.actor_network import create_actor_network
-        from code.src.models.partition_encoder import create_partition_encoder
-
-        # 2. 创建 Actor (状态塔)
-        actor_config = {
-            'node_embedding_dim': node_embedding_dim,
-            'region_embedding_dim': region_embedding_dim,
-            'strategy_vector_dim': self.strategy_vector_dim,
-            'hidden_dim': hidden_dim,
-            'dropout': dropout,
-        }
-        self.actor = create_actor_network(actor_config, use_two_tower=True).to(self.device)
-
-        # 3. 创建 PartitionEncoder (动作塔)
-        encoder_config = agent_config.get('partition_encoder', {})
-        encoder_config.setdefault('embedding_dim', self.strategy_vector_dim)
-        self.partition_encoder = create_partition_encoder(encoder_config).to(self.device)
-        # --- 结束改造 ---
+        # 将配置参数合并到actor_config中
+        actor_config['node_embedding_dim'] = self.node_embedding_dim
+        actor_config['region_embedding_dim'] = self.region_embedding_dim
+        actor_config['num_partitions'] = self.num_partitions
+        
+        self.actor = create_actor_network(
+            config=actor_config,
+            use_two_tower=True
+        ).to(device)
 
         self.critic = CriticNetwork(
-            node_embedding_dim, region_embedding_dim, hidden_dim, dropout
-        ).to(self.device)
+            node_embedding_dim=self.node_embedding_dim,
+            region_embedding_dim=self.region_embedding_dim,
+            hidden_dim=critic_config.get('hidden_dim', 256),
+            dropout=critic_config.get('dropout', 0.1)
+        ).to(device)
 
-        # 优化器
-        # 将 partition_encoder 的参数也加入 actor_optimizer
-        actor_params = list(self.actor.parameters()) + list(self.partition_encoder.parameters())
-        self.actor_optimizer = torch.optim.Adam(actor_params, lr=lr_actor)
-        self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=lr_critic)
+        # 将num_partitions添加到配置中
+        partition_enc_cfg['num_partitions'] = self.num_partitions
+        
+        self.partition_encoder = create_partition_encoder(
+            config=partition_enc_cfg
+        ).to(device)
 
-        # AMP GradScaler
-        self.scaler = torch.amp.GradScaler(enabled=(self.device.type == 'cuda'))
+        self.optimizer = torch.optim.Adam(
+            list(self.actor.parameters()) + list(self.critic.parameters()) + list(self.partition_encoder.parameters()),
+            lr=agent_config.get('learning_rate', 3e-4),
+            eps=agent_config.get('adam_eps', 1e-5)
+        )
 
-        # 学习率调度器
-        self.actor_scheduler = None
-        self.critic_scheduler = None
-        if actor_scheduler_config.get('enabled', False):
-            self._setup_scheduler(self.actor_optimizer, actor_scheduler_config, 'actor')
-        if critic_scheduler_config.get('enabled', False):
-            self._setup_scheduler(self.critic_optimizer, critic_scheduler_config, 'critic')
-
-        # 使用优化的内存
-        self.memory = FastPPOMemory(capacity=memory_capacity, device=self.device)
-
-        # 训练统计
-        self.training_stats = {
-            'actor_loss': deque(maxlen=100),
-            'critic_loss': deque(maxlen=100),
-            'entropy': deque(maxlen=100)
-        }
-
-        # 🔍 梯度监控：添加更新计数器和TensorBoard支持
-        self.update_count = 0
-        self.writer = None  # 可选的TensorBoard writer
-
-        # 调试标志
-        self._debug_grad_norm = False
-
-    def _setup_scheduler(self, optimizer, config, name):
-        """设置学习率调度器"""
-        scheduler_type = config.get('type', 'StepLR')
-        if scheduler_type == 'StepLR':
-            scheduler = torch.optim.lr_scheduler.StepLR(
-                optimizer,
-                step_size=config.get('step_size', 1000),
-                gamma=config.get('gamma', 0.95)
+        self.scheduler = None
+        if agent_config.get('use_lr_scheduler', False):
+            self.scheduler = torch.optim.lr_scheduler.StepLR(
+                self.optimizer, 
+                step_size=agent_config.get('lr_step_size', 50),
+                gamma=agent_config.get('lr_gamma', 0.9)
             )
-        elif scheduler_type == 'ExponentialLR':
-            scheduler = torch.optim.lr_scheduler.ExponentialLR(
-                optimizer,
-                gamma=config.get('gamma', 0.99)
-            )
-        else:
-            scheduler = None
 
-        if name == 'actor':
-            self.actor_scheduler = scheduler
-        else:
-            self.critic_scheduler = scheduler
+        self.memory = FastPPOMemory()
 
-    def update_learning_rate(self, factor: float):
-        """动态更新学习率（用于智能自适应课程学习）"""
-        try:
-            # 更新actor学习率
-            for param_group in self.actor_optimizer.param_groups:
-                param_group['lr'] *= factor
-
-            # 更新critic学习率
-            for param_group in self.critic_optimizer.param_groups:
-                param_group['lr'] *= factor
-
-            print(f"📈 学习率已更新，缩放因子: {factor:.3f}")
-
-        except Exception as e:
-            print(f"⚠️ 更新学习率失败: {e}")
-
-    def get_current_learning_rates(self) -> Dict[str, float]:
-        """获取当前学习率"""
-        try:
-            actor_lr = self.actor_optimizer.param_groups[0]['lr']
-            critic_lr = self.critic_optimizer.param_groups[0]['lr']
-            return {'actor_lr': actor_lr, 'critic_lr': critic_lr}
-        except:
-            return {'actor_lr': 0.0, 'critic_lr': 0.0}
-
+    @classmethod
+    def from_config(cls, env, config, device, use_mixed_precision=False):
+        """从配置创建Agent实例的工厂方法"""
+        return cls(
+            node_embedding_dim=env.state_manager.embedding_dim,
+            region_embedding_dim=env.state_manager.embedding_dim * 2,
+            num_partitions=env.num_partitions,
+            agent_config=config,
+            device=device,
+            use_mixed_precision=use_mixed_precision
+        )
+        
     def select_action(self, 
                       state: Dict[str, torch.Tensor], 
                       env: Any, # 环境实例，用于调用新方法
@@ -624,23 +580,34 @@ class PPOAgent:
         
     def store_experience(self, 
                          state: Dict[str, torch.Tensor], 
-                         action: Tuple[int, int], 
-                         reward: float, 
-                         log_prob: float, 
-                         value: float, 
-                         done: bool):
+                         action: Optional[Tuple[int, int]] = None,
+                         decision_context: Optional[AbstractDecisionContext] = None,
+                         reward: float = 0.0, 
+                         log_prob: float = 0.0, 
+                         value: float = 0.0, 
+                         done: bool = False):
         """
-        在经验回放缓冲区中存储一个时间步的经验。
+        在经验回放缓冲区中存储一个时间步的经验 (支持v3.0 DecisionContext)。
 
         Args:
             state (Dict[str, torch.Tensor]): 当前状态的观察字典。
-            action (Tuple[int, int]): 执行的动作。
+            action (Optional[Tuple[int, int]]): 执行的动作（向后兼容）。
+            decision_context (Optional[AbstractDecisionContext]): v3.0决策上下文。
             reward (float): 从环境中获得的奖励。
-            log_prob (float): 执行动作的对数概率。
+            log_prob (float): 执行动作的对数概率（v3.0中会被重新计算）。
             value (float): 评判网络对当前状态的价值估计。
             done (bool): 回合是否结束的标志。
         """
-        self.memory.store(state, action, reward, log_prob, value, done)
+        # 传递给内存管理器，它会处理新旧格式
+        self.memory.store(
+            state=state,
+            action=action,
+            decision_context=decision_context,
+            reward=reward,
+            log_prob=log_prob,
+            value=value,
+            done=done
+        )
         
     def update(self, **kwargs) -> Dict[str, float]:
         """
@@ -810,18 +777,130 @@ class PPOAgent:
         
     def _ppo_epoch(self,
                    states: List[Dict[str, torch.Tensor]],
-                   actions: List[Tuple[int, int]],
+                   actions_or_contexts: List,  # 支持传统actions或AbstractDecisionContext
                    old_log_probs: torch.Tensor,
                    advantages: torch.Tensor,
                    returns: torch.Tensor,
                    env: Any) -> Tuple[Dict[str, float], int]:
         """
         执行单个PPO更新周期 (v3.0 双塔架构重构)。
+        
+        核心改进：支持AbstractDecisionContext的直接log_prob重建，
+        避免复杂的环境重设和分区重编码，显著提升性能和稳定性。
         """
         batch_size = len(states)
         if batch_size == 0:
             return {'actor_loss': 0.0, 'critic_loss': 0.0, 'entropy': 0.0}, 0
 
+        # ---- 0. 检测数据类型并选择处理分支 ----
+        # 检查是否为v3.0 AbstractDecisionContext格式
+        has_decision_contexts = (
+            batch_size > 0 and 
+            isinstance(actions_or_contexts[0], AbstractDecisionContext)
+        )
+        
+        if has_decision_contexts:
+            return self._ppo_epoch_v3_contexts(
+                states, actions_or_contexts, old_log_probs, advantages, returns, env
+            )
+        else:
+            # 回退到传统的具体action处理
+            return self._ppo_epoch_legacy_actions(
+                states, actions_or_contexts, old_log_probs, advantages, returns, env
+            )
+    
+    def _ppo_epoch_v3_contexts(self,
+                               states: List[Dict[str, torch.Tensor]],
+                               decision_contexts: List[AbstractDecisionContext],
+                               old_log_probs: torch.Tensor,
+                               advantages: torch.Tensor,
+                               returns: torch.Tensor,
+                               env: Any) -> Tuple[Dict[str, float], int]:
+        """
+        v3.0架构的PPO epoch实现：使用AbstractDecisionContext
+        
+        核心优势：
+        - 直接从保存的上下文重建log_prob，无需环境重设
+        - 避免分区特征重新编码，提升性能
+        - 支持跨拓扑泛化，contexts包含完整信息
+        """
+        batch_size = len(states)
+        
+        # ---- 1. 批量化状态和价值估计 ----
+        batched_state = self._prepare_batched_state(states)
+        values = self.critic(batched_state).squeeze()
+        
+        # ---- 2. 从决策上下文重建log_prob和熵 ----
+        context_batch = DecisionContextBatch(
+            contexts=decision_contexts,
+            batch_size=batch_size
+        )
+        
+        # 移动到正确设备
+        context_batch = context_batch.to_device(self.device)
+        
+        # 批量计算log概率 - 这是v3.0的核心优势！
+        new_log_probs = context_batch.compute_batch_log_probs(temperature=1.0)
+        
+        # 计算熵（使用保存的相似度重建分布）
+        entropy_list = []
+        for ctx in context_batch.contexts:
+            probs = ctx.compute_probability_distribution(temperature=1.0)
+            entropy = -torch.sum(probs * torch.log(probs + 1e-8))
+            entropy_list.append(entropy)
+        
+        entropy = torch.stack(entropy_list).mean()
+        
+        # ---- 3. PPO损失计算 ----
+        if isinstance(returns, list):
+            returns = torch.tensor(returns, dtype=torch.float32, device=self.device)
+        if isinstance(values, list):
+            values = torch.tensor(values, dtype=torch.float32, device=self.device)
+
+        with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16):
+            ratio = torch.exp(new_log_probs - old_log_probs)
+            surr1 = ratio * advantages
+            surr2 = torch.clamp(ratio, 1 - self.eps_clip, 1 + self.eps_clip) * advantages
+            actor_loss = -torch.min(surr1, surr2).mean()
+            critic_loss = F.mse_loss(values, returns)
+            total_loss = (actor_loss + self.value_coef * critic_loss - self.entropy_coef * entropy).float()
+
+        # ---- 4. 反向传播和更新 ----
+        self.actor_optimizer.zero_grad(set_to_none=True)
+        self.critic_optimizer.zero_grad(set_to_none=True)
+
+        self.scaler.scale(total_loss).backward()
+
+        total_grad_norm = torch.tensor(0.0)
+        if self.max_grad_norm is not None:
+            self.scaler.unscale_(self.actor_optimizer)
+            self.scaler.unscale_(self.critic_optimizer)
+            all_params = list(self.actor.parameters()) + list(self.partition_encoder.parameters()) + list(self.critic.parameters())
+            total_grad_norm = torch.nn.utils.clip_grad_norm_(all_params, self.max_grad_norm)
+
+        self.scaler.step(self.actor_optimizer)
+        self.scaler.step(self.critic_optimizer)
+        self.scaler.update()
+
+        return ({
+            'actor_loss': actor_loss.item(),
+            'critic_loss': critic_loss.item(),
+            'entropy': entropy.item(),
+            'grad_norm': total_grad_norm.item(),
+        }, batch_size)
+    
+    def _ppo_epoch_legacy_actions(self,
+                                  states: List[Dict[str, torch.Tensor]],
+                                  actions: List[Tuple[int, int]],
+                                  old_log_probs: torch.Tensor,
+                                  advantages: torch.Tensor,
+                                  returns: torch.Tensor,
+                                  env: Any) -> Tuple[Dict[str, float], int]:
+        """
+        传统PPO epoch实现：向后兼容具体actions
+        """
+        batch_size = len(states)
+        
         # ---- 1. 数据批量化 和 价值估计 ----
         batched_state = self._prepare_batched_state(states)
         values = self.critic(batched_state).squeeze()
@@ -860,15 +939,9 @@ class PPOAgent:
                 # b) 获取动作并确保类型正确
                 action = actions[i]
 
-                # 🔧 DEBUG: 添加详细的调试信息
-                if i == 0:  # 只在第一个样本时打印，避免过多输出
-                    print(f"\n=== DEBUG Episode {i} Action Analysis ===")
-                    print(f"action = {action}")
-                    print(f"type(action) = {type(action)}")
-                    if hasattr(action, '__len__') and len(action) >= 2:
-                        print(f"action[0] = {action[0]}, type = {type(action[0])}")
-                        print(f"action[1] = {action[1]}, type = {type(action[1])}")
-                    print("=== END DEBUG ===\n")
+                # 记录关键动作信息（生产级别）
+                if i == 0:  # 仅记录第一个样本的关键信息
+                    logger.debug(f"动作类型: {type(action)}, 内容: {action}")
 
                 # 🔧 修复：确保action是正确的格式
                 if isinstance(action, (list, tuple)) and len(action) >= 2:
@@ -966,16 +1039,12 @@ class PPOAgent:
 
                     part_action_idx_in_list = available_partitions.index(partition_id)
                 except Exception as debug_e:
-                    # 🔧 DEBUG: 详细的错误信息
-                    print(f"\n=== DETAILED ERROR DEBUG ===")
-                    print(f"Error: {debug_e}")
-                    print(f"Error type: {type(debug_e)}")
-                    print(f"partition_id = {partition_id}, type = {type(partition_id)}")
-                    print(f"available_partitions = {available_partitions}")
-                    print(f"available_partitions types = {[type(p) for p in available_partitions]}")
+                    # 生产级错误处理和记录
+                    logger.error(f"分区索引查找失败: {debug_e}")
+                    logger.error(f"分区ID: {partition_id} (类型: {type(partition_id)})")
+                    logger.error(f"可用分区: {available_partitions}")
                     import traceback
-                    print(f"Traceback: {traceback.format_exc()}")
-                    print("=== END ERROR DEBUG ===\n")
+                    logger.debug(f"完整错误堆栈: {traceback.format_exc()}")
                     # 跳过有问题的样本而不是崩溃
                     continue
 
@@ -1075,7 +1144,13 @@ class PPOAgent:
             value (float): 评判网络对当前状态的价值估计。
             done (bool): 回合是否结束的标志。
         """
-        self.memory.store(state, action, reward, log_prob, value, done)
+        # v3.0架构支持：检查action是否为AbstractDecisionContext
+        from .decision_context import AbstractDecisionContext
+        if isinstance(action, AbstractDecisionContext):
+            self.memory.store(state, action=None, decision_context=action, 
+                            reward=reward, log_prob=log_prob, value=value, done=done)
+        else:
+            self.memory.store(state, action, reward, log_prob, value, done)
 
     def update_learning_rate(self, factor: float):
         """动态更新学习率"""

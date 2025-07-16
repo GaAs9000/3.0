@@ -9,6 +9,7 @@ from .action_space import ActionSpace, ActionMask
 from .reward import RewardFunction
 from .utils import MetisInitializer, PartitionEvaluator
 from .scenario_generator import ScenarioGenerator
+from .decision_context import AbstractDecisionContext, DecisionContextBatch, create_decision_context
 
 # 智能自适应课程学习
 try:

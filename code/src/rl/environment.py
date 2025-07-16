@@ -11,7 +11,7 @@ try:
     from rl.action_space import ActionSpace, ActionMask
     from rl.reward import RewardFunction
     from rl.utils import MetisInitializer, PartitionEvaluator
-    from rl.env_utils import calculate_single_partition_features, get_connectivity_safe_partitions_placeholder
+    from rl.env_utils import calculate_single_partition_features, get_connectivity_safe_partitions
     from models.partition_encoder import PartitionFeatures
 except ImportError as e:
     # 静默警告，改为调试级日志
@@ -266,7 +266,7 @@ class PowerGridPartitioningEnv:
         
         当前使用占位符实现。
         """
-        return get_connectivity_safe_partitions_placeholder(node_id, self.state_manager)
+        return get_connectivity_safe_partitions(node_id, self.state_manager)
 
     def _generate_enhanced_embeddings(self,
                                     node_embeddings: Dict[str, torch.Tensor],

@@ -20,7 +20,7 @@ data:
 # 训练基础配置
 # =====================================================
 training:
-  num_episodes: 100            # 测试用：减少到100个episodes
+  num_episodes: 30             # 基准测试：30个episodes
   max_steps_per_episode: 20    # 每个episode最多20步
   update_interval: 10          # 每10个episode更新一次
   save_interval: 100

@@ -97,30 +97,76 @@ def calculate_single_partition_features(
     )
 
 
-def get_connectivity_safe_partitions_placeholder(node_id: int, state_manager: StateManager) -> List[int]:
+def get_connectivity_safe_partitions(node_id: int, state_manager: StateManager) -> List[int]:
     """
-    [Placeholder] Gets a list of partitions that a node can move to while maintaining connectivity.
+    获取节点可以安全移动到的分区（保证连通性）
     
-    This is a temporary implementation. The final version needs a robust graph traversal check.
+    使用图遍历验证移动后各分区的连通性，确保分区质量。
 
     Args:
-        node_id: The global ID of the node to be moved.
-        state_manager: The state manager instance.
+        node_id: 要移动的节点全局ID
+        state_manager: 状态管理器实例
 
     Returns:
-        A list of valid target partition IDs.
+        有效的目标分区ID列表
     """
-    current_partition_id = state_manager.current_partition[node_id].item()
+    import networkx as nx
     
+    current_partition_id = state_manager.current_partition[node_id].item()
     neighbor_nodes = state_manager.get_neighbors(node_id)
+    
     if neighbor_nodes.numel() == 0:
         return []
-        
-    # Get the partitions of all neighbors
-    neighbor_partitions = torch.unique(state_manager.current_partition[neighbor_nodes])
     
-    # A valid target partition must be a neighbor's partition, not the node's current partition, and not partition 0 (unassigned)
-    valid_partitions = [
-        p.item() for p in neighbor_partitions if p.item() != current_partition_id and p.item() != 0
+    # 获取所有邻居的分区
+    neighbor_partitions = torch.unique(state_manager.current_partition[neighbor_nodes])
+    candidate_partitions = [
+        p.item() for p in neighbor_partitions 
+        if p.item() != current_partition_id and p.item() != 0
     ]
-    return valid_partitions 
+    
+    # 构建图结构进行连通性验证
+    try:
+        # 获取图的边信息
+        edge_index = state_manager.hetero_data['bus', 'connects', 'bus'].edge_index
+        num_nodes = state_manager.hetero_data['bus'].x.size(0)
+        
+        # 创建NetworkX图
+        G = nx.Graph()
+        G.add_nodes_from(range(num_nodes))
+        edges = edge_index.t().cpu().numpy()
+        G.add_edges_from(edges)
+        
+        valid_partitions = []
+        
+        for target_partition in candidate_partitions:
+            # 模拟移动节点
+            temp_partition = state_manager.current_partition.clone()
+            temp_partition[node_id] = target_partition
+            
+            # 验证源分区和目标分区的连通性
+            is_valid = True
+            
+            # 检查源分区连通性（移除节点后）
+            source_nodes = (temp_partition == current_partition_id).nonzero(dim=0).flatten()
+            if len(source_nodes) > 0:
+                source_subgraph = G.subgraph(source_nodes.cpu().numpy())
+                if not nx.is_connected(source_subgraph):
+                    is_valid = False
+            
+            # 检查目标分区连通性（添加节点后）
+            if is_valid:
+                target_nodes = (temp_partition == target_partition).nonzero(dim=0).flatten()
+                if len(target_nodes) > 0:
+                    target_subgraph = G.subgraph(target_nodes.cpu().numpy())
+                    if not nx.is_connected(target_subgraph):
+                        is_valid = False
+            
+            if is_valid:
+                valid_partitions.append(target_partition)
+        
+        return valid_partitions
+        
+    except Exception as e:
+        logger.warning(f"连通性检查失败，回退到基础验证: {e}")
+        return candidate_partitions 

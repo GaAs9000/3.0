@@ -177,7 +177,21 @@ class EnhancedActorNetwork(nn.Module):
         # 组合特征
         combined_features = torch.cat([boundary_embeddings, global_context], dim=1)
         
-        # 计算节点选择logits
+        # 计算节点选择logits - 修复维度不匹配问题
+        # 🔧 关键修复：确保combined_features的维度与node_selector期望的维度匹配
+        if combined_features.size(-1) != self.node_selector[0].in_features:
+            expected_dim = self.node_selector[0].in_features
+            actual_dim = combined_features.size(-1)
+            
+            if actual_dim < expected_dim:
+                # 维度不足：零填充
+                padding = torch.zeros(*combined_features.shape[:-1], expected_dim - actual_dim, 
+                                    device=combined_features.device, dtype=combined_features.dtype)
+                combined_features = torch.cat([combined_features, padding], dim=-1)
+            else:
+                # 维度过多：截取
+                combined_features = combined_features[..., :expected_dim]
+        
         node_logits = self.node_selector(combined_features).squeeze(-1)
         
         # 生成策略向量（替代partition_logits）

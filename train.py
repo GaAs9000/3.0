@@ -72,23 +72,58 @@ def ensure_device_consistency(obj, target_device):
         return obj
 
 # 核心模块导入
+DEPENDENCIES_OK = True
+IMPORT_ERROR = None
+
+# 逐个导入以便定位问题
 try:
     import gymnasium as gym
     from torch_geometric.data import HeteroData
+except ImportError as e:
+    DEPENDENCIES_OK = False
+    IMPORT_ERROR = f"基础库导入失败: {e}"
+
+try:
     from data_processing import PowerGridDataProcessor
+except ImportError as e:
+    print(f"Warning: data_processing导入失败: {e}")
+    PowerGridDataProcessor = None
+
+try:
     from gat import create_production_encoder
+except ImportError as e:
+    print(f"Warning: gat导入失败: {e}")
+    create_production_encoder = None
+
+# RL模块导入（这些是必需的）
+try:
     from rl.environment import PowerGridPartitioningEnv
     from rl.enhanced_environment import EnhancedPowerGridPartitioningEnv, create_enhanced_environment
     from rl.enhanced_agent import create_enhanced_agent
-    from pretrain.gnn_pretrainer import GNNPretrainer, PretrainConfig
     from rl.scale_aware_generator import ScaleAwareSyntheticGenerator, GridGenerationConfig
     from rl.adaptive import AdaptiveDirector
     from rl.unified_director import UnifiedDirector
     from rl.gym_wrapper import PowerGridPartitionGymEnv
-    DEPENDENCIES_OK = True
 except ImportError as e:
     DEPENDENCIES_OK = False
-    IMPORT_ERROR = e
+    IMPORT_ERROR = f"RL模块导入失败: {e}"
+    # 设置默认值以避免NameError
+    ScaleAwareSyntheticGenerator = None
+    GridGenerationConfig = None
+    PowerGridPartitioningEnv = None
+    EnhancedPowerGridPartitioningEnv = None
+    create_enhanced_environment = None
+    create_enhanced_agent = None
+    AdaptiveDirector = None
+    UnifiedDirector = None
+    PowerGridPartitionGymEnv = None
+
+try:
+    from pretrain.gnn_pretrainer import GNNPretrainer, PretrainConfig
+except ImportError as e:
+    print(f"Warning: pretrain模块导入失败: {e}")
+    GNNPretrainer = None
+    PretrainConfig = None
 
 # 全局配置
 torch.autograd.set_detect_anomaly(False)
@@ -283,7 +318,7 @@ class EnvironmentFactory:
     
     @staticmethod
     @handle_exceptions
-    def create_basic_environment(hetero_data: HeteroData, config: Dict[str, Any]) -> EnhancedPowerGridPartitioningEnv:
+    def create_basic_environment(hetero_data: HeteroData, config: Dict[str, Any]) -> 'EnhancedPowerGridPartitioningEnv':
         """创建基础环境（无场景生成）"""
         env_config = config['environment']
 
@@ -325,8 +360,8 @@ class EnvironmentFactory:
     
     @staticmethod
     def create_scenario_environment(mpc: Dict, config: Dict[str, Any], 
-                                  scale_generator: Optional[ScaleAwareSyntheticGenerator] = None,
-                                  gat_encoder: Optional[Any] = None) -> Tuple[EnhancedPowerGridPartitioningEnv, PowerGridPartitionGymEnv]:
+                                  scale_generator: Optional['ScaleAwareSyntheticGenerator'] = None,
+                                  gat_encoder: Optional[Any] = None) -> Tuple['EnhancedPowerGridPartitioningEnv', 'PowerGridPartitionGymEnv']:
         """创建场景生成环境"""
         try:
             # 确保设备配置正确传递
@@ -366,16 +401,15 @@ class AgentFactory:
         """创建增强智能体（双塔架构）"""
         agent_config = config['agent']
 
-        assert env is not None and env.state_manager is not None
-        # 调试：打印状态维度信息
-        logger.info(f"环境状态维度: {env.state_manager.embedding_dim}")
-        logger.info(f"分区数: {env.num_partitions}")
-
+        assert env is not None and env.state_manager is not None, "环境或状态管理器未初始化"
+        
+        # 核心修复：直接将env对象传递给agent的构造函数
+        # 不再传递零散的 state_dim 和 num_partitions
         agent = create_enhanced_agent(
-            state_dim=env.state_manager.embedding_dim,
-            num_partitions=env.num_partitions,
-            config=agent_config,
-            device=str(device) # 确保传递的是字符串
+            env=env,
+            agent_config=agent_config,
+            device=device,
+            use_mixed_precision=config.get('system', {}).get('use_mixed_precision', False)
         )
         
         logger.info("增强智能体创建完成（双塔架构）")
@@ -435,7 +469,7 @@ class AgentFactory:
                     logger.info(f"正在从 {best_model_path} 加载预训练权重...")
                     # 🔧 统一设备处理：确保权重加载到正确设备
                     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-                    checkpoint = torch.load(best_model_path, map_location=device)
+                    checkpoint = torch.load(best_model_path, map_location=device, weights_only=True)
                     
                     # 兼容旧格式和新格式的检查点
                     if 'encoder_state_dict' in checkpoint:
@@ -957,20 +991,65 @@ class BasicTrainer(BaseTrainer):
                     # Episode执行
                     for step in range(max_steps_per_episode):
                         try:
-                            # EnhancedPPOAgent返回4个值，普通PPOAgent返回3个值
+                            # v3.0架构：支持DecisionContext返回
                             result = agent.select_action(state, training=True)
-                            if len(result) == 4:
-                                action, log_prob, value, _ = result  # 忽略embeddings
+                            
+                            # 处理不同的返回格式
+                            if len(result) == 3:
+                                # EnhancedPPOAgent v3.0: (decision_context, value, embeddings)
+                                decision_context_or_action, value, embeddings = result
+                                log_prob = 0.0  # 将从decision_context重新计算
+                            elif len(result) == 4:
+                                # 传统格式: (action, log_prob, value, embeddings)
+                                decision_context_or_action, log_prob, value, embeddings = result
                             else:
-                                action, log_prob, value = result
+                                # 旧格式: (action, log_prob, value)
+                                decision_context_or_action, log_prob, value = result
 
-                            if action is None:
+                            if decision_context_or_action is None:
                                 break
 
-                            next_state, reward, terminated, truncated, info = env.step(action)
+                            # v3.0架构：分离决策存储和动作执行
+                            if hasattr(decision_context_or_action, 'node_embedding'):
+                                # 这是AbstractDecisionContext
+                                decision_context = decision_context_or_action
+                                
+                                # 实体化为具体动作以执行环境step
+                                if hasattr(env, 'materialize_action'):
+                                    concrete_action = env.materialize_action(decision_context)
+                                    if concrete_action is None:
+                                        # 无法实体化，跳过这个step
+                                        logger.warning("无法实体化DecisionContext，跳过step")
+                                        break
+                                else:
+                                    # 回退：从decision_context提取具体动作（调试用）
+                                    node_id = decision_context.node_context.get('node_id', 0)
+                                    available_partitions = decision_context.node_context.get('available_partitions', [1])
+                                    partition_id = available_partitions[0] if available_partitions else 1
+                                    concrete_action = (node_id, partition_id)
+                                    logger.warning("使用回退的动作提取方法")
+                            else:
+                                # 传统的具体动作
+                                concrete_action = decision_context_or_action
+                                decision_context = None
+
+                            # 执行环境step
+                            next_state, reward, terminated, truncated, info = env.step(concrete_action)
                             done = terminated or truncated
 
-                            agent.store_experience(state, action, reward, log_prob, value, done)
+                            # v3.0架构：存储决策上下文而非具体动作
+                            if decision_context is not None:
+                                agent.store_experience(
+                                    state=state, 
+                                    decision_context=decision_context,
+                                    reward=reward, 
+                                    log_prob=log_prob,  # 在PPO中会被重新计算
+                                    value=value, 
+                                    done=done
+                                )
+                            else:
+                                # 向后兼容：存储传统动作
+                                agent.store_experience(state, concrete_action, reward, log_prob, value, done)
                             episode_reward += reward
                             episode_length += 1
                             state = next_state
@@ -1089,17 +1168,50 @@ class TopologyTrainer(BaseTrainer):
                 episode_length = 0
                 episode_info = {}
                 
-                # Episode执行
+                # Episode执行 (v3.0架构支持)
                 for step in range(max_steps_per_episode):
-                    action, log_prob, value, _ = agent.select_action(state, training=True)
+                    # v3.0架构：支持DecisionContext返回
+                    result = agent.select_action(state, training=True)
                     
-                    if action is None:
+                    # 处理不同的返回格式
+                    if len(result) == 3:
+                        # EnhancedPPOAgent v3.0: (decision_context, value, embeddings)
+                        decision_context_or_action, value, embeddings = result
+                        log_prob = 0.0  # 将从decision_context重新计算
+                    elif len(result) == 4:
+                        # 传统格式: (action, log_prob, value, embeddings)
+                        decision_context_or_action, log_prob, value, embeddings = result
+                    
+                    if decision_context_or_action is None:
                         break
                     
-                    next_state, reward, terminated, truncated, info = env.step(action)
+                    # v3.0架构：分离决策存储和动作执行
+                    if hasattr(decision_context_or_action, 'node_embedding'):
+                        # 这是AbstractDecisionContext
+                        decision_context = decision_context_or_action
+                        concrete_action = env.materialize_action(decision_context) if hasattr(env, 'materialize_action') else None
+                        if concrete_action is None:
+                            break
+                    else:
+                        # 传统的具体动作
+                        concrete_action = decision_context_or_action
+                        decision_context = None
+                    
+                    next_state, reward, terminated, truncated, info = env.step(concrete_action)
                     done = terminated or truncated
                     
-                    agent.store_experience(state, action, reward, log_prob, value, done)
+                    # v3.0架构：存储决策上下文而非具体动作
+                    if decision_context is not None:
+                        agent.store_experience(
+                            state=state, 
+                            decision_context=decision_context,
+                            reward=reward, 
+                            log_prob=log_prob,
+                            value=value, 
+                            done=done
+                        )
+                    else:
+                        agent.store_experience(state, concrete_action, reward, log_prob, value, done)
                     episode_reward += reward
                     episode_length += 1
                     state = next_state

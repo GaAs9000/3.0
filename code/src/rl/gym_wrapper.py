@@ -203,6 +203,10 @@ class PowerGridPartitionGymEnv(gym.Env):
             enable_features_cache=True
         )
         
+        # 🔧 重要修复：确保内部环境也有gat_encoder属性
+        if encoder is not None:
+            self.internal_env.gat_encoder = encoder
+        
         # 重置内部环境
         obs_dict, info = self.internal_env.reset(scenario_context=scenario_context)
         

@@ -102,15 +102,15 @@ def main(args):
 
     # 3. Initialize Agent from Checkpoint
     print("🤖 Initializing agent from checkpoint...")
-    # Temporarily set a dummy num_partitions, as the agent.__init__ might still expect it
-    # The new agent architecture doesn't use it for model creation anyway.
-    config['environment']['num_partitions'] = 2 
+    # v3.0架构不再依赖固定的num_partitions值，使用动态分区数
+    if 'num_partitions' in config.get('environment', {}):
+        del config['environment']['num_partitions']
     
-    # We need a dummy environment to get the state dimensions for agent creation
-    dummy_env = EnvironmentFactory.create_basic_environment(hetero_data, config)
+    # 创建环境用于获取状态维度（v3.0架构适配）
+    env = EnvironmentFactory.create_basic_environment(hetero_data, config)
     
-    # Create agent using the factory
-    agent = AgentFactory.create_agent(dummy_env, config, device)
+    # Create agent using the factory (v3.0架构)
+    agent = AgentFactory.create_agent(env, config, device)
     
     # Load state dicts
     agent.actor.load_state_dict(checkpoint['actor_state_dict'])
