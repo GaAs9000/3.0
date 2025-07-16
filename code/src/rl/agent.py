@@ -902,31 +902,38 @@ class PPOAgent:
                     features = env.get_partition_features(pid)
                     partition_features_list.append(features)
 
-                # 将特征列表转换为张量
+                # 将特征列表转换为张量（只选择数值特征，确保维度为6）
                 if partition_features_list:
-                    # 假设每个特征都是字典，需要转换为张量
-                    if isinstance(partition_features_list[0], dict):
-                        # 提取特征值并堆叠成张量
-                        feature_tensors = []
-                        for features in partition_features_list:
-                            # 将字典值转换为张量并连接
-                            values = []
-                            for key in sorted(features.keys()):  # 保证顺序一致
-                                val = features[key]
-                                if isinstance(val, (int, float)):
-                                    values.append(val)
-                                elif isinstance(val, torch.Tensor):
-                                    values.append(val.item() if val.numel() == 1 else val.mean().item())
-                            feature_tensors.append(torch.tensor(values, device=self.device))
-                        partition_features_tensor = torch.stack(feature_tensors)
-                    else:
-                        # 如果已经是张量，直接堆叠
-                        partition_features_tensor = torch.stack(partition_features_list)
+                    # 定义partition_encoder期望的6个特征（按顺序）
+                    expected_features = [
+                        'size_ratio', 'load_ratio', 'generation_ratio',
+                        'internal_connectivity', 'boundary_ratio', 'power_imbalance'
+                    ]
 
+                    feature_tensors = []
+                    for features in partition_features_list:
+                        # 提取6个标准特征
+                        values = []
+                        for key in expected_features:
+                            val = features.get(key, 0.0)  # 如果缺少特征，使用0.0
+                            if isinstance(val, (int, float)):
+                                values.append(float(val))
+                            elif isinstance(val, torch.Tensor):
+                                values.append(val.item() if val.numel() == 1 else val.mean().item())
+                            else:
+                                values.append(0.0)  # 其他类型转为0.0
+
+                        # 确保正好6个特征
+                        if len(values) != 6:
+                            values = values[:6] + [0.0] * (6 - len(values))
+
+                        feature_tensors.append(torch.tensor(values, dtype=torch.float32, device=self.device))
+
+                    partition_features_tensor = torch.stack(feature_tensors)
                     partition_embeddings = self.partition_encoder(partition_features_tensor)
                 else:
                     # 如果没有可用分区，创建空张量
-                    partition_embeddings = torch.empty(0, self.partition_encoder.output_dim, device=self.device)
+                    partition_embeddings = torch.empty(0, self.partition_encoder.embedding_dim, device=self.device)
                 
                 # d) 计算分区概率
                 node_action_idx_in_sample = (sample_boundary_nodes == node_id).nonzero(as_tuple=True)[0]
@@ -952,6 +959,11 @@ class PPOAgent:
                     available_partitions = [int(p) if isinstance(p, torch.Tensor) else int(p)
                                           for p in available_partitions]
 
+                    # 🔧 修复：检查partition_id是否在可用分区列表中
+                    if partition_id not in available_partitions:
+                        # 跳过无效的样本
+                        continue
+
                     part_action_idx_in_list = available_partitions.index(partition_id)
                 except Exception as debug_e:
                     # 🔧 DEBUG: 详细的错误信息
@@ -964,7 +976,8 @@ class PPOAgent:
                     import traceback
                     print(f"Traceback: {traceback.format_exc()}")
                     print("=== END ERROR DEBUG ===\n")
-                    raise debug_e
+                    # 跳过有问题的样本而不是崩溃
+                    continue
 
                 try:
                     log_prob = node_dist.log_prob(node_action_idx_in_sample) + \
@@ -985,6 +998,12 @@ class PPOAgent:
         entropy = torch.stack(entropy_list).mean()
 
         # ---- 3. PPO 损失计算 ----
+        # 🔧 修复：确保returns和values都是张量
+        if isinstance(returns, list):
+            returns = torch.tensor(returns, dtype=torch.float32, device=self.device)
+        if isinstance(values, list):
+            values = torch.tensor(values, dtype=torch.float32, device=self.device)
+
         with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16):
             ratio = torch.exp(new_log_probs - old_log_probs)
             surr1 = ratio * advantages

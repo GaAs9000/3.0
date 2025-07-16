@@ -87,8 +87,20 @@ class EnhancedPowerGridPartitioningEnv(PowerGridPartitioningEnv):
         # 确保node_id是正确的类型
         node_id_int = int(node_id.item()) if torch.is_tensor(node_id) else int(node_id)
 
+        # 🔧 修复：检查节点ID是否在有效范围内，并处理索引偏移
+        max_nodes = self.state_manager.current_partition.size(0)
+        if node_id_int >= max_nodes:
+            # 如果节点ID从1开始，转换为从0开始的索引
+            node_idx = node_id_int - 1
+            if node_idx < 0 or node_idx >= max_nodes:
+                # 如果仍然越界，返回空列表
+                return []
+        else:
+            # 节点ID已经是从0开始的索引
+            node_idx = node_id_int
+
         # 使用更高效的缓存键：只包含节点ID和其当前分区
-        current_assignment = self.state_manager.current_partition[node_id_int]
+        current_assignment = self.state_manager.current_partition[node_idx]
 
         # 获取节点的邻居分区（这是必要的计算）
         try:
@@ -101,11 +113,20 @@ class EnhancedPowerGridPartitioningEnv(PowerGridPartitioningEnv):
 
         neighbor_partitions = set()
         for neighbor in neighbors:
-            # neighbor已经是int类型，可以直接用作索引
-            if neighbor < len(self.state_manager.current_partition):
-                partition = self.state_manager.current_partition[neighbor].item()
-                if partition != current_assignment and partition > 0:
-                    neighbor_partitions.add(partition)
+            # 🔧 修复：处理邻居节点的索引偏移
+            max_nodes = self.state_manager.current_partition.size(0)
+            if neighbor >= max_nodes:
+                # 如果邻居节点ID从1开始，转换为从0开始的索引
+                neighbor_idx = neighbor - 1
+                if neighbor_idx < 0 or neighbor_idx >= max_nodes:
+                    continue  # 跳过无效的邻居节点
+            else:
+                # 邻居节点ID已经是从0开始的索引
+                neighbor_idx = neighbor
+
+            partition = self.state_manager.current_partition[neighbor_idx].item()
+            if partition != current_assignment and partition > 0:
+                neighbor_partitions.add(partition)
 
         # 如果没有邻居分区，返回所有其他分区（简化处理）
         if not neighbor_partitions:

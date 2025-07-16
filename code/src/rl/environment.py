@@ -662,6 +662,7 @@ class PowerGridPartitioningEnv:
         terminated, truncated = self._check_termination()
 
         # 8. 【新增】应用早停逻辑
+        info_bonus = {}  # 🔧 修复：确保info_bonus始终被定义
         if early_stop_triggered and not terminated and not truncated:
             terminated = True
             # 在info中记录早停信息
@@ -671,7 +672,7 @@ class PowerGridPartitioningEnv:
                 'plateau_confidence': early_stop_confidence,
                 'plateau_details': actual_plateau_result if actual_plateau_result else {}
             }
-        
+
         # 9. 【核心改进】区分结束类型，应用终局奖励
         if terminated or truncated:
             # 确定终止类型（考虑早停情况）
